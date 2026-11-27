@@ -92,6 +92,15 @@ Combat test: `--npcs 3 [--npc-ship pi_fighter]` spawns hostile ships with their 
 loadouts. Guns, munitions and shields come from the equipment INIs; shields absorb both
 damage types and rebuild after collapsing. `--fire` holds the trigger in screenshot runs.
 
+NPC pilots fly by the original pilot data (`missions/pilots_population.ini` and
+`pilots_story.ini`, with `inherit`): head-on buzz runs that pass the target and turn
+back, trailing from behind at the trail distance, dodging when the target aims at them,
+breaking away after heavy damage and fleeing when badly hurt, and firing in bursts with
+the gun block's interval, range and accuracy cone. The pilot comes from `npcships.ini`
+for the NPC's ship, or `--npc-pilot <nickname>`. The behaviour is our own reading of
+what those values describe. Wingmen trail from separate spots and hold fire while an
+ally is in the line of fire.
+
 ## Trading and saves (phase 4)
 
 Names come from the game's own text DLLs in the `EXE` folder next to `DATA` (or `--exe`),

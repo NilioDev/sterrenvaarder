@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "game/ai.hpp"
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/hud.hpp"
@@ -40,6 +41,7 @@
 #include "render/renderer.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
+#include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
@@ -72,6 +74,7 @@ struct Args {
     float fov = 0;
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
+    std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
     bool ship_given = false;
@@ -133,6 +136,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--fov") a.fov = std::stof(next());
         else if (k == "--npcs") a.npcs = std::stoi(next());
         else if (k == "--npc-ship") a.npc_ship = next();
+        else if (k == "--npc-pilot") a.npc_pilot = next();
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
         else if (k == "--sim") a.sim = std::stod(next());
@@ -197,6 +201,7 @@ struct NpcShip {
     std::vector<game::Gun> guns;
     Renderer::ModelHandle mesh;
     float burst = 0;  // > 0 firing, < 0 pausing (seconds left)
+    std::optional<game::FighterAi> ai;  // from the original pilot data, when found
 };
 
 struct Explosion {
@@ -390,6 +395,7 @@ struct FlightSession {
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
     const ShipDatabase* shipdb = nullptr;
+    const PilotDb* pilots = nullptr;
     // The room that goes with the open dealer tab (the base's own room names).
     std::string room_for_tab() const {
         switch (trade_tab) {
@@ -762,6 +768,9 @@ struct FlightSession {
         const Loadout* nlo = db.loadout_for_ship(args.npc_ship);
         auto mesh = r.load_model(na->model, na->material_libraries);
         auto nguns = guns_for(db, vfs, *na, nlo);
+        const Pilot* pilot = pilots ? pilots->pilot(pilot_for(vfs, args)) : nullptr;
+        if (pilots && !pilot) SDL_Log("no pilot data for %s; using the simple test AI", args.npc_ship.c_str());
+        else if (pilot) SDL_Log("NPC pilot: %s", pilot->nickname.c_str());
         for (int i = 0; i < args.npcs; ++i) {
             NpcShip n;
             n.name = na->nickname + " " + std::to_string(i + 1);
@@ -777,8 +786,59 @@ struct FlightSession {
             if (nlo) n.body.set_shield(db.shield_of(*nlo));
             n.guns = nguns;
             n.mesh = mesh;
+            if (pilot) {
+                n.ai.emplace(*pilot, static_cast<std::uint32_t>(i + 1));
+                float rx, uy;
+                game::FighterAi::wing_slot(i, rx, uy);
+                n.ai->set_trail_offset(rx, uy);
+            }
             npcs.push_back(std::move(n));
         }
+    }
+
+    // The pilot for test NPCs: --npc-pilot, else the first npcships.ini entry flying this
+    // ship, else the population default for light fighters.
+    static std::string pilot_for(const Vfs& vfs, const Args& args) {
+        if (!args.npc_pilot.empty()) return args.npc_pilot;
+        if (vfs.exists("missions/npcships.ini"))
+            for (auto& sec : parse_ini(vfs.read("missions/npcships.ini"))) {
+                auto a = sec.find("ship_archetype");
+                auto p = sec.find("pilot");
+                if (a && p && !a->values.empty() && !p->values.empty() && iequals(a->values[0].as_string(), args.npc_ship))
+                    return p->values[0].as_string();
+            }
+        return "light_fighter_default";
+    }
+
+    // Original-data AI: the pilot's blocks decide how it flies and shoots.
+    void npc_think_pilot(NpcShip& n, float dt) {
+        if (!body.alive()) { n.input = {}; n.input.throttle = 0.5f; return; }
+        game::AiBody self{n.ship.pos, n.ship.vel, n.ship.orient};
+        game::AiBody tgt{ship.pos, ship.vel, ship.orient};
+        game::AiWeapons w;
+        if (!n.guns.empty() && n.guns[0].arch) w.muzzle_speed = n.guns[0].arch->muzzle_velocity;
+        if (!n.guns.empty() && n.guns[0].munition) w.range = w.muzzle_speed * n.guns[0].munition->lifetime;
+        float hull = n.body.max_hull > 0 ? n.body.hull / n.body.max_hull : 1.f;
+        auto out = n.ai->update(self, tgt, hull, true, w, dt);
+        n.input = out.input;
+        if (out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) world.fire(n.guns, n.body.id, n.ship.pos, n.ship.orient, n.ship.vel, out.aim_dir);
+    }
+
+    // Pilots hold fire while a wingman is in the line of fire, also beyond the target,
+    // where the bolts that miss still fly on.
+    // Allies are checked where they will be when the bolt passes them.
+    bool ally_in_line(const NpcShip& n, Vec3 dir, float muzzle_speed, float range) const {
+        for (auto& o : npcs) {
+            if (&o == &n || !o.body.alive()) continue;
+            DVec3 now = o.ship.pos - n.ship.pos;
+            double t = now.length() / std::max(1.f, muzzle_speed);
+            DVec3 to = now + (o.ship.vel - n.ship.vel) * t;
+            double along = to.x * dir.x + to.y * dir.y + to.z * dir.z;
+            if (along <= 0 || along > range) continue;
+            double off = (to - game::to_d(dir) * along).length();
+            if (off < o.body.radius * 2.0 + along * 0.08) return true;  // the accuracy cone spreads bolts
+        }
+        return false;
     }
 
     // Our own simple pursuit AI: steer towards where the player will be, fire when the
@@ -822,7 +882,8 @@ struct FlightSession {
         for (auto& n : npcs) {
             if (!n.body.alive()) continue;
             world.update_guns(n.guns, dt);
-            npc_think(n);
+            if (n.ai) npc_think_pilot(n, dt);
+            else npc_think(n);
             n.model.update(n.ship, n.input, dt_d);
             n.body.pos = n.ship.pos;
             n.body.update(dt);
@@ -1202,6 +1263,7 @@ int run(const Args& args) {
     GameStrings strings = load_strings(exe_dir, files);
     Factions factions(vfs);
     PetalDb petal(vfs);
+    PilotDb pilots(vfs);
 
     const bool offscreen = !args.screenshot.empty();
     if (offscreen) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
@@ -1241,6 +1303,7 @@ int run(const Args& args) {
             fs->vfs = &vfs;
             fs->petal = &petal;
             fs->shipdb = ships.get();
+            fs->pilots = &pilots;
             auto start = read_new_character(vfs);
             fs->player.credits = start ? start->money : 2000;
             const auto start_rep = initial_rep(exe_dir, factions, start);
@@ -1355,6 +1418,11 @@ int run(const Args& args) {
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
+                if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f", fs->body.hull, fs->body.max_hull, fs->body.shield);
+                for (auto& n : fs->npcs)
+                    SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
+                            !n.body.alive() ? "destroyed" : n.ai ? std::string(game::FighterAi::name(n.ai->state())).c_str() : "test AI",
+                            n.body.hull, n.body.max_hull, (n.ship.pos - fs->ship.pos).length());
             }
             renderer.set_output_format(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
             auto* out = gpu.render_target(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, args.width, args.height);
