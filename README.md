@@ -30,6 +30,29 @@ cmake --build build
 ./build/sterrenvaarder_corpus /path/to/Freelancer/DATA
 ```
 
+## Viewer (phase 2)
+
+Fly through any star system with the new renderer:
+
+```sh
+./build/sterrenvaarder --data /path/to/DATA --system Li01            # window, any size
+./build/sterrenvaarder --data /path/to/DATA --system Li01 \
+    --width 5120 --height 1440 --scale 0.6 --screenshot ny.png       # offscreen 32:9, upscaled
+```
+
+Right mouse = look, WASD/QE = move, Shift = boost, wheel = speed, F = fullscreen.
+Options: `--scale` (render resolution, upscaled with Lanczos + adaptive sharpening),
+`--msaa 1|2|4|8`, `--exposure`, `--normal-strength`, `--lod-scale` (1 = original draw
+distances), `--mod <dir>` (extra data layers, e.g. a mod's DATA folder).
+
+Rendering: SDL3 GPU (Vulkan today; Direct3D 12 and Metal follow via SDL_shadercross),
+HDR forward shading with the system's own lights and ambient, MSAA, bloom, ACES
+tonemapping, derived normal maps, anisotropic filtering. The field of view is Hor+, so
+21:9 and 32:9 screens see more of the scene instead of a stretched image.
+
+Shaders live in `shaders/`; after editing one, run `python3 scripts/compile_shaders.py`
+(needs `glslangValidator`) to refresh the embedded SPIR-V.
+
 ## Tools
 
 ```sh

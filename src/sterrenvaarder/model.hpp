@@ -23,6 +23,11 @@ struct Material {
     Vec3 emissive{0, 0, 0};
     float opacity = 1.0f;
     std::string diffuse_texture, emissive_texture;
+    std::string detail_texture;  // Dm_name / Dm0_name (planets)
+    float detail_tile = 1.0f;    // TileRate / TileRate0
+    Vec3 ambient{1, 1, 1};       // Ac
+    float alpha = 1.0f;          // Alpha (atmospheres)
+    float scale = 1.0f;          // Scale (atmosphere radius factor)
     bool two_sided = false;
     bool alpha_blend = false;
 };
@@ -33,6 +38,7 @@ class MaterialLibrary {
 public:
     void add_from(std::shared_ptr<UtfFile> file);
     const Material* material(std::uint32_t crc) const;
+    const Material* material_by_name(std::string_view name) const;
     const UtfNode* texture(std::string_view name) const;
 
 private:

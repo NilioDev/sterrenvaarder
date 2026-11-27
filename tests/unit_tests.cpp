@@ -2,6 +2,9 @@
 // Unit tests that need no game data. Run: sterrenvaarder_tests
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -91,6 +94,29 @@ static void test_vfs_normalize() {
     CHECK(Vfs::normalize("\\\\data//x") == "data/x");
 }
 
+static void test_vfs_layers() {
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_vfs_test";
+    fs::remove_all(root);
+    fs::create_directories(root / "base" / "SHIPS");
+    fs::create_directories(root / "mod" / "ships");
+    std::ofstream(root / "base" / "SHIPS" / "a.ini") << "[Ship]\nnickname = base\n";
+    std::ofstream(root / "mod" / "ships" / "A.INI") << "broken";
+    Vfs vfs;
+    vfs.mount(root / "base", "base");
+    vfs.mount(root / "mod", "mod");
+    CHECK(vfs.layer_of("ships\\a.ini") == std::optional<std::string>("mod"));
+    CHECK(vfs.resolve_all("ships/a.ini").size() == 2);
+    // The mod's copy fails to load, so the original is used.
+    auto nick = vfs.load_with_fallback("ships/a.ini", [](std::vector<std::uint8_t> b) {
+        auto ini = parse_ini(b);
+        if (ini.empty()) throw std::runtime_error("empty");
+        return ini[0].find("nickname")->values[0].as_string();
+    });
+    CHECK(nick == "base");
+    fs::remove_all(root);
+}
+
 static void test_png() {
     Image img;
     img.width = 2;
@@ -106,6 +132,7 @@ int main() {
     test_bini();
     test_utf();
     test_vfs_normalize();
+    test_vfs_layers();
     test_png();
     std::printf(failures ? "%d test(s) failed\n" : "all unit tests passed\n", failures);
     return failures ? 1 : 0;

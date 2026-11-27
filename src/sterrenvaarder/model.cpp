@@ -24,6 +24,13 @@ void MaterialLibrary::add_from(std::shared_ptr<UtfFile> file) {
             if (auto n = m.child("Oc"); n && n->data.size() >= 4) mat.opacity = n->as<float>();
             if (auto n = m.child("Dt_name")) mat.diffuse_texture = n->as_string();
             if (auto n = m.child("Et_name")) mat.emissive_texture = n->as_string();
+            if (auto n = m.child("Dm_name")) mat.detail_texture = n->as_string();
+            if (auto n = m.child("Dm0_name")) mat.detail_texture = n->as_string();
+            if (auto n = m.child("TileRate"); n && n->data.size() >= 4) mat.detail_tile = n->as<float>();
+            if (auto n = m.child("TileRate0"); n && n->data.size() >= 4) mat.detail_tile = n->as<float>();
+            if (auto n = m.child("Ac"); n && n->data.size() >= 12) mat.ambient = read_vec3(n->data, 0);
+            if (auto n = m.child("Alpha"); n && n->data.size() >= 4) mat.alpha = n->as<float>();
+            if (auto n = m.child("Scale"); n && n->data.size() >= 4) mat.scale = n->as<float>();
             mat.two_sided = mat.type.find("Two") != std::string::npos;
             mat.alpha_blend = mat.type.find("Ot") != std::string::npos || mat.opacity < 1.0f;
             materials_[fl_model_crc(mat.name)] = std::move(mat);
@@ -34,6 +41,8 @@ void MaterialLibrary::add_from(std::shared_ptr<UtfFile> file) {
             if (!t.leaf) textures_[to_lower(t.name)] = &t;
     files_.push_back(std::move(file));
 }
+
+const Material* MaterialLibrary::material_by_name(std::string_view name) const { return material(fl_model_crc(name)); }
 
 const Material* MaterialLibrary::material(std::uint32_t crc) const {
     auto it = materials_.find(crc);
