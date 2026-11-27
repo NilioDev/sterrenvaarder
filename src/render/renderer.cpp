@@ -202,6 +202,15 @@ struct Renderer::Impl {
     SDL_GPUGraphicsPipeline* glow = nullptr;
     SDL_GPUGraphicsPipeline* sprite_add = nullptr;
     SDL_GPUGraphicsPipeline* sprite_alpha = nullptr;
+    SDL_GPUGraphicsPipeline* shield_pipe = nullptr;
+    struct ShieldInstance {
+        DVec3 center;
+        Vec3 ax[3];
+        Vec3 hit;
+        Color3 color;
+        float strength;
+    };
+    std::vector<ShieldInstance> shields;
     SDL_GPUGraphicsPipeline* bloom_down = nullptr;
     SDL_GPUGraphicsPipeline* bloom_up = nullptr;
     SDL_GPUGraphicsPipeline* tonemap = nullptr;
@@ -262,7 +271,7 @@ struct Renderer::Impl {
                 if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
                 p = nullptr;
             }
-        for (auto** p : {&glow, &sprite_add, &sprite_alpha, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe, &hud_wire_pipe}) {
+        for (auto** p : {&glow, &sprite_add, &sprite_alpha, &shield_pipe, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe, &hud_wire_pipe}) {
             if (*p) SDL_ReleaseGPUGraphicsPipeline(d, *p);
             *p = nullptr;
         }
@@ -351,6 +360,7 @@ struct Renderer::Impl {
         glow = make_pipeline("glow.vert", 1, "glow.frag", 1, 1, hdr_fmt, Blend::Additive, false, true, false, samples);
         sprite_add = make_pipeline("sprite.vert", 1, "sprite.frag", 1, 1, hdr_fmt, Blend::Additive, false, true, false, samples);
         sprite_alpha = make_pipeline("sprite.vert", 1, "sprite.frag", 1, 1, hdr_fmt, Blend::Alpha, false, true, false, samples);
+        shield_pipe = make_pipeline("shield.vert", 1, "shield.frag", 0, 1, hdr_fmt, Blend::Additive, false, true, false, samples);
         bloom_down = make_pipeline("fullscreen.vert", 0, "bloom_down.frag", 1, 1, hdr_fmt, Blend::Opaque, false, false, false,
                                    SDL_GPU_SAMPLECOUNT_1);
         bloom_up = make_pipeline("fullscreen.vert", 0, "bloom_up.frag", 1, 1, hdr_fmt, Blend::Additive, false, false, false,
@@ -1181,6 +1191,28 @@ struct Renderer::Impl {
             }
             glows.clear();
         }
+        // Shield bubbles flashing after a hit.
+        if (!shields.empty()) {
+            SDL_BindGPUGraphicsPipeline(pass, shield_pipe);
+            for (auto& sh : shields) {
+                DVec3 rel = sh.center - cam.pos;
+                struct { Mat4 vp; float center[4], ax[3][4]; } vu{};
+                vu.vp = view_proj;
+                vu.center[0] = static_cast<float>(rel.x);
+                vu.center[1] = static_cast<float>(rel.y);
+                vu.center[2] = static_cast<float>(rel.z);
+                for (int k = 0; k < 3; ++k) {
+                    vu.ax[k][0] = sh.ax[k].x;
+                    vu.ax[k][1] = sh.ax[k].y;
+                    vu.ax[k][2] = sh.ax[k].z;
+                }
+                SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof vu);
+                float fu[8] = {sh.color.r, sh.color.g, sh.color.b, sh.strength, sh.hit.x, sh.hit.y, sh.hit.z, 10.f};
+                SDL_PushGPUFragmentUniformData(cmd, 0, fu, sizeof fu);
+                SDL_DrawGPUPrimitives(pass, 32 * 16 * 6, 1, 0, 0);
+            }
+            shields.clear();
+        }
         // Effect particles: farthest first so alpha-blended smoke layers correctly.
         if (!sprites.empty()) {
             std::sort(sprites.begin(), sprites.end(), [&](const SpriteInstance& a, const SpriteInstance& b) {
@@ -1457,6 +1489,11 @@ void Renderer::draw_flat_sprite(DVec3 pos, float size, Vec3 u, Vec3 v, Color3 co
     sp.flat = true;
     sp.ax_u = u;
     sp.ax_v = v;
+}
+
+void Renderer::draw_shield(DVec3 center, Vec3 ax0, Vec3 ax1, Vec3 ax2, Vec3 hit_dir, Color3 color, float strength) {
+    if (strength <= 0) return;
+    impl_->shields.push_back({center, {ax0, ax1, ax2}, hit_dir, color, std::min(strength, 1.f)});
 }
 
 }  // namespace sterrenvaarder::render

@@ -200,6 +200,24 @@ struct AttachedFx {
     game::EffectInstance fx;
 };
 
+// The shield bubble: centre and half-extents a little beyond the box around the ship's
+// hardpoints (leaving out the external camera point, which sits far behind the ship).
+struct ShieldShape { Vec3 center{}, radii{4, 4, 4}; };
+ShieldShape shield_shape_for(const std::vector<Hardpoint>& hps) {
+    Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+    for (auto& h : hps) {
+        if (to_lower(h.name).find("cockpitex") != std::string::npos) continue;
+        lo = {std::min(lo.x, h.position.x), std::min(lo.y, h.position.y), std::min(lo.z, h.position.z)};
+        hi = {std::max(hi.x, h.position.x), std::max(hi.y, h.position.y), std::max(hi.z, h.position.z)};
+    }
+    ShieldShape s;
+    if (lo.x > hi.x) return s;
+    s.center = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    auto r = [](float a, float b) { return std::max(2.5f, (b - a) * 0.5f * 1.2f + 1.f); };
+    s.radii = {r(lo.x, hi.x), r(lo.y, hi.y), r(lo.z, hi.z)};
+    return s;
+}
+
 std::vector<Hardpoint> model_hardpoints(const Vfs& vfs, const ShipArchetype& arch) {
     try {
         return Model::load(vfs.load_with_fallback(arch.model, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }))
@@ -226,6 +244,7 @@ std::vector<AttachedFx> engine_fx_for(const EffectDb& fxdb, const Vfs& vfs, cons
 // smoke) start at one of the hardpoints it names and stay with the ship.
 struct DamageFx {
     std::vector<Hardpoint> hardpoints;
+    Vec3 shield_center{}, shield_radii{4, 4, 4};  // shield bubble in the ship's frame
     std::vector<bool> lit;
     std::vector<AttachedFx> fx;
 };
@@ -444,6 +463,11 @@ struct FlightSession {
     std::vector<AttachedFx> engine_fx;
     DamageFx damage;
     int shield_hits = 0;  // shield hit effects played (reported by screenshot runs)
+    // Shield bubbles flashing after a hit: which ship (combatant id), where (direction in
+    // the ship's frame) and how long ago.
+    struct ShieldFlash { int id; Vec3 local; float age; };
+    std::vector<ShieldFlash> shield_flashes;
+    static constexpr float kShieldFlashTime = 0.35f;
     struct LooseFx {
         DVec3 pos, vel;
         Quat orient;
@@ -951,6 +975,9 @@ struct FlightSession {
             n.mesh = mesh;
             if (fxdb) n.engine_fx = engine_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, fx_seed += 16, pending_textures);
             n.damage.hardpoints = model_hardpoints(vfs, *na);
+            auto nsh = shield_shape_for(n.damage.hardpoints);
+            n.damage.shield_center = nsh.center;
+            n.damage.shield_radii = nsh.radii;
             if (pilot) {
                 n.ai.emplace(*pilot, static_cast<std::uint32_t>(i + 1));
                 float rx, uy;
@@ -1076,6 +1103,11 @@ struct FlightSession {
                                     : (n.y > 0 ? Quat{} : Quat::axis_angle({1, 0, 0}, 3.14159265f));
                 spawn_fx(*shield_fx, p.pos, {}, q);
                 ++shield_hits;
+                const game::ShipState* hs = t.id == 0 ? &ship : nullptr;
+                for (auto& nn : npcs)
+                    if (nn.body.id == t.id) hs = &nn.ship;
+                if (hs) shield_flashes.push_back({t.id, hs->orient.conjugate().rotate(n), 0});
+                if (shield_flashes.size() > 64) shield_flashes.erase(shield_flashes.begin());
             } else if (p.munition && fxdb && fxdb->vis(p.munition->hit_effect)) {
                 spawn_fx(p.munition->hit_effect, p.pos, {}, Quat{});
             } else {
@@ -1094,6 +1126,8 @@ struct FlightSession {
             }
         for (auto& e : explosions) e.age += dt;
         std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
+        for (auto& f : shield_flashes) f.age += dt;
+        std::erase_if(shield_flashes, [](const ShieldFlash& f) { return f.age > kShieldFlashTime; });
         for (auto& f : flashes) f.age += dt;
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
         update_effects(dt_d);
@@ -1116,6 +1150,25 @@ struct FlightSession {
             float t = e.age / 2.0f;
             r.draw_glow(e.pos, e.size * (0.3f + t * 1.4f), {1.f, 0.55f, 0.2f}, 8.f * (1.f - t) * (1.f - t));
             r.draw_glow(e.pos, e.size * 0.4f * (1.f + t), {1.f, 0.9f, 0.7f}, 12.f * std::max(0.f, 1.f - t * 3.f));
+        }
+        for (auto& f : shield_flashes) {
+            const game::ShipState* hs = f.id == 0 ? &ship : nullptr;
+            const DamageFx* d = f.id == 0 ? &damage : nullptr;
+            for (auto& nn : npcs)
+                if (nn.body.id == f.id && nn.body.alive()) {
+                    hs = &nn.ship;
+                    d = &nn.damage;
+                }
+            if (!hs || !d) continue;
+            Vec3 rr = d->shield_radii;
+            float k = 1.f - f.age / kShieldFlashTime;
+            auto axis = [&](Vec3 a, float len) {
+                Vec3 v = hs->orient.rotate(a);
+                return Vec3{v.x * len, v.y * len, v.z * len};
+            };
+            DVec3 centre = hs->pos + game::to_d(hs->orient.rotate(d->shield_center));
+            r.draw_shield(centre, axis({1, 0, 0}, rr.x), axis({0, 1, 0}, rr.y), axis({0, 0, 1}, rr.z), f.local,
+                          {0.45f, 0.65f, 1.f}, 0.6f * k * k);
         }
         draw_effects(r);
     }
@@ -1258,6 +1311,9 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
     if (fs.fxdb) fs.engine_fx = engine_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), fs.fx_seed += 16, fs.pending_textures);
     fs.damage = {};
     fs.damage.hardpoints = model_hardpoints(vfs, *arch);
+    auto psh = shield_shape_for(fs.damage.hardpoints);
+    fs.damage.shield_center = psh.center;
+    fs.damage.shield_radii = psh.radii;
     fs.player.ship = arch->nickname;
     fs.player.hold_size = arch->hold_size;
     fs.npcs.clear();
