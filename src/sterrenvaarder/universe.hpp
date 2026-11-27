@@ -56,6 +56,7 @@ struct SystemLight {
     Vec3 pos;
     Color3 color{1, 1, 1};
     float range = 0;
+    Vec3 atten{1, 0, 0};  // constant, linear, quadratic
     bool directional = false;
 };
 

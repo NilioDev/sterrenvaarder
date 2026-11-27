@@ -114,8 +114,14 @@ than the player has.
 Factions and how they see each other come from `InitialWorld.ini`; a new player starts
 with the `house` standings of `EXE/MPNewCharacter.FL`. Contacts are green when friendly
 (standing 0.6 or more) and red when hostile (-0.6 or less), and hostile bases refuse docking. F5 saves and F9 loads the quick save
-(in the user's preferences folder, or `--save-file`). Saves are small text INI files. The
-base screen is a stand-in until the original base rooms and their interface are in.
+(in the user's preferences folder, or `--save-file`). Saves are small text INI files.
+
+Docked, the dealer screen sits in front of the base's own room: the base file named in
+`universe.ini` lists the rooms, and each room's `.thn` scene scripts (precompiled Lua 3.2,
+read as data and never run) give the set model, its lights and the camera. Rooms are lit
+as the original lit them: the scene's ambient, each light's attenuation, and the
+material's emissive colour adding to the light on the texture, clamped to full brightness.
+The dealer screen itself is still our own until the original base interface is in.
 
 ## Tools
 

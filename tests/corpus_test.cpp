@@ -9,6 +9,7 @@
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/texture.hpp"
+#include "sterrenvaarder/thn.hpp"
 #include "sterrenvaarder/utf.hpp"
 #include "sterrenvaarder/vfs.hpp"
 
@@ -32,7 +33,10 @@ int main(int argc, char** argv) {
         auto data = vfs.read(path);
         std::string kind;
         try {
-            if (is_bini(data) || path.ends_with(".ini")) {
+            if (path.ends_with(".thn")) {
+                kind = "thn";
+                ThnScript::parse(data);
+            } else if (is_bini(data) || path.ends_with(".ini")) {
                 kind = is_bini(data) ? "bini" : "text-ini";
                 parse_ini(data);
             } else if (UtfFile::is_utf(data)) {

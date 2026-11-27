@@ -112,6 +112,7 @@ struct FragmentUniforms {
     float diffuse[4], emissive[4], ambient[4], params[4], params2[4];
     float light_pos[kMaxLights][4];
     float light_color[kMaxLights][4];
+    float light_atten[kMaxLights][4];
 };
 
 std::uint32_t pack_color(float r, float g, float b, float a) {
@@ -905,7 +906,8 @@ struct Renderer::Impl {
     }
 
     void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::uint32_t out_w, std::uint32_t out_h, const Camera& cam,
-                const RenderSettings& s, double time, const StarSystem& sys, Stats& stats, const HudBatch* hud) {
+                const RenderSettings& s, double time, const StarSystem& sys, Stats& stats, const HudBatch* hud,
+                const RoomLighting* room) {
         std::uint32_t w = std::max(16u, static_cast<std::uint32_t>(out_w * std::clamp(s.render_scale, 0.25f, 2.0f)));
         std::uint32_t h = std::max(16u, static_cast<std::uint32_t>(out_h * std::clamp(s.render_scale, 0.25f, 2.0f)));
         ensure_targets(w, h, out_w, out_h, s.msaa);
@@ -913,18 +915,20 @@ struct Renderer::Impl {
         std::uint32_t hud_verts = upload_hud(cmd, hud);
 
         const float aspect = static_cast<float>(out_w) / static_cast<float>(out_h);
-        Mat4 proj = Mat4::perspective_reverse_z(cam.fov_y, aspect, 0.5f);
+        Mat4 proj = Mat4::perspective_reverse_z(cam.fov_y, aspect, std::max(0.01f, cam.near_plane));
         Vec3 fwd = cam.forward(), right = cam.right(), up = cam.up();
         Mat4 view = Mat4::view_rotation(right, up, fwd);
         Mat4 view_proj = proj * view;
 
         FragmentUniforms base{};
-        base.ambient[0] = sys.ambient.r;
-        base.ambient[1] = sys.ambient.g;
-        base.ambient[2] = sys.ambient.b;
+        Color3 amb = room ? room->ambient : sys.ambient;
+        base.ambient[0] = amb.r;
+        base.ambient[1] = amb.g;
+        base.ambient[2] = amb.b;
+        base.ambient[3] = room ? 1.f : 0.f;
         // Lights: nearest first.
         std::vector<const SystemLight*> lights;
-        for (auto& l : sys.lights) lights.push_back(&l);
+        for (auto& l : room ? room->lights : sys.lights) lights.push_back(&l);
         auto light_dist = [&](const SystemLight* l) { return (DVec3{l->pos.x, l->pos.y, l->pos.z} - cam.pos).length(); };
         std::sort(lights.begin(), lights.end(), [&](auto* a, auto* b) { return light_dist(a) < light_dist(b); });
         for (std::size_t i = 0; i < lights.size() && i < kMaxLights; ++i) {
@@ -937,11 +941,15 @@ struct Renderer::Impl {
             base.light_color[i][1] = lights[i]->color.g;
             base.light_color[i][2] = lights[i]->color.b;
             base.light_color[i][3] = 1;
+            base.light_atten[i][0] = lights[i]->atten.x;
+            base.light_atten[i][1] = lights[i]->atten.y;
+            base.light_atten[i][2] = lights[i]->atten.z;
         }
 
         // ---- scene pass
         SDL_GPUColorTargetInfo ct{};
-        ct.clear_color = {sys.space_color.r, sys.space_color.g, sys.space_color.b, 1};
+        Color3 clear = room ? room->clear : sys.space_color;
+        ct.clear_color = {clear.r, clear.g, clear.b, 1};
         ct.load_op = SDL_GPU_LOADOP_CLEAR;
         if (hdr_msaa) {
             ct.texture = hdr_msaa;
@@ -977,12 +985,13 @@ struct Renderer::Impl {
 
         // Background layers: centred on the camera, scaled to stay well inside the far range.
         for (auto* bgm : background)
-            for (auto& part : bgm->parts)
+            if (!room) for (auto& part : bgm->parts)
                 if (!part.lods.empty())
                     for (auto& dr : part.lods[0].draws) draw_range(bgm, dr, Mat4::scale(1000.f) * part.local, true, Blend::Opaque, false);
 
         std::vector<PendingDraw> transparent;
         for (auto& so : objects) {
+            if (room) break;
             DVec3 opos{so.obj->pos.x, so.obj->pos.y, so.obj->pos.z};
             DVec3 rel = opos - cam.pos;
             float dist = static_cast<float>(rel.length());
@@ -1027,7 +1036,7 @@ struct Renderer::Impl {
         for (auto& t : transparent) draw_range(t.model, *t.range, t.world, false, Blend::Opaque, false);
 
         // Star glows.
-        if (star_lib) {
+        if (star_lib && !room) {
             SDL_BindGPUGraphicsPipeline(pass, glow);
             for (auto& so : objects) {
                 for (const StarGlow* g : {so.glow, so.center}) {
@@ -1197,7 +1206,7 @@ void Renderer::load_system(std::string_view nickname) {
 
 void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::uint32_t out_w, std::uint32_t out_h,
                       const Camera& cam, const RenderSettings& s, double time_seconds) {
-    impl_->render(cmd, target, out_w, out_h, cam, s, time_seconds, system_, stats_, hud_);
+    impl_->render(cmd, target, out_w, out_h, cam, s, time_seconds, system_, stats_, hud_, room_);
     hud_ = nullptr;
 }
 
