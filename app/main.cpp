@@ -40,6 +40,7 @@
 #include "render/renderer.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
+#include "sterrenvaarder/thn.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
 #include "sterrenvaarder/png.hpp"
@@ -203,6 +204,105 @@ struct Explosion {
     float age = 0, size = 30;
 };
 
+// The original base room behind the base screen: the set, props and lights from the
+// room's scene scripts, seen through the room's own camera.
+struct RoomView {
+    std::optional<BaseRooms> rooms;
+    std::string base, current;
+    struct Model { Renderer::ModelHandle mesh; DVec3 pos; Mat4 rot; };
+    std::vector<Model> models;
+    RoomLighting lighting;
+    Camera cam;
+    bool active() const { return !models.empty(); }
+
+    void clear() {
+        rooms.reset();
+        base.clear();
+        current.clear();
+        models.clear();
+    }
+
+    void load_base(const Vfs& vfs, const std::string& b) {
+        clear();
+        base = b;
+        try {
+            rooms = BaseRooms::load(vfs, base_file_of(vfs, b));
+        } catch (const std::exception& e) {
+            SDL_Log("base rooms of %s: %s", b.c_str(), e.what());
+        }
+    }
+
+    // Shows a room (by nickname); falls back to the base's start room.
+    void show(const Vfs& vfs, const PetalDb& petal, Renderer& r, std::string_view wanted) {
+        if (!rooms) return;
+        const RoomInfo* info = rooms->room(wanted);
+        if (!info) info = rooms->room(rooms->start_room);
+        if (!info || iequals(info->nickname, current)) return;
+        current = info->nickname;
+        models.clear();
+        lighting = {};
+        std::vector<std::string> scripts{info->set_script};
+        scripts.insert(scripts.end(), info->scenes.begin(), info->scenes.end());
+        bool have_cam = false;
+        Color3 light_amb{0, 0, 0};  // lights add their ambient term to the scene's
+        for (auto& path : scripts) {
+            if (path.empty() || !vfs.exists(path)) continue;
+            ThnScript s;
+            try {
+                s = ThnScript::parse(vfs.read(path));
+            } catch (const std::exception& e) {
+                SDL_Log("%s: %s", path.c_str(), e.what());
+                continue;
+            }
+            for (auto& e : s.entities) {
+                if (e.type == "SCENE" && (lighting.ambient.r + lighting.ambient.g + lighting.ambient.b) == 0) lighting.ambient = e.ambient;
+                if (e.type == "LIGHT" && e.light_on) {
+                    SystemLight l;
+                    l.nickname = e.name;
+                    l.pos = e.pos;
+                    l.color = e.diffuse;
+                    l.range = e.range > 0 ? e.range : 50.f;
+                    l.atten = e.atten;
+                    l.directional = e.light_type == "L_DIRECT";
+                    light_amb.r += e.light_ambient.r;
+                    light_amb.g += e.light_ambient.g;
+                    light_amb.b += e.light_ambient.b;
+                    lighting.lights.push_back(l);
+                }
+                if (e.type == "CAMERA" && !have_cam && iequals(e.name, info->camera)) {
+                    have_cam = true;
+                    cam = Camera{};
+                    cam.pos = {e.pos.x, e.pos.y, e.pos.z};
+                    cam.set_basis(e.forward(), e.up());
+                    float aspect = e.hvaspect > 0 ? e.hvaspect : 4.f / 3.f;
+                    cam.fov_y = 2.f * std::atan(std::tan(e.fovh * 3.14159265f / 360.f) / aspect);
+                    cam.near_plane = e.near_plane > 0 ? e.near_plane : 0.2f;
+                }
+                if ((e.type == "COMPOUND" || e.type == "PROP") && e.flags.find("HIDDEN") == std::string::npos) {
+                    const std::string* file = petal.model(e.template_name);
+                    if (!file) continue;
+                    try {
+                        auto h = r.load_model(*file, {});
+                        if (h) models.push_back({h, {e.pos.x, e.pos.y, e.pos.z}, Mat4::from_rows3(e.orient)});
+                    } catch (const std::exception& ex) {
+                        SDL_Log("room model %s: %s", file->c_str(), ex.what());
+                    }
+                }
+            }
+        }
+        lighting.ambient.r += light_amb.r;
+        lighting.ambient.g += light_amb.g;
+        lighting.ambient.b += light_amb.b;
+        SDL_Log("room %s/%s: %zu models, %zu lights, camera %s", base.c_str(), current.c_str(), models.size(),
+                lighting.lights.size(), have_cam ? info->camera.c_str() : "(none)");
+        if (!have_cam) models.clear();  // nothing sensible to show
+    }
+
+    void draw(Renderer& r) const {
+        for (auto& m : models) r.draw_model(m.mesh, m.pos, m.rot, {});
+    }
+};
+
 // The player's ship, its flight model, the chase camera and the HUD state.
 struct FlightSession {
     const ShipArchetype* arch = nullptr;
@@ -242,6 +342,18 @@ struct FlightSession {
     const GameStrings* strings = nullptr;
     const Factions* factions = nullptr;
     game::PlayerState player;
+    RoomView room;
+    const Vfs* vfs = nullptr;
+    const PetalDb* petal = nullptr;
+    // The room that goes with the open dealer tab (the base's own room names).
+    std::string room_for_tab() const {
+        switch (trade_tab) {
+            case Tab::Commodities: return "Trader";
+            case Tab::Equipment: return "Equipment";
+            case Tab::Ships: return "ShipDealer";
+        }
+        return {};
+    }
     std::string notice;  // short message on the status line (e.g. docking refused)
     float notice_time = 0;
     int trade_sel = 0;
@@ -988,8 +1100,20 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
                   const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, const game::HudConfig& hud_cfg,
                   float cursor_x, float cursor_y, HudBatch& hud) {
     (void)gpu;
+    const Camera* view = &cam;
+    renderer.set_room(nullptr);
+    if (fs && fs->docked() && fs->vfs && fs->petal) {
+        if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
+        fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_for_tab());
+    }
+    bool in_room = fs && fs->docked() && fs->room.active();
+    if (in_room) {
+        renderer.set_room(&fs->room.lighting);
+        fs->room.draw(renderer);
+        view = &fs->room.cam;
+    }
     if (fs) {
-        fs->draw(renderer);
+        if (!in_room) fs->draw(renderer);
         hud.clear();
         auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
         // Docked: only the base screen, as the original hides the flight HUD at bases.
@@ -1001,7 +1125,8 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
                 renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
-    renderer.render(cmd, target, w, h, cam, settings, time);
+    renderer.render(cmd, target, w, h, *view, settings, time);
+    renderer.set_room(nullptr);
 }
 
 int run(const Args& args) {
@@ -1012,6 +1137,7 @@ int run(const Args& args) {
     const auto exe_dir = find_exe_dir(args);
     GameStrings strings = load_strings(exe_dir, files);
     Factions factions(vfs);
+    PetalDb petal(vfs);
 
     const bool offscreen = !args.screenshot.empty();
     if (offscreen) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
@@ -1048,6 +1174,8 @@ int run(const Args& args) {
             fs->econ = econ.get();
             fs->strings = &strings;
             fs->factions = &factions;
+            fs->vfs = &vfs;
+            fs->petal = &petal;
             auto start = read_new_character(vfs);
             fs->player.credits = start ? start->money : 2000;
             const auto start_rep = initial_rep(exe_dir, factions, start);

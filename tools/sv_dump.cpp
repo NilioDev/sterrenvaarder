@@ -2,6 +2,7 @@
 // sv-dump: print any Freelancer INI (binary or text) as text, or a UTF file as a tree.
 //   sv-dump <file>            file on disk
 //   sv-dump --data <DATA> <game path>
+// A compiled Lua scene script (.thn) prints its globals as Lua text.
 // A resource DLL (.dll) prints its strings as "id<TAB>text" and its infocard ids.
 #include <algorithm>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <string>
 
 #include "sterrenvaarder/ini.hpp"
+#include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/utf.hpp"
 #include "sterrenvaarder/vfs.hpp"
@@ -44,6 +46,10 @@ int main(int argc, char** argv) {
             std::sort(ids.begin(), ids.end());
             for (auto id : ids) std::cout << id << '\t' << res.strings[id] << '\n';
             std::cout << "# " << res.infocards.size() << " infocards\n";
+            return 0;
+        }
+        if (data.size() > 5 && data[0] == 0x1B && data[1] == 'L' && data[2] == 'u' && data[3] == 'a') {
+            for (auto& [name, v] : LuaChunk::parse(data).globals) std::cout << name << " = " << to_lua_text(v) << "\n";
             return 0;
         }
         if (UtfFile::is_utf(data)) print_tree(UtfFile::parse(std::move(data))->root(), 0);

@@ -16,11 +16,12 @@ layout(set = 2, binding = 3) uniform sampler2D t_detail;
 layout(set = 3, binding = 0) uniform FragmentUniforms {
     vec4 diffuse;      // rgb = Dc, a = opacity
     vec4 emissive;     // rgb = Ec, a = 1 if Et present
-    vec4 ambient;      // rgb = system ambient
+    vec4 ambient;      // rgb = system ambient, w = 1: clamp light sum to 1 (fixed-function style, rooms)
     vec4 params;       // x = normal strength, y = use vertex color, z = unlit, w = detail tile rate
     vec4 params2;      // x = has detail, y = specular strength, z = exposure scale for unlit, w = sphere uv mode
     vec4 light_pos[MAX_LIGHTS];    // xyz camera-relative, w = range
     vec4 light_color[MAX_LIGHTS];  // rgb, w = 1 if active
+    vec4 light_atten[MAX_LIGHTS];  // xyz = constant, linear, quadratic attenuation
 } u;
 
 layout(location = 0) out vec4 out_color;
@@ -53,7 +54,10 @@ void main() {
         float rim = 1.0 - abs(dot(normalize(v_normal), view));
         out_alpha = clamp(u.diffuse.a * (0.15 + 1.6 * pow(rim, 2.5)), 0.0, 1.0);
     }
-    vec3 lit = u.ambient.rgb * base.rgb;
+    // Material emissive colour (Ec) adds to the light falling on the texture, as in the
+    // original fixed-function lighting; an emissive texture (Et) glows on its own.
+    vec3 light_sum = u.ambient.rgb + (u.emissive.a > 0.5 ? vec3(0.0) : u.emissive.rgb);
+    vec3 spec_sum = vec3(0.0);
     for (int i = 0; i < MAX_LIGHTS; ++i) {
         if (u.light_color[i].w < 0.5) continue;
         vec3 to_light = u.light_pos[i].xyz - v_pos;
@@ -61,13 +65,16 @@ void main() {
         vec3 l = to_light / max(dist, 1e-3);
         float range = u.light_pos[i].w;
         float fade = range > 0.0 ? clamp((range - dist) / (range * 0.1), 0.0, 1.0) : 1.0;
+        vec3 a = u.light_atten[i].xyz;
+        fade /= max(a.x + a.y * dist + a.z * dist * dist, 1e-3);
         float ndl = max(dot(n, l), 0.0);
         vec3 h = normalize(l + view);
         float spec = pow(max(dot(n, h), 0.0), 32.0) * u.params2.y;
-        lit += (base.rgb * ndl + vec3(spec) * ndl) * u.light_color[i].rgb * fade;
+        light_sum += ndl * u.light_color[i].rgb * fade;
+        spec_sum += spec * ndl * u.light_color[i].rgb * fade;
     }
-    vec3 emit = u.emissive.rgb;
-    if (u.emissive.a > 0.5) emit = texture(t_emissive, uv).rgb;
-    lit += emit;
+    if (u.ambient.w > 0.5) light_sum = min(light_sum, vec3(1.0));
+    vec3 lit = base.rgb * light_sum + spec_sum;
+    if (u.emissive.a > 0.5) lit += texture(t_emissive, uv).rgb;
     out_color = vec4(lit, out_alpha);
 }

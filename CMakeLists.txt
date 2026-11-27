@@ -27,6 +27,8 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/resources.cpp
   src/sterrenvaarder/economy.cpp
   src/sterrenvaarder/factions.cpp
+  src/sterrenvaarder/lua32.cpp
+  src/sterrenvaarder/thn.cpp
 )
 target_include_directories(sterrenvaarder_data PUBLIC src)
 

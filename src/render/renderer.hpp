@@ -22,6 +22,7 @@ struct Camera {
     DVec3 pos;
     float yaw = 0, pitch = 0;  // radians; yaw 0 looks down -Z
     float fov_y = 0.80f;       // vertical FOV (Hor+: wider screens see more, not less)
+    float near_plane = 0.5f;   // metres (rooms use the scene camera's own)
     // Full orientation (e.g. a chase camera that rolls with the ship); overrides yaw/pitch.
     bool has_basis = false;
     Vec3 basis_forward{0, 0, -1}, basis_up{0, 1, 0};
@@ -42,6 +43,14 @@ struct RenderSettings {
     float bloom = 0.06f;
     float normal_strength = 1.0f;  // derived normal maps (0 = off)
     float lod_scale = 1.0f;        // 1 = original draw distances; > 1 extends them
+};
+
+// Lighting for an interior scene (base rooms): replaces the star system's sky, objects
+// and lights while it is set; models are then drawn with draw_model.
+struct RoomLighting {
+    Color3 ambient;
+    std::vector<SystemLight> lights;
+    Color3 clear{0, 0, 0};
 };
 
 class Renderer {
@@ -73,6 +82,7 @@ public:
     void draw_hud_model(ModelHandle m, float px, float py, float pixels_per_unit, HudColor tint = {});
     // Optional overlay for the next render() call, in output pixels.
     void set_hud(const HudBatch* hud) { hud_ = hud; }
+    void set_room(const RoomLighting* room) { room_ = room; }  // nullptr = space
 
     struct Stats { int objects_drawn = 0, draw_calls = 0, triangles = 0, culled_by_lod = 0; };
     const Stats& stats() const { return stats_; }
@@ -81,6 +91,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     StarSystem system_;
+    const RoomLighting* room_ = nullptr;
     const HudBatch* hud_ = nullptr;
     Stats stats_;
 };

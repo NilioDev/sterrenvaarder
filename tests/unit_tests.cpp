@@ -25,7 +25,9 @@ static int failures = 0;
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
+#include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/resources.hpp"
+#include "sterrenvaarder/thn.hpp"
 
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
@@ -438,7 +440,77 @@ static void test_factions() {
     fs::remove_all(root);
 }
 
+// Builds a Lua 3.2 chunk by hand: header, main function with the given constants and code.
+static std::vector<std::uint8_t> lua_chunk(const std::vector<std::string>& consts, std::vector<std::uint8_t> code) {
+    std::vector<std::uint8_t> b{0x1B, 'L', 'u', 'a', 0x32, 0};
+    auto be32 = [&](std::uint32_t v) { for (int i = 3; i >= 0; --i) b.push_back((v >> (8 * i)) & 0xFF); };
+    auto str = [&](const std::string& t) { be32(static_cast<std::uint32_t>(t.size() + 1)); b.insert(b.end(), t.begin(), t.end()); b.push_back(0); };
+    be32(0);
+    str("test");
+    code.insert(code.begin(), {8, 0});  // stack size, parameter count
+    be32(static_cast<std::uint32_t>(code.size()));
+    b.insert(b.end(), code.begin(), code.end());
+    be32(0);  // locals
+    be32(static_cast<std::uint32_t>(consts.size()));
+    for (auto& c : consts) { b.push_back(2); str(c); }
+    return b;
+}
+
+static void test_thn() {
+    enum : std::uint8_t { END = 0, NUM = 0x07, NEG = 0x09, K = 0x0B, GET = 0x0F, TABLE = 0x16, SETG = 0x19, LIST = 0x1D, MAP = 0x1E };
+    // entities = { { entity_name = "Cam", type = CAMERA, cameraprops = { fovh = 40 },
+    //                spatialprops = { pos = { 1, -2, 3 } } } }  duration = 5
+    std::vector<std::string> k{"entities", "entity_name", "Cam", "type", "CAMERA", "duration", "cameraprops", "fovh", "spatialprops", "pos"};
+    auto bytes = lua_chunk(k, {TABLE, 1,
+                               TABLE, 4,
+                               K, 1, K, 2,
+                               K, 3, GET, 4,
+                               K, 6, TABLE, 1, K, 7, NUM, 40, MAP, 0,
+                               K, 8, TABLE, 1, K, 9, TABLE, 3, NUM, 1, NEG, 2, NUM, 3, LIST, 0, 3, MAP, 0,
+                               MAP, 3,
+                               LIST, 0, 1,
+                               SETG, 0,
+                               NUM, 5, SETG, 5,
+                               END});
+    auto chunk = LuaChunk::parse(bytes);
+    const LuaValue& ents = chunk.global("entities");
+    CHECK(ents.size() == 1 && ents[1]["entity_name"].str() == "Cam" && ents[1]["type"].is_symbol());
+    CHECK(ents[1]["spatialprops"]["pos"][2].num() == -2);
+    auto thn = ThnScript::parse(bytes);
+    CHECK(thn.duration == 5 && thn.entities.size() == 1);
+    auto cam = thn.entity("cam");
+    CHECK(cam && cam->type == "CAMERA" && cam->fovh == 40 && cam->pos.x == 1 && cam->pos.y == -2 && cam->pos.z == 3);
+
+    // Anything beyond table building is refused instead of run.
+    bool threw = false;
+    try { LuaChunk::parse(lua_chunk({}, {0x40, END})); } catch (const FormatError&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { LuaChunk::parse(lua_chunk({}, {TABLE, 1})); } catch (const FormatError&) { threw = true; }
+    CHECK(threw);
+
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_room_test";
+    fs::remove_all(root);
+    fs::create_directories(root / "universe");
+    std::ofstream(root / "universe/universe.ini") << "[Base]\nnickname = X_Base\nfile = universe\\x_base.ini\n";
+    std::ofstream(root / "universe/x_base.ini") << "[BaseInfo]\nstart_room = Deck\n[Room]\nnickname = Deck\nfile = universe\\deck.ini\n"
+                                                   "[Room]\nnickname = Gone\nfile = universe\\missing.ini\n";
+    std::ofstream(root / "universe/deck.ini") << "[Room_Info]\nset_script = s\\deck.thn\nscene = all, ambient, s\\amb.thn\n"
+                                                 "[Camera]\nname = Camera_0\n[Hotspot]\nname = IDS_HOTSPOT_BAR\nbehavior = ExitDoor\nroom_switch = Bar\n";
+    Vfs vfs;
+    vfs.mount(root, "base");
+    auto file = base_file_of(vfs, "x_base");
+    auto rooms = BaseRooms::load(vfs, file);
+    CHECK(rooms && rooms->start_room == "Deck" && rooms->rooms.size() == 1);
+    auto deck = rooms ? rooms->room("deck") : nullptr;
+    CHECK(deck && deck->camera == "Camera_0" && deck->scenes.size() == 1 && deck->hotspots.size() == 1 &&
+          deck->hotspots[0].room_switch == "Bar");
+    fs::remove_all(root);
+}
+
 int main() {
+    test_thn();
     test_flight();
     test_lanes();
     test_combat();
