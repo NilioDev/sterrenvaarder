@@ -40,6 +40,14 @@ struct SystemObject {
     Vec3 rotate_deg;  // Euler angles in degrees, as in the INI
     Vec3 spin;
     float atmosphere_range = 0;
+    int ids_name = 0;                  // string id (resources); 0 = none
+    std::string base, dock_with;       // dockable base (stations, planets)
+    std::string next_ring, prev_ring;  // trade lane chain
+    // Jump gates and holes: target system, object there, tunnel effect.
+    std::string goto_system, goto_object, goto_tunnel;
+    bool is_tradelane() const { return !next_ring.empty() || !prev_ring.empty(); }
+    bool is_jump() const { return !goto_system.empty(); }
+    bool dockable() const { return !dock_with.empty() || !base.empty(); }
 };
 
 struct SystemLight {

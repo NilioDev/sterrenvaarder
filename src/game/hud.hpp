@@ -87,6 +87,7 @@ struct HudState {
     bool mouse_flight = true;
     float cursor_x = 0, cursor_y = 0;  // pixels
     std::string system_name;
+    std::string status;  // navigation state ("TRADE LANE", "DOCKED: ...", prompts)
     std::vector<HudContact> contacts;  // nearest first
 };
 
