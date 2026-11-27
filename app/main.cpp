@@ -282,6 +282,7 @@ struct NpcShip {
     std::optional<game::FighterAi> ai;  // from the original pilot data, when found
     std::vector<AttachedFx> engine_fx, trail_fx;
     DamageFx damage;
+    std::vector<Vec3> part_offsets;  // where each model part sits, for breaking up into wreckage
 };
 
 struct Explosion {
@@ -494,6 +495,63 @@ struct FlightSession {
         float age = 0;
     };
     std::vector<LooseFx> loose_fx;
+    // Wreckage: a dead ship breaks into its model parts, which tumble away trailing their
+    // debris type's smoke and end in its small explosion ([explosion] debris_type, [Debris]).
+    struct Wreck {
+        Renderer::ModelHandle mesh;
+        int part = 0;
+        const std::vector<float>* lod_ranges = nullptr;
+        DVec3 pos, vel;
+        Quat orient;
+        Vec3 spin_axis{0, 1, 0};
+        float spin = 0, age = 0, life = 2;
+        std::optional<game::EffectInstance> trail;
+        std::string end_fx;
+    };
+    std::vector<Wreck> wrecks;
+    float rnd() { return static_cast<float>((fx_seed++ * 2654435761u >> 8) & 0xffff) / 65535.f; }
+
+    void break_up(const NpcShip& d) {
+        const ExplosionArch* ex = fxdb && d.arch ? fxdb->explosion(d.arch->explosion_arch) : nullptr;
+        int parts = static_cast<int>(d.part_offsets.size());
+        // A single-part model stays whole: the explosion hides it.
+        if (!ex || ex->debris_types.empty() || parts < 2) return;
+        float total = 0;
+        for (auto& [n, w] : ex->debris_types) total += w;
+        // debris_impulse is a push on the whole ship: its speed is the push over the ship's mass.
+        float impulse = ex->debris_impulse > 0 ? std::clamp(ex->debris_impulse / std::max(1.f, d.arch->mass), 5.f, 80.f) : 20.f;
+        for (int i = 0; i < parts && wrecks.size() < 200; ++i) {
+            Wreck w;
+            w.mesh = d.mesh;
+            w.part = i;
+            w.lod_ranges = &d.arch->lod_ranges;
+            Vec3 off = d.ship.orient.rotate(d.part_offsets[i]);
+            w.pos = d.ship.pos + game::to_d(off);
+            float len = std::sqrt(off.x * off.x + off.y * off.y + off.z * off.z);
+            Vec3 dir = len > 0.1f ? Vec3{off.x / len, off.y / len, off.z / len}
+                                  : render::normalize(Vec3{rnd() - 0.5f, rnd() - 0.5f, rnd() - 0.5f});
+            float speed = impulse * (0.5f + rnd());
+            w.vel = d.ship.vel + game::to_d(Vec3{dir.x * speed, dir.y * speed, dir.z * speed});
+            w.orient = d.ship.orient;
+            w.spin_axis = render::normalize(Vec3{rnd() - 0.5f, rnd() - 0.5f, rnd() - 0.5f + 0.01f});
+            w.spin = 0.5f + rnd() * 2.f;
+            float pick = rnd() * total;
+            const DebrisType* type = nullptr;
+            for (auto& [n, wt] : ex->debris_types) {
+                type = fxdb->debris(n);
+                if ((pick -= wt) <= 0) break;
+            }
+            if (type) {
+                w.life = type->lifetime_min + rnd() * std::max(0.f, type->lifetime_max - type->lifetime_min);
+                if (ResolvedEffect fx = fxdb->resolve(type->trail)) {
+                    for (auto& t : fx.vis->textures) pending_textures.push_back(t);
+                    w.trail.emplace(fx, fx_seed++);
+                }
+                w.end_fx = type->explosion;
+            }
+            wrecks.push_back(std::move(w));
+        }
+    }
     std::vector<std::string> pending_textures;  // effect texture libraries the renderer still needs
     std::uint32_t fx_seed = 1;
     std::vector<game::Sprite> sprite_buf;
@@ -571,6 +629,18 @@ struct FlightSession {
             f.fx.update(dt, f.pos, f.orient, f.vel, 0, true);
         }
         std::erase_if(loose_fx, [](const LooseFx& f) { return f.fx.finished() || f.age > 8.f; });
+        for (auto& w : wrecks) {
+            w.age += static_cast<float>(dt);
+            w.pos = w.pos + w.vel * dt;
+            w.orient = (Quat::axis_angle(w.spin_axis, w.spin * static_cast<float>(dt)) * w.orient).normalized();
+            if (w.trail) w.trail->update(dt, w.pos, w.orient, w.vel, 0, w.age < w.life);
+            if (w.age >= w.life && !w.end_fx.empty()) {
+                spawn_fx(w.end_fx, w.pos, w.vel, w.orient);
+                w.end_fx.clear();
+            }
+        }
+        // A part is gone at its end explosion; its smoke trail is left to fade out.
+        std::erase_if(wrecks, [](const Wreck& w) { return w.age >= w.life && (!w.trail || w.trail->finished() || w.age > w.life + 6); });
     }
 
     void draw_effects(Renderer& r) {
@@ -587,6 +657,8 @@ struct FlightSession {
         for (auto& n : npcs)
             for (auto& e : n.damage.fx) e.fx.sprites(sprite_buf);
         for (auto& f : loose_fx) f.fx.sprites(sprite_buf);
+        for (auto& w : wrecks)
+            if (w.trail) w.trail->sprites(sprite_buf);
         for (auto& s : sprite_buf)
             if (s.texture) {
                 if (s.flat) r.draw_flat_sprite(s.pos, s.size, s.axis_u, s.axis_v, s.color, s.alpha, *s.texture, s.additive, s.frame);
@@ -995,6 +1067,7 @@ struct FlightSession {
             NpcShip n;
             n.name = na->nickname + " " + std::to_string(i + 1);
             n.arch = na;
+            for (int p = 0; p < r.model_part_count(mesh); ++p) n.part_offsets.push_back(r.model_part_offset(mesh, p));
             n.model = game::FlightModel(game::FlightParams::from(*na, nlo ? db.engine_of(*nlo) : nullptr, db.cruise_speed()));
             Vec3 off = ship.orient.rotate({(i - (args.npcs - 1) * 0.5f) * 90.f, 25.f * (i % 2), -700.f - 60.f * i});
             n.ship.pos = ship.pos + game::to_d(off);
@@ -1158,7 +1231,8 @@ struct FlightSession {
                     spawn_fx(boom, n.ship.pos, n.ship.vel * 0.5, n.ship.orient);
                 else
                     explosions.push_back({n.ship.pos, 0, 35});
-                n.mesh = {};  // wreck removed; debris comes with the effects system
+                break_up(n);
+                n.mesh = {};
             }
         for (auto& e : explosions) e.age += dt;
         std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
@@ -1170,6 +1244,8 @@ struct FlightSession {
     }
 
     void draw_combat(Renderer& r) {
+        for (auto& w : wrecks)
+            if (w.age < w.life) r.draw_model_part(w.mesh, w.part, w.pos, w.orient.matrix(), *w.lod_ranges);
         for (auto& n : npcs)
             if (n.body.alive() && n.mesh)
                 r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
@@ -1356,6 +1432,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
     fs.player.ship = arch->nickname;
     fs.player.hold_size = arch->hold_size;
     fs.npcs.clear();
+    fs.wrecks.clear();
     Args a = args;
     if (!spawn_npcs) a.npcs = 0;
     fs.setup_combat(db, vfs, &lo, r, a);
@@ -1500,6 +1577,7 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
         return;
     }
     fs.npcs.clear();
+    fs.wrecks.clear();
     if (auto* o = game::find_object(renderer.system(), obj)) {
         auto sp = game::exit_point(*o, 600.f);
         fs.ship.pos = sp.pos;
@@ -1721,7 +1799,7 @@ int run(const Args& args) {
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
-                if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits);
+                if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
                             !n.body.alive() ? "destroyed" : n.ai ? std::string(game::FighterAi::name(n.ai->state())).c_str() : "test AI",
