@@ -72,11 +72,20 @@ struct WireMesh {
     static std::optional<WireMesh> parse(Bytes data);
 };
 
+// Attachment point on a part (Hardpoints/Fixed|Revolute/<name>), in part space.
+struct Hardpoint {
+    std::string name;
+    Vec3 position;
+    Mat3 orientation = kIdentity3;  // row-major
+    bool revolute = false;
+};
+
 struct ModelPart {
     std::string name;  // object name ("Root", "Li_Engine01", ...)
     std::vector<Lod> lods;
     std::optional<WireMesh> wire;
-    std::vector<std::string> hardpoints;
+    std::vector<std::string> hardpoints;    // names (kept for existing users)
+    std::vector<Hardpoint> hardpoint_data;  // names with transforms
 };
 
 class MeshLibrary {
@@ -95,6 +104,9 @@ struct Model {
     std::shared_ptr<UtfFile> file;
 
     static Model load(std::shared_ptr<UtfFile> file);
+    // Every hardpoint with its position and orientation in model (root) space, following
+    // the joint hierarchy at rest. Orientation is row-major like the data.
+    std::vector<Hardpoint> hardpoints_in_model_space() const;
     const ModelPart* part(std::string_view name) const;
 };
 

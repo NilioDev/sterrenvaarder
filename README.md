@@ -66,7 +66,7 @@ Field of view: the chase camera's `fovx` from `cameras.ini` (70°, defined for 4
 default. The vertical angle is kept and wider screens see more to the sides (Hor+), so
 4:3 looks exactly like the original. `--fov <degrees at 4:3>` changes it.
 
-Mouse = steer (Space toggles mouse flight), W/S = throttle, Shift+W = cruise, A/D =
+Left mouse = fire (guns from the ship's loadout, aimed through the cursor), mouse = steer (Space toggles mouse flight), W/S = throttle, Shift+W = cruise, A/D =
 strafe, Q/E = roll, Z = stop engines, T = next target, F11 = fullscreen.
 
 By default the HUD is the original one: its interface models are loaded from your own
@@ -87,6 +87,10 @@ anchor, offset, size and visibility per panel. See
 ./build/sterrenvaarder --data /path/to/DATA --width 3440 --height 1440 \
     --screenshot fly.png --sim 4 --cursor 0.25,-0.05   # scripted flight, then a screenshot
 ```
+
+Combat test: `--npcs 3 [--npc-ship pi_fighter]` spawns hostile ships with their own
+loadouts. Guns, munitions and shields come from the equipment INIs; shields absorb both
+damage types and rebuild after collapsing. `--fire` holds the trigger in screenshot runs.
 
 ## Tools
 

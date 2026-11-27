@@ -46,6 +46,31 @@ struct EngineArchetype {
     float cruise_charge_time = 5;
 };
 
+struct MunitionArchetype {
+    std::string nickname;
+    float hull_damage = 0, energy_damage = 0;  // energy damage hits shields only
+    float lifetime = 1;
+    std::string const_effect;  // projectile effect (visuals come from the player's data later)
+};
+
+struct GunArchetype {
+    std::string nickname;
+    std::string model;  // DA_archetype
+    std::vector<std::string> material_libraries;
+    std::string projectile;  // MunitionArchetype nickname
+    float refire_delay = 0.2f;
+    float muzzle_velocity = 600;
+    float power_usage = 0;
+};
+
+struct ShieldArchetype {
+    std::string nickname;
+    float max_capacity = 0;
+    float regeneration_rate = 0;
+    float offline_rebuild_time = 0;
+    float offline_threshold = 0;
+};
+
 struct Loadout {
     std::string nickname;
     std::string archetype;
@@ -79,6 +104,10 @@ public:
     const Loadout* loadout_for_ship(std::string_view ship_nickname) const;
     // The engine named in a loadout, or nullptr.
     const EngineArchetype* engine_of(const Loadout& l) const;
+    const GunArchetype* gun(std::string_view nickname) const;
+    const MunitionArchetype* munition(std::string_view nickname) const;
+    const ShieldArchetype* shield(std::string_view nickname) const;
+    const ShieldArchetype* shield_of(const Loadout& l) const;
 
     // Cruise speed: 300 m/s unless the data sets [EngineEquipConsts] CRUISING_SPEED.
     float cruise_speed() const { return cruise_speed_; }
@@ -88,6 +117,9 @@ private:
     std::unordered_map<std::string, ShipArchetype> ships_;
     std::unordered_map<std::string, EngineArchetype> engines_;
     std::unordered_map<std::string, Loadout> loadouts_;
+    std::unordered_map<std::string, GunArchetype> guns_;
+    std::unordered_map<std::string, MunitionArchetype> munitions_;
+    std::unordered_map<std::string, ShieldArchetype> shields_;
     std::unordered_map<std::string, std::string> first_loadout_;
     std::vector<std::string> ship_order_;
     float cruise_speed_ = 300;

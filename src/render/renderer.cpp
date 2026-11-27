@@ -767,6 +767,14 @@ struct Renderer::Impl {
     std::vector<DynamicInstance> dynamic;
     MeshLibrary shared_meshes;
 
+    struct GlowInstance {
+        DVec3 pos;
+        float size;
+        Color3 color;
+        float intensity;
+    };
+    std::vector<GlowInstance> glows;
+
     struct HudModel {
         GpuModel* model;
         float px, py, ppu;
@@ -1045,6 +1053,28 @@ struct Renderer::Impl {
                 }
             }
         }
+        // Dynamic glows (weapon bolts, explosions).
+        if (!glows.empty()) {
+            SDL_BindGPUGraphicsPipeline(pass, glow);
+            for (auto& g : glows) {
+                DVec3 rel = g.pos - cam.pos;
+                struct { Mat4 vp; float center[4], r[4], u[4]; } gu{};
+                gu.vp = view_proj;
+                gu.center[0] = static_cast<float>(rel.x);
+                gu.center[1] = static_cast<float>(rel.y);
+                gu.center[2] = static_cast<float>(rel.z);
+                gu.center[3] = g.size;
+                gu.r[0] = right.x; gu.r[1] = right.y; gu.r[2] = right.z;
+                gu.u[0] = up.x; gu.u[1] = up.y; gu.u[2] = up.z;
+                SDL_PushGPUVertexUniformData(cmd, 0, &gu, sizeof gu);
+                struct { float inner[4], outer[4]; } fu{{1, 1, 1, g.intensity}, {g.color.r, g.color.g, g.color.b, 0}};
+                SDL_PushGPUFragmentUniformData(cmd, 0, &fu, sizeof fu);
+                SDL_GPUTextureSamplerBinding b{white, gpu.clamp_sampler()};
+                SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
+                SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
+            }
+            glows.clear();
+        }
         SDL_EndGPURenderPass(pass);
 
         // ---- bloom
@@ -1178,6 +1208,10 @@ Renderer::ModelHandle Renderer::load_model(const std::string& path, const std::v
 void Renderer::add_mesh_library(const std::string& path) {
     impl_->shared_meshes.add_from(
         impl_->vfs.load_with_fallback(path, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }));
+}
+
+void Renderer::draw_glow(DVec3 pos, float size, Color3 color, float intensity) {
+    impl_->glows.push_back({pos, size, color, intensity});
 }
 
 void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudColor tint) {

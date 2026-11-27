@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/hud.hpp"
 #include "render/renderer.hpp"
@@ -53,7 +54,10 @@ struct Args {
     std::string ship = "li_elite";
     float hud_aspect = -1;  // < 0: from the HUD config
     std::string hud_config;
-    float fov = 0;  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
+    float fov = 0;
+    int npcs = 0;
+    std::string npc_ship = "pi_fighter";
+    bool fire = false;  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -85,6 +89,9 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
         else if (k == "--hud-config") a.hud_config = next();
         else if (k == "--fov") a.fov = std::stof(next());
+        else if (k == "--npcs") a.npcs = std::stoi(next());
+        else if (k == "--npc-ship") a.npc_ship = next();
+        else if (k == "--fire") a.fire = true;
         else if (k == "--sim") a.sim = std::stod(next());
         else if (k == "--throttle") a.throttle = std::stof(next());
         else if (k == "--cursor") std::sscanf(next().c_str(), "%f,%f", &a.cursor_x, &a.cursor_y);
@@ -105,6 +112,55 @@ void place_default_camera(Camera& cam, const StarSystem& sys) {
     }
 }
 
+// World-space direction through a screen point (where the guns converge).
+Vec3 aim_through(const Camera& cam, float px, float py, float w, float h) {
+    float t = std::tan(cam.fov_y * 0.5f);
+    float nx = (px / w * 2.f - 1.f) * t * (w / h), ny = (1.f - py / h * 2.f) * t;
+    Vec3 f = cam.forward(), r = cam.right(), u = cam.up();
+    return render::normalize(Vec3{f.x + r.x * nx + u.x * ny, f.y + r.y * nx + u.y * ny, f.z + r.z * nx + u.z * ny});
+}
+
+// Guns for a ship from its loadout, at the hardpoints of its model.
+std::vector<game::Gun> guns_for(const ShipDatabase& db, const Vfs& vfs, const ShipArchetype& arch, const Loadout* lo) {
+    std::vector<game::Gun> guns;
+    if (!lo) return guns;
+    std::vector<Hardpoint> hps;
+    try {
+        hps = Model::load(vfs.load_with_fallback(arch.model, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }))
+                  .hardpoints_in_model_space();
+    } catch (const std::exception&) {
+    }
+    for (auto& e : lo->equip) {
+        const GunArchetype* g = db.gun(e.item);
+        if (!g) continue;
+        game::Gun gun;
+        gun.arch = g;
+        gun.munition = db.munition(g->projectile);
+        for (auto& h : hps)
+            if (iequals(h.name, e.hardpoint)) gun.offset = h.position;
+        guns.push_back(gun);
+    }
+    return guns;
+}
+
+// A computer-controlled ship: same flight model and weapons as the player.
+struct NpcShip {
+    std::string name;
+    const ShipArchetype* arch = nullptr;
+    game::FlightModel model{game::FlightParams{}};
+    game::ShipState ship;
+    game::FlightInput input;
+    game::Combatant body;
+    std::vector<game::Gun> guns;
+    Renderer::ModelHandle mesh;
+    float burst = 0;  // > 0 firing, < 0 pausing (seconds left)
+};
+
+struct Explosion {
+    DVec3 pos;
+    float age = 0, size = 30;
+};
+
 // The player's ship, its flight model, the chase camera and the HUD state.
 struct FlightSession {
     const ShipArchetype* arch = nullptr;
@@ -119,6 +175,131 @@ struct FlightSession {
     float win_fovx = 54.432f;  // cameras.ini [WinCamera]: the original interface view
     std::unordered_map<std::string, Renderer::ModelHandle> hud_models;
     bool hud_meshes_loaded = false;
+
+    // Combat
+    game::Combatant body;
+    std::vector<game::Gun> guns;
+    std::vector<NpcShip> npcs;
+    game::CombatWorld world;
+    std::vector<Explosion> explosions;
+    struct Flash { DVec3 pos; float age = 0; bool shield = false; };
+    std::vector<Flash> flashes;
+    bool firing = false;
+    Vec3 aim_dir{0, 0, -1};
+
+    void setup_combat(const ShipDatabase& db, const Vfs& vfs, const Loadout* lo, Renderer& r, const Args& args) {
+        body.id = 0;
+        body.radius = 8;
+        body.hull = body.max_hull = arch->hit_pts;
+        if (lo) body.set_shield(db.shield_of(*lo));
+        guns = guns_for(db, vfs, *arch, lo);
+        if (args.npcs <= 0) return;
+        const ShipArchetype* na = db.ship(args.npc_ship);
+        if (!na) { SDL_Log("unknown NPC ship %s", args.npc_ship.c_str()); return; }
+        const Loadout* nlo = db.loadout_for_ship(args.npc_ship);
+        auto mesh = r.load_model(na->model, na->material_libraries);
+        auto nguns = guns_for(db, vfs, *na, nlo);
+        for (int i = 0; i < args.npcs; ++i) {
+            NpcShip n;
+            n.name = na->nickname + " " + std::to_string(i + 1);
+            n.arch = na;
+            n.model = game::FlightModel(game::FlightParams::from(*na, nlo ? db.engine_of(*nlo) : nullptr, db.cruise_speed()));
+            Vec3 off = ship.orient.rotate({(i - (args.npcs - 1) * 0.5f) * 90.f, 25.f * (i % 2), -700.f - 60.f * i});
+            n.ship.pos = ship.pos + game::to_d(off);
+            Vec3 f = ship.orient.forward();
+            n.ship.orient = Quat::look({-f.x, -f.y, -f.z});  // head-on
+            n.body.id = i + 1;
+            n.body.radius = 8;
+            n.body.hull = n.body.max_hull = na->hit_pts;
+            if (nlo) n.body.set_shield(db.shield_of(*nlo));
+            n.guns = nguns;
+            n.mesh = mesh;
+            npcs.push_back(std::move(n));
+        }
+    }
+
+    // Our own simple pursuit AI: steer towards where the player will be, fire when the
+    // guns line up. Good enough to test combat; proper AI comes with the mission system.
+    void npc_think(NpcShip& n) {
+        if (!body.alive()) { n.input.throttle = 0.5f; n.input.steer = {}; return; }
+        float speed = n.guns.empty() || !n.guns[0].arch ? 600.f : n.guns[0].arch->muzzle_velocity;
+        DVec3 to = ship.pos - n.ship.pos;
+        double dist = to.length();
+        DVec3 lead = ship.pos + ship.vel * (dist / speed) - n.ship.pos;
+        Vec3 dir = render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)});
+        Vec3 local = n.ship.orient.conjugate().rotate(dir);
+        n.input.steer = {std::clamp(local.y * 3.f, -1.f, 1.f), std::clamp(-local.x * 3.f, -1.f, 1.f), 0};
+        n.input.throttle = dist < 150 ? 0.2f : 1.f;
+        n.input.cruise = false;
+        bool aligned = -local.z > 0.985f;
+        float range = speed * (n.guns.empty() || !n.guns[0].munition ? 1.f : n.guns[0].munition->lifetime);
+        // Bursts of about a second with pauses, and a small aiming error, so a group of
+        // pilots does not focus every bolt on the player at once.
+        if (aligned && dist < range * 0.9 && n.burst > 0) {
+            float a = std::sin(static_cast<float>(sim_time) * 7.3f + n.body.id * 1.7f) * 0.03f;
+            float b = std::cos(static_cast<float>(sim_time) * 5.1f + n.body.id * 2.3f) * 0.03f;
+            Vec3 r = n.ship.orient.right(), u = n.ship.orient.up();
+            Vec3 d = render::normalize(Vec3{dir.x + r.x * a + u.x * b, dir.y + r.y * a + u.y * b, dir.z + r.z * a + u.z * b});
+            world.fire(n.guns, n.body.id, n.ship.pos, n.ship.orient, n.ship.vel, d);
+        }
+    }
+
+    double sim_time = 0;
+
+    void update_combat(double dt_d) {
+        float dt = static_cast<float>(dt_d);
+        sim_time += dt_d;
+        for (auto& n : npcs) {
+            n.burst = n.burst > 0 ? n.burst - dt : n.burst + dt;
+            if (n.burst <= 0 && n.burst > -dt) n.burst = -1.5f;  // just ended: pause
+            else if (n.burst < 0 && n.burst + dt >= 0) n.burst = 1.0f;
+        }
+        world.update_guns(guns, dt);
+        if (firing && body.alive()) world.fire(guns, body.id, ship.pos, ship.orient, ship.vel, aim_dir);
+        for (auto& n : npcs) {
+            if (!n.body.alive()) continue;
+            world.update_guns(n.guns, dt);
+            npc_think(n);
+            n.model.update(n.ship, n.input, dt_d);
+            n.body.pos = n.ship.pos;
+            n.body.update(dt);
+        }
+        body.pos = ship.pos;
+        body.update(dt);
+        std::vector<game::Combatant*> targets{&body};
+        for (auto& n : npcs) targets.push_back(&n.body);
+        world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
+            flashes.push_back({p.pos, 0, t.shield > 0});
+        });
+        for (auto& n : npcs)
+            if (!n.body.alive() && n.mesh) {
+                explosions.push_back({n.ship.pos, 0, 35});
+                n.mesh = {};  // wreck removed; debris comes with the effects system
+            }
+        for (auto& e : explosions) e.age += dt;
+        std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
+        for (auto& f : flashes) f.age += dt;
+        std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
+    }
+
+    void draw_combat(Renderer& r) {
+        for (auto& n : npcs)
+            if (n.body.alive() && n.mesh)
+                r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
+        for (auto& p : world.projectiles()) {
+            Color3 c = p.owner == 0 ? Color3{0.4f, 0.8f, 1.f} : Color3{1.f, 0.35f, 0.2f};
+            // A short streak: a few glows along the last few metres of travel.
+            DVec3 back = p.vel * (-1.0 / std::max(1.0, p.vel.length()));
+            for (int i = 0; i < 4; ++i) r.draw_glow(p.pos + back * (i * 2.0), 0.9f - i * 0.15f, c, 2.2f - i * 0.45f);
+        }
+        for (auto& f : flashes)
+            r.draw_glow(f.pos, 6.f + f.age * 40.f, f.shield ? Color3{0.4f, 0.7f, 1.f} : Color3{1.f, 0.7f, 0.3f}, 3.f * (1.f - f.age / 0.15f));
+        for (auto& e : explosions) {
+            float t = e.age / 2.0f;
+            r.draw_glow(e.pos, e.size * (0.3f + t * 1.4f), {1.f, 0.55f, 0.2f}, 8.f * (1.f - t) * (1.f - t));
+            r.draw_glow(e.pos, e.size * 0.4f * (1.f + t), {1.f, 0.9f, 0.7f}, 12.f * std::max(0.f, 1.f - t * 3.f));
+        }
+    }
 
     // Original interface models come from the player's own data, loaded on first use.
     Renderer::ModelHandle hud_model(Renderer& r, const std::string& path) {
@@ -165,6 +346,17 @@ struct FlightSession {
             c.radius = 200;
             contacts.push_back(std::move(c));
         }
+        for (auto& n : npcs) {
+            if (!n.body.alive()) continue;
+            game::HudContact c;
+            c.name = n.name;
+            c.pos = n.ship.pos;
+            c.radius = 12;
+            c.hostile = true;
+            c.hull = n.body.hull / std::max(1.f, n.body.max_hull);
+            c.shield = n.body.max_shield > 0 ? n.body.shield / n.body.max_shield : 0;
+            contacts.push_back(std::move(c));
+        }
         std::sort(contacts.begin(), contacts.end(), [&](auto& a, auto& b) {
             return (a.pos - ship.pos).length() < (b.pos - ship.pos).length();
         });
@@ -193,7 +385,8 @@ struct FlightSession {
 
     void draw(Renderer& r) {
         Mat4 rot = ship.orient.matrix() * Mat4::rotate_z(ship.bank);
-        r.draw_model(mesh, ship.pos, rot, arch ? arch->lod_ranges : std::vector<float>{});
+        if (body.alive()) r.draw_model(mesh, ship.pos, rot, arch ? arch->lod_ranges : std::vector<float>{});
+        draw_combat(r);
     }
 
     game::HudState hud_state(const StarSystem& sys, float cursor_x, float cursor_y) const {
@@ -207,6 +400,8 @@ struct FlightSession {
         h.cursor_x = cursor_x;
         h.cursor_y = cursor_y;
         h.system_name = sys.nickname;
+        h.hull = body.max_hull > 0 ? body.hull / body.max_hull : 1;
+        h.shield = body.max_shield > 0 ? body.shield / body.max_shield : 0;
         h.contacts = contacts;
         return h;
     }
@@ -282,6 +477,7 @@ int run(const Args& args) {
             if (args.fov > 0) fovx = std::clamp(args.fov, 40.f, 120.f);
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->spawn(renderer.system(), args);
+            fs->setup_combat(*ships, vfs, ships->loadout_for_ship(args.ship), renderer, args);
             fs->update_contacts(renderer.system());
             fs->next_target();
             fs->update_camera(cam, 1.0);
@@ -314,9 +510,12 @@ int run(const Args& args) {
                 // Scripted flight so screenshots show the ship in motion.
                 fs->input.throttle = args.throttle;
                 fs->input.steer = game::mouse_steer(args.cursor_x, args.cursor_y);
+                fs->firing = args.fire;
                 for (double t = 0; t < args.sim; t += 1.0 / 60) {
                     fs->model.update(fs->ship, fs->input, 1.0 / 60);
                     fs->update_camera(cam, 1.0 / 60);
+                    fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
+                    fs->update_combat(1.0 / 60);
                 }
                 fs->update_contacts(renderer.system());
             }
@@ -391,6 +590,9 @@ int run(const Args& args) {
                     in.steer.z = roll;
                     fs->model.update(fs->ship, in, dt);
                     fs->update_camera(cam, dt);
+                    fs->firing = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
+                    fs->aim_dir = aim_through(cam, mx, my, static_cast<float>(ww), static_cast<float>(wh));
+                    fs->update_combat(dt);
                     fs->update_contacts(renderer.system());
                 } else {
                     double v = speed * dt * (keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0);

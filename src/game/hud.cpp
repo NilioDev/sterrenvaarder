@@ -209,6 +209,11 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
             float ty = y + 0.035f * ppu * cfg.target.scale;
             h.text(x + w * 0.5f, ty, 10 * sc, c.name.size() > 24 ? c.name.substr(0, 24) : c.name, kTarget, TextAlign::Center);
             h.text(x + w * 0.5f, y + hh - 34 * sc, 10 * sc, fmt_distance((c.pos - player_pos).length()), kLine, TextAlign::Center);
+            if (c.hull >= 0) {
+                float bw = w * 0.6f, bx = x + (w - bw) * 0.5f, bh = 6 * sc;
+                bar(h, bx, y + hh - 70 * sc, bw, bh, c.shield, kShield, sc);
+                bar(h, bx, y + hh - 56 * sc, bw, bh, c.hull, kHull, sc);
+            }
             break;
         }
     }
