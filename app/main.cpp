@@ -3,7 +3,7 @@
 //
 //   sterrenvaarder --data <Freelancer DATA dir> [--mod <dir>]... [--system Li01]
 //                  [--ship li_elite] [--width 2560 --height 1080] [--scale 0.77] [--msaa 4]
-//                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--free]
+//                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--fov 70] [--free]
 //                  [--screenshot out.png [--sim 4 --throttle 1 --cursor 0.3,-0.1]]
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
 //
@@ -53,6 +53,7 @@ struct Args {
     std::string ship = "li_elite";
     float hud_aspect = -1;  // < 0: from the HUD config
     std::string hud_config;
+    float fov = 0;  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -83,6 +84,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--ship") a.ship = next();
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
         else if (k == "--hud-config") a.hud_config = next();
+        else if (k == "--fov") a.fov = std::stof(next());
         else if (k == "--sim") a.sim = std::stod(next());
         else if (k == "--throttle") a.throttle = std::stof(next());
         else if (k == "--cursor") std::sscanf(next().c_str(), "%f,%f", &a.cursor_x, &a.cursor_y);
@@ -222,7 +224,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         renderer.set_hud(&hud);
         if (hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
-                renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu);
+                renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
     renderer.render(cmd, target, w, h, cam, settings, time);
 }
@@ -277,6 +279,7 @@ int run(const Args& args) {
                         if (iequals(sec.name, "ChaseCamera")) fovx = e->values[0].as_float();
                         else if (iequals(sec.name, "WinCamera")) fs->win_fovx = e->values[0].as_float();
                     }
+            if (args.fov > 0) fovx = std::clamp(args.fov, 40.f, 120.f);
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->spawn(renderer.system(), args);
             fs->update_contacts(renderer.system());

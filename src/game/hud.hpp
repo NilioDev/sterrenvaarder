@@ -93,6 +93,7 @@ struct HudModelDraw {
     const char* model;  // game path
     float px, py;       // model origin in output pixels
     float ppu;          // pixels per model unit
+    render::HudColor tint{};
 };
 
 // Classic style: where the original interface models go. Model units are those of the

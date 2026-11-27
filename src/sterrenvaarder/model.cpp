@@ -72,10 +72,28 @@ const ModelPart* Model::part(std::string_view name) const {
     return nullptr;
 }
 
+// Layout: u32 header size (16), u32 mesh id, u16 vertex offset, u16 vertex count,
+// u16 index count, u16 highest vertex index, then the u16 indices.
+std::optional<WireMesh> WireMesh::parse(Bytes d) {
+    if (d.size() < 16) return std::nullopt;
+    auto u16 = [&](std::size_t o) { return static_cast<std::uint16_t>(d[o] | (d[o + 1] << 8)); };
+    auto u32 = [&](std::size_t o) { return static_cast<std::uint32_t>(u16(o) | (std::uint32_t(u16(o + 2)) << 16)); };
+    std::uint32_t header = u32(0);
+    if (header < 16 || header > d.size()) return std::nullopt;
+    WireMesh w;
+    w.mesh_id = u32(4);
+    w.vertex_offset = u16(8);
+    w.vertex_count = u16(10);
+    std::size_t n = u16(12);
+    if (header + n * 2 > d.size()) return std::nullopt;
+    for (std::size_t i = 0; i < n; ++i) w.indices.push_back(u16(header + i * 2));
+    return w;
+}
+
 namespace {
 
 // A part node holds either MultiLevel/Level<N>/VMeshPart/VMeshRef (+ Switch2 ranges)
-// or VMeshPart/VMeshRef directly.
+// or VMeshPart/VMeshRef directly, and optionally VMeshWire/VWireData lines.
 ModelPart load_part(const UtfNode& node, std::string name) {
     ModelPart part;
     part.name = std::move(name);
@@ -96,6 +114,7 @@ ModelPart load_part(const UtfNode& node, std::string name) {
     } else if (auto r = node.find("VMeshPart/VMeshRef")) {
         part.lods.push_back(Lod{VMeshRef::parse(r->data), 0});
     }
+    if (auto w = node.find("VMeshWire/VWireData")) part.wire = WireMesh::parse(w->data);
     if (auto hp = node.child("Hardpoints"))
         for (auto& group : hp->children)
             for (auto& h : group.children) part.hardpoints.push_back(h.name);
