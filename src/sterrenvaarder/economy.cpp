@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "sterrenvaarder/economy.hpp"
 
+#include <algorithm>
+
 #include "sterrenvaarder/ini.hpp"
 
 namespace sterrenvaarder {
@@ -76,13 +78,30 @@ Economy::Economy(const Vfs& vfs, const DataFiles& files) {
         e.ids_name = id(sec, "ids_name");
         e.ids_info = id(sec, "ids_info");
         e.volume = num(sec, "volume", 0);
+        e.hp_class = str(sec, "hp_gun_type");
+        if (e.hp_class.empty()) e.hp_class = str(sec, "hp_type");
+        if (e.hp_class.empty()) {
+            if (iequals(sec.name, "Thruster")) e.hp_class = "hp_thruster";
+            else if (iequals(sec.name, "MineDropper")) e.hp_class = "hp_mine_dropper";
+            else if (iequals(sec.name, "CounterMeasureDropper")) e.hp_class = "hp_countermeasure_dropper";
+        }
         equipment_[to_lower(nick)] = std::move(e);
     });
 
     each_section(vfs, files.ships, [&](const IniSection& sec) {
         if (!iequals(sec.name, "Ship")) return;
-        auto nick = str(sec, "nickname");
-        if (!nick.empty()) ship_names_[to_lower(nick)] = id(sec, "ids_name");
+        ShipInfo si;
+        si.nickname = str(sec, "nickname");
+        if (si.nickname.empty()) return;
+        si.ids_name = id(sec, "ids_name");
+        si.hold_size = num(sec, "hold_size", 0);
+        for (auto* h : sec.find_all("hp_type")) {
+            if (h->values.size() < 2) continue;
+            std::vector<std::string> hps;
+            for (std::size_t i = 1; i < h->values.size(); ++i) hps.push_back(h->values[i].as_string());
+            si.hp_types.emplace_back(h->values[0].as_string(), std::move(hps));
+        }
+        ships_[to_lower(si.nickname)] = std::move(si);
     });
 
     each_section(vfs, files.markets, [&](const IniSection& sec) {
@@ -179,8 +198,25 @@ const Good* Economy::hull_of_ship(std::string_view ship) const {
 }
 
 std::uint32_t Economy::ship_name_id(std::string_view ship) const {
-    auto it = ship_names_.find(to_lower(ship));
-    return it == ship_names_.end() ? 0 : it->second;
+    auto s = this->ship(ship);
+    return s ? s->ids_name : 0;
+}
+
+const ShipInfo* Economy::ship(std::string_view n) const {
+    auto it = ships_.find(to_lower(n));
+    return it == ships_.end() ? nullptr : &it->second;
+}
+
+std::vector<std::string> Economy::hardpoints_for(std::string_view ship_name, std::string_view item) const {
+    std::vector<std::string> out;
+    auto s = ship(ship_name);
+    auto e = equipment(item);
+    if (!s || !e || e->hp_class.empty()) return out;
+    for (auto& [cls, hps] : s->hp_types)
+        if (iequals(cls, e->hp_class))
+            for (auto& hp : hps)
+                if (std::find_if(out.begin(), out.end(), [&](auto& o) { return iequals(o, hp); }) == out.end()) out.push_back(hp);
+    return out;
 }
 
 std::optional<NewGameProfile> read_new_character(const Vfs& vfs) {

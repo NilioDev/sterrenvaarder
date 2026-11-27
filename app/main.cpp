@@ -7,7 +7,8 @@
 //                  [--screenshot out.png [--sim 4 --throttle 1 --cursor 0.3,-0.1]]
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
 //                  [--new-game] [--load save.ini] [--save-file save.ini] [--exe <EXE dir>]
-//                  [--buy good,count]...  (screenshot runs: trade after docking)
+//                  [--buy good,count]... [--tab 0-2]  (screenshot runs: trade after docking)
+//                  [--credits n] [--rank n]  (testing)
 //
 // Flight controls: mouse = steer (Space toggles mouse flight), W/S = throttle,
 //   Shift+W = cruise, A/D = strafe, Q/E = roll, Z = stop engines, T = next target,
@@ -74,6 +75,9 @@ struct Args {
     bool new_game = false;
     std::string load, save_file, exe;
     std::vector<std::pair<std::string, int>> buys;  // screenshot runs: trades once docked
+    int tab = 0;                                      // screenshot runs: base screen tab (0-2)
+    long long credits = -1;                           // testing: override credits
+    int rank = -1;                                    // testing: override level
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -106,6 +110,9 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--load") a.load = next();
         else if (k == "--save-file") a.save_file = next();
         else if (k == "--exe") a.exe = next();
+        else if (k == "--tab") a.tab = std::stoi(next());
+        else if (k == "--credits") a.credits = std::stoll(next());
+        else if (k == "--rank") a.rank = std::stoi(next());
         else if (k == "--buy") {
             auto v = next();
             auto comma = v.find(',');
@@ -246,44 +253,181 @@ struct FlightSession {
         input.cruise = false;
         player.base = !o.base.empty() ? o.base : o.dock_with;
         docked_label = player.base.empty() ? label_of(o) : base_label(player.base);
+        trade_tab = Tab::Commodities;
         trade_sel = 0;
         trade_msg.clear();
     }
 
-    // Commodities of the base's market, plus anything in the hold the base will buy.
-    struct TradeRow { std::string good; game::BaseScreenRow row; };
+    // Base screen tabs: commodity trader, equipment dealer, ship dealer.
+    enum class Tab { Commodities, Equipment, Ships };
+    Tab trade_tab = Tab::Commodities;
+    bool refit_needed = false;  // ship or guns changed: the main loop rebuilds them
+
+    std::string good_name(std::string_view good) const {
+        return strings && econ ? strings->name(econ->name_id(good), good) : std::string(good);
+    }
+    std::string money(std::int64_t v) const { return game::format_money(v); }
+    // "HpWeapon03" -> "WEAPON 3", "HpCM01" -> "CM 1".
+    static std::string hardpoint_label(const std::string& hp) {
+        std::string s = hp.size() > 2 && iequals(hp.substr(0, 2), "hp") ? hp.substr(2) : hp;
+        std::size_t d = s.find_first_of("0123456789");
+        if (d == std::string::npos) return s;
+        std::size_t nz = s.find_first_not_of('0', d);
+        return s.substr(0, d) + " " + (nz == std::string::npos ? "0" : s.substr(nz));
+    }
+    std::int64_t price_here(std::string_view good) const {
+        return static_cast<std::int64_t>(std::lround(econ->price(player.base, good)));
+    }
+
+    // One line on the base screen and what Right (buy) / Left (sell) do with it.
+    struct TradeRow {
+        enum Kind { Heading, Commodity, BuyEquipment, MountedEquipment, Ship } kind = Heading;
+        std::string good;
+        std::size_t index = 0;  // MountedEquipment: index into player.equipment
+        game::BaseScreenRow row;
+    };
+
     std::vector<TradeRow> trade_rows() const {
         std::vector<TradeRow> out;
         if (!econ || player.base.empty()) return out;
-        for (auto& m : econ->market(player.base)) {
-            const Good* g = econ->good(m.good);
-            if (!g || g->category != GoodCategory::Commodity) continue;
-            int owned = player.units(m.good);
-            if (!m.base_sells && !owned) continue;
+        auto heading = [&](std::string t) {
             TradeRow r;
-            r.good = to_lower(m.good);
-            r.row.name = strings ? strings->name(econ->name_id(m.good), m.good) : m.good;
-            r.row.price = static_cast<std::int64_t>(std::lround(econ->price(player.base, m.good)));
-            r.row.owned = owned;
-            r.row.sold_here = m.base_sells;
-            r.row.can_buy = game::max_buy(*econ, player, m.good);
+            r.row.name = std::move(t);
+            r.row.heading = true;
             out.push_back(std::move(r));
+        };
+        if (trade_tab == Tab::Commodities) {
+            // The market's commodities, plus anything in the hold the base will buy.
+            for (auto& m : econ->market(player.base)) {
+                const Good* g = econ->good(m.good);
+                if (!g || g->category != GoodCategory::Commodity) continue;
+                int owned = player.units(m.good);
+                bool sold = game::offered(m, player);
+                if (!sold && !owned) continue;
+                TradeRow r;
+                r.kind = TradeRow::Commodity;
+                r.good = to_lower(m.good);
+                r.row.name = good_name(m.good);
+                r.row.price = money(price_here(m.good));
+                r.row.col3 = owned ? std::to_string(owned) : "-";
+                r.row.col4 = sold ? std::to_string(game::max_buy(*econ, player, m.good)) : "SELL ONLY";
+                out.push_back(std::move(r));
+            }
+        } else if (trade_tab == Tab::Equipment) {
+            for (auto& m : econ->market(player.base)) {
+                const Good* g = econ->good(m.good);
+                if (!g || g->category != GoodCategory::Equipment || !game::offered(m, player)) continue;
+                std::string item = g->equipment.empty() ? g->nickname : g->equipment;
+                if (econ->hardpoints_for(player.ship, item).empty()) continue;  // does not fit this ship
+                TradeRow r;
+                r.kind = TradeRow::BuyEquipment;
+                r.good = to_lower(m.good);
+                r.row.name = good_name(m.good);
+                r.row.price = money(price_here(m.good));
+                std::string hp = game::free_hardpoint(*econ, player, item);
+                r.row.col3 = hp.empty() ? "-" : hardpoint_label(hp);
+                r.row.col4 = hp.empty() ? "NO ROOM" : "BUY";
+                r.row.dim = hp.empty();
+                out.push_back(std::move(r));
+            }
+            heading("ON YOUR SHIP");
+            for (std::size_t i = 0; i < player.equipment.size(); ++i) {
+                auto& e = player.equipment[i];
+                const EquipmentItem* it = econ->equipment(e.item);
+                if (e.hardpoint.empty() || !it || it->hp_class.empty() || !econ->good(e.item)) continue;
+                TradeRow r;
+                r.kind = TradeRow::MountedEquipment;
+                r.good = to_lower(e.item);
+                r.index = i;
+                r.row.name = good_name(e.item);
+                r.row.price = money(price_here(e.item));
+                r.row.col3 = hardpoint_label(e.hardpoint);
+                r.row.col4 = "SELL";
+                out.push_back(std::move(r));
+            }
+        } else {
+            std::int64_t trade_in = game::trade_in_value(*econ, player);
+            heading("YOUR SHIP: " + (strings ? strings->name(econ->ship_name_id(player.ship), player.ship) : player.ship) +
+                    "   TRADE-IN " + money(trade_in));
+            for (auto& m : econ->market(player.base)) {
+                const Good* g = econ->good(m.good);
+                if (!g || g->category != GoodCategory::Ship || !game::offered(m, player)) continue;
+                const Good* hull = econ->good(g->hull);
+                const ShipInfo* info = hull ? econ->ship(hull->ship) : nullptr;
+                if (!info) continue;
+                TradeRow r;
+                r.kind = TradeRow::Ship;
+                r.good = to_lower(m.good);
+                r.row.name = strings ? strings->name(info->ids_name, info->nickname) : info->nickname;
+                std::int64_t price = game::ship_price(*econ, player, m.good);
+                r.row.price = money(price);
+                r.row.col3 = std::to_string(static_cast<int>(info->hold_size));
+                std::int64_t net = price - trade_in;
+                r.row.col4 = net >= 0 ? "PAY " + money(net) : "GET " + money(-net);
+                r.row.dim = price - trade_in > player.credits;
+                out.push_back(std::move(r));
+            }
         }
         return out;
     }
 
-    // dir > 0 buys, dir < 0 sells; `all` trades as many units as possible.
+    void select_row(int step) {
+        auto rows = trade_rows();
+        int n = static_cast<int>(rows.size());
+        if (!n) return;
+        int i = std::clamp(trade_sel, 0, n - 1);
+        for (int k = 0; k < n; ++k) {
+            i = (i + step + n) % n;
+            if (!rows[i].row.heading) break;
+        }
+        trade_sel = i;
+    }
+
+    void set_tab(Tab t) {
+        trade_tab = t;
+        trade_sel = -1;
+        select_row(1);
+        trade_msg.clear();
+    }
+
+    // dir > 0 buys, dir < 0 sells; `all` trades as many units as possible (commodities).
     void trade(int dir, bool all) {
         auto rows = trade_rows();
         if (rows.empty()) return;
         trade_sel = std::clamp(trade_sel, 0, static_cast<int>(rows.size()) - 1);
         auto& r = rows[trade_sel];
-        int n = 1;
-        if (all) n = dir > 0 ? game::max_buy(*econ, player, r.good) : player.units(r.good);
-        if (n <= 0) n = 1;  // reports why nothing can be traded
-        auto res = dir > 0 ? game::buy(*econ, player, r.good, n) : game::sell(*econ, player, r.good, n);
-        trade_msg = res == game::TradeResult::Ok ? std::string(dir > 0 ? "BOUGHT " : "SOLD ") + std::to_string(n) + " " + r.row.name
-                                                 : game::trade_message(res);
+        game::TradeResult res = game::TradeResult::NotSold;
+        std::string done;
+        switch (r.kind) {
+            case TradeRow::Heading: return;
+            case TradeRow::Commodity: {
+                int n = 1;
+                if (all) n = dir > 0 ? game::max_buy(*econ, player, r.good) : player.units(r.good);
+                if (n <= 0) n = 1;  // reports why nothing can be traded
+                res = dir > 0 ? game::buy(*econ, player, r.good, n) : game::sell(*econ, player, r.good, n);
+                done = std::string(dir > 0 ? "BOUGHT " : "SOLD ") + std::to_string(n) + " " + r.row.name;
+                break;
+            }
+            case TradeRow::BuyEquipment:
+                if (dir < 0) return;
+                res = game::buy_equipment(*econ, player, r.good);
+                done = "MOUNTED " + r.row.name;
+                break;
+            case TradeRow::MountedEquipment:
+                if (dir > 0) return;
+                res = game::sell_equipment(*econ, player, r.index);
+                done = "SOLD " + r.row.name;
+                break;
+            case TradeRow::Ship:
+                if (dir < 0) return;
+                res = game::buy_ship(*econ, player, r.good);
+                done = "NEW SHIP: " + r.row.name;
+                break;
+        }
+        bool ok = res == game::TradeResult::Ok;
+        trade_msg = ok ? done : game::trade_message(res);
+        if (ok && r.kind != TradeRow::Commodity) refit_needed = true;
+        if (ok) select_row(0);
     }
 
     game::BaseScreen base_screen(const StarSystem& sys) const {
@@ -293,9 +437,17 @@ struct FlightSession {
         b.credits = player.credits;
         b.hold_used = econ ? game::cargo_used(*econ, player) : 0;
         b.hold_size = player.hold_size;
+        b.tabs = {"COMMODITIES", "EQUIPMENT", "SHIPS"};
+        b.tab = static_cast<int>(trade_tab);
+        static const char* cols[3][4] = {{"COMMODITY", "PRICE", "IN HOLD", "CAN BUY"},
+                                         {"EQUIPMENT", "PRICE", "HARDPOINT", ""},
+                                         {"SHIP", "PRICE", "CARGO", "WITH TRADE-IN"}};
+        for (int i = 0; i < 4; ++i) b.columns[i] = cols[b.tab][i];
         for (auto& r : trade_rows()) b.rows.push_back(r.row);
         b.selected = std::clamp(trade_sel, 0, std::max(0, static_cast<int>(b.rows.size()) - 1));
         b.message = trade_msg;
+        b.help = trade_tab == Tab::Commodities ? "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH"
+                                               : "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   F3 LAUNCH   F5 SAVE";
         return b;
     }
 
@@ -625,21 +777,45 @@ struct FlightSession {
     }
 };
 
-// Loads the player's ship (model, flight model, guns, shield, hold) into the session.
-void set_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& r, const Args& args, const std::string& ship,
-              const std::string& loadout) {
-    const ShipArchetype* arch = db.ship(ship);
-    if (!arch) throw std::runtime_error("unknown ship " + ship);
-    const Loadout* lo = loadout.empty() ? nullptr : db.loadout(loadout);
-    if (!lo) lo = db.loadout_for_ship(ship);
-    fs.arch = arch;
-    fs.model = game::FlightModel(game::FlightParams::from(*arch, lo ? db.engine_of(*lo) : nullptr, db.cruise_speed()));
-    fs.mesh = r.load_model(arch->model, arch->material_libraries);
+// The player's mounted equipment as a loadout (engine, shield and guns come from it).
+Loadout player_loadout(const game::PlayerState& p) {
+    Loadout l;
+    l.nickname = "player";
+    l.archetype = p.ship;
+    for (auto& m : p.equipment) l.equip.push_back({m.item, m.hardpoint});
+    return l;
+}
+
+// Rebuilds the ship from the player state: model (when the ship changed), flight model,
+// guns, shield and hold. NPCs are spawned only when asked (scripted test runs).
+void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& r, const Args& args, bool spawn_npcs) {
+    const ShipArchetype* arch = db.ship(fs.player.ship);
+    if (!arch) throw std::runtime_error("unknown ship " + fs.player.ship);
+    Loadout lo = player_loadout(fs.player);
+    if (arch != fs.arch) {
+        fs.arch = arch;
+        fs.mesh = r.load_model(arch->model, arch->material_libraries);
+    }
+    fs.model = game::FlightModel(game::FlightParams::from(*arch, db.engine_of(lo), db.cruise_speed()));
     fs.player.ship = arch->nickname;
-    fs.player.loadout = lo ? lo->nickname : std::string();
     fs.player.hold_size = arch->hold_size;
     fs.npcs.clear();
-    fs.setup_combat(db, vfs, lo, r, args);
+    Args a = args;
+    if (!spawn_npcs) a.npcs = 0;
+    fs.setup_combat(db, vfs, &lo, r, a);
+}
+
+// A ship with the equipment of a loadout from the data (its first one if none is named).
+void set_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& r, const Args& args, const std::string& ship,
+              const std::string& loadout, bool spawn_npcs) {
+    const Loadout* lo = loadout.empty() ? nullptr : db.loadout(loadout);
+    if (!lo) lo = db.loadout_for_ship(ship);
+    fs.player.ship = ship;
+    fs.player.loadout = lo ? lo->nickname : std::string();
+    fs.player.equipment.clear();
+    if (lo)
+        for (auto& e : lo->equip) fs.player.equipment.push_back({e.item, e.hardpoint});
+    refit(fs, db, vfs, r, args, spawn_npcs);
 }
 
 // Puts a saved or new player into the world: system, ship, then docked or in space.
@@ -651,9 +827,8 @@ void apply_player(FlightSession& fs, game::PlayerState p, const ShipDatabase& db
     std::string base = p.base;
     p.base.clear();
     fs.player = std::move(p);
-    Args quiet = args;
-    quiet.npcs = 0;
-    set_ship(fs, db, vfs, r, quiet, fs.player.ship, fs.player.loadout);
+    if (fs.player.equipment.empty()) set_ship(fs, db, vfs, r, args, fs.player.ship, fs.player.loadout, false);
+    else refit(fs, db, vfs, r, args, false);
     fs.ship.vel = {};
     fs.input = {};
     if (!base.empty() && !fs.dock_at_base(r.system(), base)) SDL_Log("base %s not found in %s", base.c_str(), fs.player.system.c_str());
@@ -774,10 +949,12 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         fs->draw(renderer);
         hud.clear();
         auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
-        game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
-        if (fs->docked() && fs->econ) game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
+        // Docked: only the base screen, as the original hides the flight HUD at bases.
+        bool base_screen = fs->docked() && fs->econ;
+        if (base_screen) game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
+        else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
         renderer.set_hud(&hud);
-        if (hud_cfg.style == game::HudStyle::Classic)
+        if (!base_screen && hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
                 renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
@@ -840,7 +1017,7 @@ int run(const Args& args) {
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->universe = &universe;
             fs->spawn(renderer.system(), args);
-            set_ship(*fs, *ships, vfs, renderer, args, args.ship, {});
+            set_ship(*fs, *ships, vfs, renderer, args, args.ship, {}, true);
             fs->player.system = renderer.system().nickname;
             if (!args.load.empty()) {
                 auto p = read_save_file(args.load);
@@ -856,6 +1033,8 @@ int run(const Args& args) {
                 p.loadout = args.ship_given ? std::string() : start->loadout;
                 apply_player(*fs, p, *ships, vfs, renderer, cam, args);
             }
+            if (args.credits >= 0) fs->player.credits = args.credits;
+            if (args.rank >= 0) fs->player.rank = args.rank;
             fs->update_contacts(renderer.system());
             if (!fs->docked()) fs->next_target();
             fs->update_camera(cam, 1.0);
@@ -905,9 +1084,27 @@ int run(const Args& args) {
                     fs->update_combat(1.0 / 60);
                 }
                 for (auto& [good, n] : args.buys) {
-                    auto res = n >= 0 ? game::buy(*econ, fs->player, good, n) : game::sell(*econ, fs->player, good, -n);
+                    const Good* g = econ->good(good);
+                    game::TradeResult res;
+                    if (g && g->category == GoodCategory::Ship) res = game::buy_ship(*econ, fs->player, good);
+                    else if (g && g->category == GoodCategory::Equipment && n >= 0) res = game::buy_equipment(*econ, fs->player, good);
+                    else if (g && g->category == GoodCategory::Equipment) {
+                        res = game::TradeResult::NoneOwned;
+                        for (std::size_t i = 0; i < fs->player.equipment.size(); ++i)
+                            if (iequals(fs->player.equipment[i].item, good)) {
+                                res = game::sell_equipment(*econ, fs->player, i);
+                                break;
+                            }
+                    } else res = n >= 0 ? game::buy(*econ, fs->player, good, n) : game::sell(*econ, fs->player, good, -n);
+                    if (res == game::TradeResult::Ok && g && g->category != GoodCategory::Commodity)
+                        refit(*fs, *ships, vfs, renderer, args, false);
                     fs->trade_msg = game::trade_message(res);
                     SDL_Log("trade %s %d: %s, credits %lld", good.c_str(), n, fs->trade_msg.c_str(), static_cast<long long>(fs->player.credits));
+                }
+                if (fs->docked() && args.tab > 0) {
+                    std::string msg = fs->trade_msg;
+                    fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 2)));
+                    fs->trade_msg = msg;
                 }
                 if (!args.save_file.empty()) save_game(*fs, renderer, args.save_file);
                 fs->update_contacts(renderer.system());
@@ -955,10 +1152,16 @@ int run(const Args& args) {
                                 fs->trade_msg = "GAME LOADED";
                             }
                         } else if (fs->docked() && (e.key.key == SDLK_UP || e.key.key == SDLK_DOWN)) {
-                            int n = static_cast<int>(fs->trade_rows().size());
-                            if (n) fs->trade_sel = (fs->trade_sel + (e.key.key == SDLK_UP ? n - 1 : 1)) % n;
-                        } else if (fs->docked() && (e.key.key == SDLK_RIGHT || e.key.key == SDLK_LEFT))
+                            fs->select_row(e.key.key == SDLK_UP ? -1 : 1);
+                        } else if (fs->docked() && e.key.key >= SDLK_1 && e.key.key <= SDLK_3) {
+                            fs->set_tab(static_cast<FlightSession::Tab>(e.key.key - SDLK_1));
+                        } else if (fs->docked() && (e.key.key == SDLK_RIGHT || e.key.key == SDLK_LEFT)) {
                             fs->trade(e.key.key == SDLK_RIGHT ? 1 : -1, (e.key.mod & SDL_KMOD_SHIFT) != 0);
+                            if (fs->refit_needed) {
+                                fs->refit_needed = false;
+                                refit(*fs, *ships, vfs, renderer, args, false);
+                            }
+                        }
                         else if (e.key.key == SDLK_Z) { fs->input.throttle = 0; fs->input.cruise = false; }
                         else if (e.key.key == SDLK_W && (e.key.mod & SDL_KMOD_SHIFT)) fs->input.cruise = !fs->input.cruise;
                         else if (e.key.key == SDLK_S) fs->input.cruise = false;

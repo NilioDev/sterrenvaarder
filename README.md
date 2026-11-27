@@ -103,8 +103,12 @@ and the ship's `hold_size`; a base sells at the same price it buys, as in the or
 ./build/sterrenvaarder --data /path/to/DATA --load save.ini
 ```
 
-F3 docks at the selected base and launches again. Docked: Up/Down selects a commodity,
-Right buys, Left sells (Shift: as many as possible). F5 saves and F9 loads the quick save
+F3 docks at the selected base and launches again. Docked, keys 1-3 switch between the
+commodity trader, the equipment dealer and the ship dealer; Up/Down selects, Right buys,
+Left sells (Shift: as many commodities as possible). Equipment mounts on the first free
+hardpoint of a matching class (the ship's `hp_type` lines); a new ship trades in the old
+one with everything on it and comes with its package contents. Market lines above the
+player's level stay hidden. F5 saves and F9 loads the quick save
 (in the user's preferences folder, or `--save-file`). Saves are small text INI files. The
 base screen is a stand-in until the original base rooms and their interface are in.
 
