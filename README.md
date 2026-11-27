@@ -10,9 +10,9 @@ and later consoles).
 > Sterrenvaarder contains **no** game code or assets. It reads them from your own install.
 > Freelancer is a trademark of Microsoft; this project is not affiliated with Microsoft.
 
-## Status: phase 3, flight (in progress)
+## Status: phase 4, bases and economy (in progress)
 
-Data layer (phase 1) and renderer (phase 2) are done. Data layer results:
+Data layer (phase 1), renderer (phase 2) and flight (phase 3) are done. Data layer results:
 
 | Reader | Result on the retail v1.0 data |
 | --- | --- |
@@ -91,6 +91,22 @@ anchor, offset, size and visibility per panel. See
 Combat test: `--npcs 3 [--npc-ship pi_fighter]` spawns hostile ships with their own
 loadouts. Guns, munitions and shields come from the equipment INIs; shields absorb both
 damage types and rebuild after collapsing. `--fire` holds the trigger in screenshot runs.
+
+## Trading and saves (phase 4)
+
+Names come from the game's own text DLLs in the `EXE` folder next to `DATA` (or `--exe`),
+read as data only. Markets, prices and cargo space come from `goods.ini`, `market_*.ini`
+and the ship's `hold_size`; a base sells at the same price it buys, as in the original.
+
+```sh
+./build/sterrenvaarder --data /path/to/DATA --new-game   # docked on Planet Manhattan, as in a new game
+./build/sterrenvaarder --data /path/to/DATA --load save.ini
+```
+
+F3 docks at the selected base and launches again. Docked: Up/Down selects a commodity,
+Right buys, Left sells (Shift: as many as possible). F5 saves and F9 loads the quick save
+(in the user's preferences folder, or `--save-file`). Saves are small text INI files. The
+base screen is a stand-in until the original base rooms and their interface are in.
 
 ## Tools
 

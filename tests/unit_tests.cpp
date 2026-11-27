@@ -22,6 +22,9 @@ static int failures = 0;
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/navigation.hpp"
+#include "game/trade.hpp"
+#include "sterrenvaarder/economy.hpp"
+#include "sterrenvaarder/resources.hpp"
 
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
@@ -238,10 +241,118 @@ void test_lanes() {
     CHECK(std::fabs(sp.pos.z - 400) < 0.01 && std::fabs(sp.pos.x - 100) < 0.01);
 }
 
+static void put16(std::vector<std::uint8_t>& b, std::size_t o, std::uint16_t v) { b[o] = v & 0xFF; b[o + 1] = v >> 8; }
+static void put32(std::vector<std::uint8_t>& b, std::size_t o, std::uint32_t v) { put16(b, o, v & 0xFFFF); put16(b, o + 2, v >> 16); }
+
+// A minimal PE32 with one string block (ids 16..31) in a .rsrc section.
+static void test_resources() {
+    std::vector<std::uint8_t> pe(0x200 + 0x100, 0);
+    pe[0] = 'M'; pe[1] = 'Z';
+    put32(pe, 0x3C, 0x40);
+    put32(pe, 0x40, 0x00004550);
+    std::size_t coff = 0x44, opt = coff + 20;
+    put16(pe, coff + 2, 1);       // sections
+    put16(pe, coff + 16, 224);    // optional header size
+    put16(pe, opt, 0x10B);        // PE32
+    put32(pe, opt + 92, 16);      // data directories
+    put32(pe, opt + 96 + 16, 0x1000);  // resource directory rva
+    std::size_t sec = opt + 224;
+    std::memcpy(&pe[sec], ".rsrc", 5);
+    put32(pe, sec + 8, 0x100);    // virtual size
+    put32(pe, sec + 12, 0x1000);  // virtual address
+    put32(pe, sec + 16, 0x100);   // raw size
+    put32(pe, sec + 20, 0x200);   // raw pointer
+    std::size_t r = 0x200;
+    put16(pe, r + 14, 1); put32(pe, r + 16, 6); put32(pe, r + 20, 0x80000018);               // RT_STRING
+    put16(pe, r + 0x18 + 14, 1); put32(pe, r + 0x28, 2); put32(pe, r + 0x2C, 0x80000030);   // block 2
+    put16(pe, r + 0x30 + 14, 1); put32(pe, r + 0x40, 0x409); put32(pe, r + 0x44, 0x48);     // language
+    std::vector<std::uint16_t> block{2, 'H', 'i', 0, 2, 'N', 0xE9};
+    for (int i = 3; i < 16; ++i) block.push_back(0);
+    put32(pe, r + 0x48, 0x1000 + 0x58);
+    put32(pe, r + 0x4C, static_cast<std::uint32_t>(block.size() * 2));
+    for (std::size_t i = 0; i < block.size(); ++i) put16(pe, r + 0x58 + i * 2, block[i]);
+    auto res = PeResources::parse(pe);
+    CHECK(res.strings.size() == 2 && res.strings[16] == "Hi" && res.strings[18] == "N\xC3\xA9");
+    GameStrings gs;
+    gs.add(3, std::move(res));
+    CHECK(gs.string((3u << 16) | 18) == std::optional<std::string>("N\xC3\xA9"));
+    CHECK(gs.name(0, "fallback") == "fallback" && gs.name((3u << 16) | 16, "x") == "Hi");
+    CHECK(resource_dlls("[Resources]\nDLL = InfoCards.dll ; text\nDLL = NameResources.dll\n[Data]\n").size() == 2);
+}
+
+static void test_trade() {
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_trade_test";
+    fs::remove_all(root);
+    auto put = [&](const char* path, const char* text) {
+        fs::create_directories((root / path).parent_path());
+        std::ofstream(root / path) << text;
+    };
+    put("equipment/goods.ini",
+        "[Good]\nnickname = commodity_gold\nequipment = commodity_gold\ncategory = commodity\nprice = 425\n"
+        "[Good]\nnickname = commodity_water\nequipment = commodity_water\ncategory = commodity\nprice = 20\n"
+        "[Good]\nnickname = s_hull\ncategory = shiphull\nship = s_ship\nprice = 6000\nids_name = 12013\n");
+    put("equipment/select_equip.ini",
+        "[Commodity]\nnickname = commodity_gold\nids_name = 261610\nvolume = 1\n"
+        "[Commodity]\nnickname = commodity_water\nids_name = 261611\nvolume = 2\n");
+    put("equipment/market_commodities.ini",
+        "[BaseGood]\nbase = Li01_01_base\nMarketGood = commodity_gold, 0, -1, 150, 500, 0, 1.08\n"
+        "MarketGood = commodity_water, 0, -1, 0, 0, 1, 0.5\n"
+        "[BaseGood]\nbase = Li01_02_base\nMarketGood = commodity_gold, 0, -1, 0, 0, 1, 2\n");
+    put("universe/universe.ini", "[Base]\nnickname = Li01_01_Base\nsystem = Li01\nstrid_name = 196766\n");
+    put("characters/newcharacter.ini",
+        "[Package]\nnickname = p\nship = s_ship\nloadout = l\nmoney = 2000\n"
+        "[Faction]\nnickname = new_player\nbase = Li01_01_Base\nPackage = p\n");
+    Vfs vfs;
+    vfs.mount(root, "base");
+    Economy econ(vfs);
+    CHECK(econ.good_count() == 3 && econ.market_count() == 2);
+    CHECK(econ.base("li01_01_base") && econ.base("li01_01_base")->ids_name == 196766);
+    CHECK(std::lround(econ.price("Li01_01_Base", "commodity_gold")) == 459);
+    CHECK(econ.volume("commodity_water") == 2 && econ.name_id("commodity_gold") == 261610);
+    CHECK(econ.hull_of_ship("S_SHIP") && econ.hull_of_ship("S_SHIP")->price == 6000);
+
+    auto start = read_new_character(vfs);
+    CHECK(start && start->money == 2000 && start->ship == "s_ship" && start->base == "Li01_01_Base");
+
+    game::PlayerState p;
+    p.credits = 2000;
+    p.base = "Li01_01_Base";
+    p.system = "Li01";
+    p.ship = "s_ship";
+    p.hold_size = 3;
+    CHECK(game::max_buy(econ, p, "commodity_gold") == 3);  // hold limits before money (4 affordable)
+    CHECK(game::buy(econ, p, "commodity_water", 1) == game::TradeResult::NotSold);
+    CHECK(game::buy(econ, p, "commodity_gold", 4) == game::TradeResult::NoRoom);
+    CHECK(game::buy(econ, p, "commodity_gold", 2) == game::TradeResult::Ok);
+    CHECK(p.credits == 2000 - 2 * 459 && p.units("Commodity_Gold") == 2);
+    CHECK(game::max_buy(econ, p, "commodity_gold") == 1);
+    p.base = "Li01_02_base";
+    CHECK(game::buy(econ, p, "commodity_gold", 1) == game::TradeResult::NotSold);
+    CHECK(game::sell(econ, p, "commodity_gold", 3) == game::TradeResult::NoneOwned);
+    CHECK(game::sell(econ, p, "commodity_gold", 2) == game::TradeResult::Ok);
+    CHECK(p.credits == 2000 - 2 * 459 + 2 * 850 && p.cargo.empty());
+
+    p.cargo["commodity_water"] = 1;
+    p.credits = 5000000000LL;  // beyond 32 bits
+    auto text = game::write_save(p);
+    auto back = game::read_save(text);
+    CHECK(back && back->credits == 5000000000LL && back->base == "Li01_02_base" && back->system == "Li01");
+    CHECK(back && back->units("commodity_water") == 1 && back->hold_size == 3 && !back->position);
+    p.base.clear();
+    p.position = Vec3{1, 2, 3};
+    back = game::read_save(game::write_save(p));
+    CHECK(back && back->base.empty() && back->position && back->position->z == 3);
+    CHECK(!game::read_save("[Player]\nsystem = Li01\n"));
+    fs::remove_all(root);
+}
+
 int main() {
     test_flight();
     test_lanes();
     test_combat();
+    test_resources();
+    test_trade();
     test_hash();
     test_text_ini();
     test_bini();

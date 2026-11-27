@@ -4,6 +4,7 @@
 // aspect ratio (16:9 by default), so on 21:9 and 32:9 screens the gauges stay in
 // front of the player instead of drifting to the far edges. The 3D world still uses
 // the full width (Hor+ field of view).
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -71,12 +72,14 @@ struct HudLayout {
 };
 
 struct HudContact {
-    std::string name;
+    std::string name;   // nickname (used to find the object)
+    std::string label;  // display name from the game's strings; empty = nickname
     DVec3 pos;
     float radius = 0;   // for bracket size
     bool selected = false;
     bool hostile = false;
     float hull = -1, shield = -1;  // 0..1 for ships, < 0 for objects without them
+    const std::string& display() const { return label.empty() ? name : label; }
 };
 
 struct HudState {
@@ -103,6 +106,25 @@ struct HudModelDraw {
 // original 4:3 interface camera (cameras.ini [WinCamera] fovx), so at 4:3 each piece is
 // exactly its original size; on wider screens the pieces sit on the centred canvas.
 std::vector<HudModelDraw> classic_hud_models(const HudLayout& layout, const HudConfig& config, float win_fovx_deg = 54.432f);
+
+// Docked at a base: the commodity trader (a stand-in until the original base rooms and
+// their interface come in). Drawn centred on the HUD canvas.
+struct BaseScreenRow {
+    std::string name;
+    std::int64_t price = 0;
+    int owned = 0;
+    bool sold_here = false;  // false: the base only buys it
+    int can_buy = 0;         // most units affordable and fitting in the hold
+};
+struct BaseScreen {
+    std::string title, system;
+    std::int64_t credits = 0;
+    float hold_used = 0, hold_size = 0;
+    std::vector<BaseScreenRow> rows;
+    int selected = 0;
+    std::string message;  // last trade result
+};
+void build_base_screen(render::HudBatch& out, const HudLayout& layout, const BaseScreen& screen);
 
 void build_flight_hud(render::HudBatch& out, const HudLayout& layout, const HudConfig& config,
                       const render::Camera& cam, const DVec3& player_pos, const HudState& state);

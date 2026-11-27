@@ -121,6 +121,7 @@ const char* glyph(char ch) {
         case '!': return "20,24 25,26";
         case '=': return "02,42 04,44";
         case '_': return "06,46";
+        case '$': return "41,30,10,01,02,13,33,44,45,36,16,05 20,26";
         case '#': return "10,16 30,36 02,42 04,44";
         default: return "";
     }

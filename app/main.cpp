@@ -6,10 +6,14 @@
 //                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--fov 70] [--free]
 //                  [--screenshot out.png [--sim 4 --throttle 1 --cursor 0.3,-0.1]]
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
+//                  [--new-game] [--load save.ini] [--save-file save.ini] [--exe <EXE dir>]
+//                  [--buy good,count]...  (screenshot runs: trade after docking)
 //
 // Flight controls: mouse = steer (Space toggles mouse flight), W/S = throttle,
 //   Shift+W = cruise, A/D = strafe, Q/E = roll, Z = stop engines, T = next target,
-//   F11 = fullscreen, Esc = quit.
+//   F3 = autopilot to the target (dock, trade lane, jump gate) / launch when docked,
+//   F5 = quick save, F9 = quick load, F11 = fullscreen, Esc = quit.
+// Docked: Up/Down = select, Right = buy, Left = sell (Shift = as many as possible).
 // Free camera (--free): right mouse = look, WASD/QE = move, Shift = boost, wheel = speed.
 #include <SDL3/SDL.h>
 
@@ -17,7 +21,9 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -28,7 +34,10 @@
 #include "game/flight.hpp"
 #include "game/hud.hpp"
 #include "game/navigation.hpp"
+#include "game/trade.hpp"
 #include "render/renderer.hpp"
+#include "sterrenvaarder/economy.hpp"
+#include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
 #include "sterrenvaarder/png.hpp"
 
@@ -60,7 +69,11 @@ struct Args {
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
     bool fire = false;
-    std::string dock;  // screenshot runs: autopilot to this object first  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
+    std::string dock;  // screenshot runs: autopilot to this object first
+    bool ship_given = false;
+    bool new_game = false;
+    std::string load, save_file, exe;
+    std::vector<std::pair<std::string, int>> buys;  // screenshot runs: trades once docked
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -88,7 +101,16 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--camera") { a.camera = parse_vec(next()); a.has_camera = true; }
         else if (k == "--look") { a.look = parse_vec(next()); a.has_look = true; }
         else if (k == "--free") a.free = true;
-        else if (k == "--ship") a.ship = next();
+        else if (k == "--ship") { a.ship = next(); a.ship_given = true; }
+        else if (k == "--new-game") a.new_game = true;
+        else if (k == "--load") a.load = next();
+        else if (k == "--save-file") a.save_file = next();
+        else if (k == "--exe") a.exe = next();
+        else if (k == "--buy") {
+            auto v = next();
+            auto comma = v.find(',');
+            a.buys.emplace_back(v.substr(0, comma), comma == std::string::npos ? 1 : std::stoi(v.substr(comma + 1)));
+        }
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
         else if (k == "--hud-config") a.hud_config = next();
         else if (k == "--fov") a.fov = std::stof(next());
@@ -199,6 +221,101 @@ struct FlightSession {
     std::string pending_jump_system, pending_jump_object;  // handled by the main loop
     const Universe* universe = nullptr;
 
+    // Player, economy and text
+    const Economy* econ = nullptr;
+    const GameStrings* strings = nullptr;
+    game::PlayerState player;
+    int trade_sel = 0;
+    std::string trade_msg;
+    std::string docked_label;
+
+    bool docked() const { return nav == Nav::Docked; }
+
+    std::string label_of(const SystemObject& o) const {
+        return strings ? strings->name(static_cast<std::uint32_t>(o.ids_name), o.nickname) : o.nickname;
+    }
+    std::string base_label(const std::string& base) const {
+        const BaseInfo* b = econ ? econ->base(base) : nullptr;
+        return b && strings ? strings->name(b->ids_name, base) : base;
+    }
+
+    void on_docked(const SystemObject& o) {
+        nav = Nav::Docked;
+        nav_target = o.nickname;
+        ship.vel = {};
+        input.cruise = false;
+        player.base = !o.base.empty() ? o.base : o.dock_with;
+        docked_label = player.base.empty() ? label_of(o) : base_label(player.base);
+        trade_sel = 0;
+        trade_msg.clear();
+    }
+
+    // Commodities of the base's market, plus anything in the hold the base will buy.
+    struct TradeRow { std::string good; game::BaseScreenRow row; };
+    std::vector<TradeRow> trade_rows() const {
+        std::vector<TradeRow> out;
+        if (!econ || player.base.empty()) return out;
+        for (auto& m : econ->market(player.base)) {
+            const Good* g = econ->good(m.good);
+            if (!g || g->category != GoodCategory::Commodity) continue;
+            int owned = player.units(m.good);
+            if (!m.base_sells && !owned) continue;
+            TradeRow r;
+            r.good = to_lower(m.good);
+            r.row.name = strings ? strings->name(econ->name_id(m.good), m.good) : m.good;
+            r.row.price = static_cast<std::int64_t>(std::lround(econ->price(player.base, m.good)));
+            r.row.owned = owned;
+            r.row.sold_here = m.base_sells;
+            r.row.can_buy = game::max_buy(*econ, player, m.good);
+            out.push_back(std::move(r));
+        }
+        return out;
+    }
+
+    // dir > 0 buys, dir < 0 sells; `all` trades as many units as possible.
+    void trade(int dir, bool all) {
+        auto rows = trade_rows();
+        if (rows.empty()) return;
+        trade_sel = std::clamp(trade_sel, 0, static_cast<int>(rows.size()) - 1);
+        auto& r = rows[trade_sel];
+        int n = 1;
+        if (all) n = dir > 0 ? game::max_buy(*econ, player, r.good) : player.units(r.good);
+        if (n <= 0) n = 1;  // reports why nothing can be traded
+        auto res = dir > 0 ? game::buy(*econ, player, r.good, n) : game::sell(*econ, player, r.good, n);
+        trade_msg = res == game::TradeResult::Ok ? std::string(dir > 0 ? "BOUGHT " : "SOLD ") + std::to_string(n) + " " + r.row.name
+                                                 : game::trade_message(res);
+    }
+
+    game::BaseScreen base_screen(const StarSystem& sys) const {
+        game::BaseScreen b;
+        b.title = docked_label;
+        b.system = sys.nickname;
+        b.credits = player.credits;
+        b.hold_used = econ ? game::cargo_used(*econ, player) : 0;
+        b.hold_size = player.hold_size;
+        for (auto& r : trade_rows()) b.rows.push_back(r.row);
+        b.selected = std::clamp(trade_sel, 0, std::max(0, static_cast<int>(b.rows.size()) - 1));
+        b.message = trade_msg;
+        return b;
+    }
+
+    // Puts the ship docked at a base of this system (new games and loaded saves).
+    bool dock_at_base(const StarSystem& sys, const std::string& base) {
+        const SystemObject* best = nullptr;
+        for (auto& o : sys.objects)
+            if (iequals(o.base, base)) { best = &o; break; }
+        if (!best)
+            for (auto& o : sys.objects)
+                if (iequals(o.dock_with, base)) { best = &o; break; }
+        if (!best) return false;
+        auto sp = game::exit_point(*best, approach_distance(*best) + 100.f);
+        ship.pos = sp.pos;
+        ship.orient = sp.orient;
+        cam_orient = sp.orient;
+        on_docked(*best);
+        return true;
+    }
+
     float approach_distance(const SystemObject& o) const {
         if (o.is_tradelane()) return 120.f;
         if (o.is_jump()) return 250.f;
@@ -218,6 +335,8 @@ struct FlightSession {
                 cam_orient = ship.orient;
             }
             nav = Nav::Free;
+            player.base.clear();
+            trade_msg.clear();
             input.throttle = 0.5f;
             return;
         }
@@ -233,7 +352,7 @@ struct FlightSession {
         switch (nav) {
             case Nav::Approach: return "AUTOPILOT: " + nav_target;
             case Nav::Lane: return "TRADE LANE";
-            case Nav::Docked: return "DOCKED: " + nav_target + "  (F3 = LAUNCH)";
+            case Nav::Docked: return "DOCKED: " + docked_label + "  (F3 = LAUNCH)";
             default: return {};
         }
     }
@@ -271,8 +390,7 @@ struct FlightSession {
                 pending_jump_object = o->goto_object;
                 nav = Nav::Free;
             } else {
-                nav = Nav::Docked;
-                ship.vel = {};
+                on_docked(*o);
             }
             input.cruise = false;
             return true;
@@ -440,6 +558,7 @@ struct FlightSession {
         for (auto& o : sys.objects) {
             game::HudContact c;
             c.name = o.nickname;
+            c.label = label_of(o);
             c.pos = {o.pos.x, o.pos.y, o.pos.z};
             c.radius = 200;
             contacts.push_back(std::move(c));
@@ -498,13 +617,127 @@ struct FlightSession {
         h.cursor_x = cursor_x;
         h.cursor_y = cursor_y;
         h.system_name = sys.nickname;
-        h.status = nav_status();
+        h.status = docked() && econ ? std::string() : nav_status();  // the base screen names the base
         h.hull = body.max_hull > 0 ? body.hull / body.max_hull : 1;
         h.shield = body.max_shield > 0 ? body.shield / body.max_shield : 0;
         h.contacts = contacts;
         return h;
     }
 };
+
+// Loads the player's ship (model, flight model, guns, shield, hold) into the session.
+void set_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& r, const Args& args, const std::string& ship,
+              const std::string& loadout) {
+    const ShipArchetype* arch = db.ship(ship);
+    if (!arch) throw std::runtime_error("unknown ship " + ship);
+    const Loadout* lo = loadout.empty() ? nullptr : db.loadout(loadout);
+    if (!lo) lo = db.loadout_for_ship(ship);
+    fs.arch = arch;
+    fs.model = game::FlightModel(game::FlightParams::from(*arch, lo ? db.engine_of(*lo) : nullptr, db.cruise_speed()));
+    fs.mesh = r.load_model(arch->model, arch->material_libraries);
+    fs.player.ship = arch->nickname;
+    fs.player.loadout = lo ? lo->nickname : std::string();
+    fs.player.hold_size = arch->hold_size;
+    fs.npcs.clear();
+    fs.setup_combat(db, vfs, lo, r, args);
+}
+
+// Puts a saved or new player into the world: system, ship, then docked or in space.
+void apply_player(FlightSession& fs, game::PlayerState p, const ShipDatabase& db, const Vfs& vfs, Renderer& r, Camera& cam,
+                  const Args& args) {
+    if (!iequals(r.system().nickname, p.system)) r.load_system(p.system);
+    fs.nav = FlightSession::Nav::Free;
+    fs.lane.reset();
+    std::string base = p.base;
+    p.base.clear();
+    fs.player = std::move(p);
+    Args quiet = args;
+    quiet.npcs = 0;
+    set_ship(fs, db, vfs, r, quiet, fs.player.ship, fs.player.loadout);
+    fs.ship.vel = {};
+    fs.input = {};
+    if (!base.empty() && !fs.dock_at_base(r.system(), base)) SDL_Log("base %s not found in %s", base.c_str(), fs.player.system.c_str());
+    if (base.empty() && fs.player.position) {
+        fs.ship.pos = {fs.player.position->x, fs.player.position->y, fs.player.position->z};
+        fs.cam_orient = fs.ship.orient;
+    }
+    fs.target = -1;
+    fs.update_contacts(r.system());
+    fs.update_camera(cam, 1.0);
+}
+
+std::string save_path(const Args& args) {
+    if (!args.save_file.empty()) return args.save_file;
+    char* pref = SDL_GetPrefPath("Sterrenvaarder", "Sterrenvaarder");
+    std::string dir = pref ? pref : "";
+    SDL_free(pref);
+    return dir + "quicksave.ini";
+}
+
+void save_game(FlightSession& fs, const Renderer& r, const std::string& path) {
+    game::PlayerState p = fs.player;
+    p.system = r.system().nickname;
+    if (fs.docked()) {
+        p.position.reset();
+    } else {
+        p.base.clear();
+        p.position = Vec3{static_cast<float>(fs.ship.pos.x), static_cast<float>(fs.ship.pos.y), static_cast<float>(fs.ship.pos.z)};
+    }
+    std::ofstream f(path, std::ios::binary);
+    f << game::write_save(p);
+    fs.trade_msg = f ? "GAME SAVED" : "SAVE FAILED";
+    SDL_Log("%s: %s", fs.trade_msg.c_str(), path.c_str());
+}
+
+std::optional<game::PlayerState> read_save_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return game::read_save(text);
+}
+
+// The game's EXE folder (Freelancer.ini and the text DLLs): --exe, or EXE next to DATA.
+std::filesystem::path find_ci(const std::filesystem::path& dir, std::string_view name) {
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (iequals(e.path().filename().string(), name)) return e.path();
+    return {};
+}
+
+std::filesystem::path find_exe_dir(const Args& args) {
+    if (!args.exe.empty()) return args.exe;
+    auto data = std::filesystem::absolute(args.mounts[0]).lexically_normal();
+    if (!data.has_filename()) data = data.parent_path();
+    return find_ci(data.parent_path(), "EXE");
+}
+
+// Reads Freelancer.ini ([Data] file lists) and the text resources, if the EXE folder is there.
+GameStrings load_strings(const std::filesystem::path& exe, DataFiles& files) {
+    GameStrings gs;
+    if (exe.empty()) {
+        SDL_Log("no EXE folder found next to DATA (use --exe): names fall back to nicknames");
+        return gs;
+    }
+    std::vector<std::string> dlls;
+    if (auto ini = find_ci(exe, "freelancer.ini"); !ini.empty()) {
+        auto b = read_file(ini);
+        std::string_view text(reinterpret_cast<const char*>(b.data()), b.size());
+        files.read_freelancer_ini(text);
+        dlls = resource_dlls(text);
+    }
+    dlls.insert(dlls.begin(), "resources.dll");
+    for (std::size_t i = 0; i < dlls.size(); ++i) {
+        auto path = find_ci(exe, dlls[i]);
+        if (path.empty()) continue;
+        try {
+            gs.add(static_cast<std::uint32_t>(i), PeResources::parse(read_file(path)));
+        } catch (const std::exception& e) {
+            SDL_Log("%s: %s", dlls[i].c_str(), e.what());
+        }
+    }
+    SDL_Log("text resources: %zu strings from %s", gs.size(), exe.string().c_str());
+    return gs;
+}
 
 // Completes a jump the navigation asked for: load the target system and appear in
 // front of the destination gate or hole.
@@ -542,6 +775,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         hud.clear();
         auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
         game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
+        if (fs->docked() && fs->econ) game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
         renderer.set_hud(&hud);
         if (hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
@@ -554,6 +788,8 @@ int run(const Args& args) {
     Vfs vfs;
     for (std::size_t i = 0; i < args.mounts.size(); ++i) vfs.mount(args.mounts[i], i == 0 ? "base" : args.mounts[i]);
     Universe universe(vfs);
+    DataFiles files;
+    GameStrings strings = load_strings(find_exe_dir(args), files);
 
     const bool offscreen = !args.screenshot.empty();
     if (offscreen) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
@@ -581,16 +817,16 @@ int run(const Args& args) {
         RenderSettings settings = args.settings;
 
         std::unique_ptr<ShipDatabase> ships;
+        std::unique_ptr<Economy> econ;
         std::unique_ptr<FlightSession> fs;
         if (!args.free) {
-            ships = std::make_unique<ShipDatabase>(vfs);
+            ships = std::make_unique<ShipDatabase>(vfs, files);
+            econ = std::make_unique<Economy>(vfs, files);
             fs = std::make_unique<FlightSession>();
-            fs->arch = ships->ship(args.ship);
-            if (!fs->arch) throw std::runtime_error("unknown ship " + args.ship);
-            const EngineArchetype* engine = nullptr;
-            if (auto* lo = ships->loadout_for_ship(args.ship)) engine = ships->engine_of(*lo);
-            fs->model = game::FlightModel(game::FlightParams::from(*fs->arch, engine, ships->cruise_speed()));
-            fs->mesh = renderer.load_model(fs->arch->model, fs->arch->material_libraries);
+            fs->econ = econ.get();
+            fs->strings = &strings;
+            auto start = read_new_character(vfs);
+            fs->player.credits = start ? start->money : 2000;
             // Field of view: the chase camera's fovx from cameras.ini was defined for 4:3.
             // Keep that vertical angle and let wider screens see more to the sides (Hor+).
             float fovx = 70;
@@ -602,11 +838,26 @@ int run(const Args& args) {
                     }
             if (args.fov > 0) fovx = std::clamp(args.fov, 40.f, 120.f);
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
-            fs->spawn(renderer.system(), args);
             fs->universe = &universe;
-            fs->setup_combat(*ships, vfs, ships->loadout_for_ship(args.ship), renderer, args);
+            fs->spawn(renderer.system(), args);
+            set_ship(*fs, *ships, vfs, renderer, args, args.ship, {});
+            fs->player.system = renderer.system().nickname;
+            if (!args.load.empty()) {
+                auto p = read_save_file(args.load);
+                if (!p) throw std::runtime_error("cannot read save " + args.load);
+                apply_player(*fs, *p, *ships, vfs, renderer, cam, args);
+            } else if (args.new_game) {
+                if (!start) throw std::runtime_error("characters/newcharacter.ini not found");
+                game::PlayerState p;
+                p.credits = start->money;
+                p.base = start->base;
+                p.system = econ->base(start->base) ? econ->base(start->base)->system : args.system;
+                p.ship = args.ship_given ? args.ship : start->ship;
+                p.loadout = args.ship_given ? std::string() : start->loadout;
+                apply_player(*fs, p, *ships, vfs, renderer, cam, args);
+            }
             fs->update_contacts(renderer.system());
-            fs->next_target();
+            if (!fs->docked()) fs->next_target();
             fs->update_camera(cam, 1.0);
             SDL_Log("ship %s: top speed %.0f m/s, cruise %.0f m/s", fs->arch->nickname.c_str(), fs->model.params().max_speed(),
                     fs->model.params().cruise_speed);
@@ -653,6 +904,12 @@ int run(const Args& args) {
                     fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
                     fs->update_combat(1.0 / 60);
                 }
+                for (auto& [good, n] : args.buys) {
+                    auto res = n >= 0 ? game::buy(*econ, fs->player, good, n) : game::sell(*econ, fs->player, good, -n);
+                    fs->trade_msg = game::trade_message(res);
+                    SDL_Log("trade %s %d: %s, credits %lld", good.c_str(), n, fs->trade_msg.c_str(), static_cast<long long>(fs->player.credits));
+                }
+                if (!args.save_file.empty()) save_game(*fs, renderer, args.save_file);
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
@@ -691,6 +948,17 @@ int run(const Args& args) {
                         if (e.key.key == SDLK_SPACE) fs->mouse_flight = !fs->mouse_flight;
                         else if (e.key.key == SDLK_T) fs->next_target();
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
+                        else if (e.key.key == SDLK_F5) save_game(*fs, renderer, save_path(args));
+                        else if (e.key.key == SDLK_F9) {
+                            if (auto p = read_save_file(save_path(args))) {
+                                apply_player(*fs, *p, *ships, vfs, renderer, cam, args);
+                                fs->trade_msg = "GAME LOADED";
+                            }
+                        } else if (fs->docked() && (e.key.key == SDLK_UP || e.key.key == SDLK_DOWN)) {
+                            int n = static_cast<int>(fs->trade_rows().size());
+                            if (n) fs->trade_sel = (fs->trade_sel + (e.key.key == SDLK_UP ? n - 1 : 1)) % n;
+                        } else if (fs->docked() && (e.key.key == SDLK_RIGHT || e.key.key == SDLK_LEFT))
+                            fs->trade(e.key.key == SDLK_RIGHT ? 1 : -1, (e.key.mod & SDL_KMOD_SHIFT) != 0);
                         else if (e.key.key == SDLK_Z) { fs->input.throttle = 0; fs->input.cruise = false; }
                         else if (e.key.key == SDLK_W && (e.key.mod & SDL_KMOD_SHIFT)) fs->input.cruise = !fs->input.cruise;
                         else if (e.key.key == SDLK_S) fs->input.cruise = false;

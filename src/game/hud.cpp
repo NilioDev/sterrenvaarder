@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "game/hud.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -198,7 +199,7 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
         for (auto& c : st.contacts) {
             if (shown++ >= 8) break;
             HudColor col = c.selected ? kTarget : kLine.with_alpha(0.85f);
-            std::string name = c.name.size() > 22 ? c.name.substr(0, 22) : c.name;
+            std::string name = c.display().size() > 22 ? c.display().substr(0, 22) : c.display();
             h.text(x + 18 * sc, row, 8.5f * sc, name, col);
             h.text(x + w - 18 * sc, row, 8.5f * sc, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
             row += 17 * sc;
@@ -210,7 +211,7 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
         for (auto& c : st.contacts) {
             if (!c.selected) continue;
             float ty = y + 0.035f * ppu * cfg.target.scale;
-            h.text(x + w * 0.5f, ty, 10 * sc, c.name.size() > 24 ? c.name.substr(0, 24) : c.name, kTarget, TextAlign::Center);
+            h.text(x + w * 0.5f, ty, 10 * sc, c.display().size() > 24 ? c.display().substr(0, 24) : c.display(), kTarget, TextAlign::Center);
             h.text(x + w * 0.5f, y + hh - 34 * sc, 10 * sc, fmt_distance((c.pos - player_pos).length()), kLine, TextAlign::Center);
             if (c.hull >= 0) {
                 float bw = w * 0.6f, bx = x + (w - bw) * 0.5f, bh = 6 * sc;
@@ -295,7 +296,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
                     h.line(x0, y0, x0 - sx * t, y0, 2 * s, kTarget);
                     h.line(x0, y0, x0, y0 - sy * t, 2 * s, kTarget);
                 }
-                h.text(px, py + b + 8 * s, 13 * s, c.name, kTarget, TextAlign::Center);
+                h.text(px, py + b + 8 * s, 13 * s, c.display(), kTarget, TextAlign::Center);
                 h.text(px, py + b + 28 * s, 11 * s, fmt_distance(dist), kTarget.with_alpha(0.8f), TextAlign::Center);
             } else {
                 // Off-screen: an arrow on a ring around the reticle pointing towards it.
@@ -377,7 +378,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     h.text(qx + 16 * s, py0 + 14 * s, 10 * s, "TARGET", kLine);
     for (auto& c : st.contacts) {
         if (!c.selected) continue;
-        h.text(qx + 16 * s, py0 + 36 * s, 11 * s, c.name.size() > 26 ? c.name.substr(0, 26) : c.name, kTarget);
+        h.text(qx + 16 * s, py0 + 36 * s, 11 * s, c.display().size() > 26 ? c.display().substr(0, 26) : c.display(), kTarget);
         h.text(qx + pw - 16 * s, py0 + 14 * s, 10 * s, fmt_distance((c.pos - player_pos).length()), kTarget, TextAlign::Right);
         break;
     }
@@ -387,7 +388,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     for (auto& c : st.contacts) {
         if (shown++ >= 6) break;
         HudColor col = c.selected ? kTarget : kLine.with_alpha(0.8f);
-        std::string name = c.name.size() > 24 ? c.name.substr(0, 24) : c.name;
+        std::string name = c.display().size() > 24 ? c.display().substr(0, 24) : c.display();
         h.text(qx + 16 * s, row, 8.5f * s, name, col);
         h.text(qx + pw - 16 * s, row, 8.5f * s, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
         row += 17 * s;
@@ -404,6 +405,63 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
         L.place(cfg.system, w, ts, x, y);
         h.text(x, y, ts, st.system_name, kLine);
     }
+}
+
+namespace {
+
+// "$1,234,567", like the original's money display.
+std::string fmt_money(std::int64_t v) {
+    std::string digits = std::to_string(v < 0 ? -v : v), out;
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        if (i && (digits.size() - i) % 3 == 0) out += ',';
+        out += digits[i];
+    }
+    return (v < 0 ? "-$" : "$") + out;
+}
+
+}  // namespace
+
+void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
+    float s = L.scale;
+    float w = std::min(L.canvas_w - 40 * s, 900 * s), ph = 560 * s;
+    float x = L.cx() - w * 0.5f, y = L.canvas_y + L.canvas_h * 0.1f;
+    panel(h, x, y, w, ph, s);
+    float pad = 26 * s;
+    h.text(x + pad, y + pad, 18 * s, b.title, kTarget);
+    h.text(x + w - pad, y + pad, 12 * s, b.system, kDim, TextAlign::Right);
+    char buf[96];
+    h.text(x + pad, y + pad + 34 * s, 12 * s, "CREDITS  " + fmt_money(b.credits), kLine);
+    std::snprintf(buf, sizeof buf, "CARGO  %d / %d", static_cast<int>(std::lround(b.hold_used)), static_cast<int>(std::lround(b.hold_size)));
+    h.text(x + w - pad, y + pad + 34 * s, 12 * s, buf, kLine, TextAlign::Right);
+    bar(h, x + pad, y + pad + 56 * s, w - 2 * pad, 4 * s, b.hold_size > 0 ? b.hold_used / b.hold_size : 0, kHull, s);
+
+    float ty = y + pad + 82 * s;
+    float c_price = x + w * 0.62f, c_owned = x + w * 0.76f, c_buy = x + w - pad;
+    h.text(x + pad + 14 * s, ty, 10 * s, "COMMODITY", kDim);
+    h.text(c_price, ty, 10 * s, "PRICE", kDim, TextAlign::Right);
+    h.text(c_owned, ty, 10 * s, "IN HOLD", kDim, TextAlign::Right);
+    h.text(c_buy, ty, 10 * s, "CAN BUY", kDim, TextAlign::Right);
+    ty += 24 * s;
+    const float row_h = 22 * s;
+    const int visible = static_cast<int>((y + ph - 70 * s - ty) / row_h);
+    int first = std::clamp(b.selected - visible / 2, 0, std::max(0, static_cast<int>(b.rows.size()) - visible));
+    for (int i = first; i < static_cast<int>(b.rows.size()) && i < first + visible; ++i) {
+        auto& r = b.rows[i];
+        bool sel = i == b.selected;
+        HudColor col = sel ? kTarget : (r.sold_here || r.owned ? kLine : kDim);
+        if (sel) h.rect(x + pad, ty - 5 * s, w - 2 * pad, row_h, kTarget.with_alpha(0.12f));
+        std::string name = r.name.size() > 30 ? r.name.substr(0, 30) : r.name;
+        h.text(x + pad + 14 * s, ty, 11 * s, name, col);
+        h.text(c_price, ty, 11 * s, fmt_money(r.price), col, TextAlign::Right);
+        std::snprintf(buf, sizeof buf, "%d", r.owned);
+        h.text(c_owned, ty, 11 * s, r.owned ? buf : "-", col, TextAlign::Right);
+        std::snprintf(buf, sizeof buf, "%d", r.can_buy);
+        h.text(c_buy, ty, 11 * s, r.sold_here ? buf : "SELL ONLY", col, TextAlign::Right);
+        ty += row_h;
+    }
+    float fy = y + ph - pad - 10 * s;
+    h.text(x + pad, fy, 10 * s, "UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH   F5 SAVE", kDim);
+    if (!b.message.empty()) h.text(x + w - pad, fy - 24 * s, 11 * s, b.message, kCruise, TextAlign::Right);
 }
 
 }  // namespace sterrenvaarder::game
