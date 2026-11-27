@@ -19,6 +19,7 @@
 using namespace sterrenvaarder;
 
 static int failures = 0;
+#include "game/ai.hpp"
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/navigation.hpp"
@@ -26,6 +27,7 @@ static int failures = 0;
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/lua32.hpp"
+#include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/thn.hpp"
 
@@ -511,6 +513,65 @@ static void test_thn() {
     fs::remove_all(root);
 }
 
+static void test_pilots_and_ai() {
+    using namespace sterrenvaarder;
+    using namespace sterrenvaarder::game;
+    const char* text =
+        "[GunBlock]\nnickname = gun_a\ngun_fire_interval_time = 0.1\ngun_fire_burst_interval_time = 1\n"
+        "gun_fire_no_burst_interval_time = 1\ngun_fire_accuracy_cone_angle = 2\ngun_range_threshold = 1\n"
+        "[GunBlock]\nnickname = gun_b\ngun_fire_accuracy_cone_angle = 9\n"
+        "[BuzzHeadTowardBlock]\nnickname = buzz_a\nbuzz_min_distance_to_head_toward = 600\nbuzz_max_time_to_head_away = 4\n"
+        "buzz_head_toward_engine_throttle = 1\nbuzz_head_toward_turn_throttle = 1\n"
+        "[BuzzPassByBlock]\nnickname = pass_a\nbuzz_distance_to_pass_by = 150\nbuzz_pass_by_time = 1\n"
+        "buzz_pass_by_style_weight = straight_by, 1.0\n"
+        "[EvadeBreakBlock]\nnickname = break_a\nevade_break_time = 2\nevade_break_interval_time = 5\n"
+        "evade_break_style_weight = outrun, 1.0\nevade_break_direction_weight = left, 1.0\n"
+        "[DamageReactionBlock]\nnickname = dmg_a\nevade_break_damage_trigger_percent = 0.1\n"
+        "[JobBlock]\nnickname = job_a\nflee_when_hull_damaged_percent = 0.8\n"
+        "[Pilot]\nnickname = base\ngun_id = gun_a\nbuzz_head_toward_id = buzz_a\nbuzz_pass_by_id = pass_a\n"
+        "evade_break_id = break_a\ndamage_reaction_id = dmg_a\njob_id = job_a\n"
+        "[Pilot]\nnickname = child\ninherit = base\ngun_id = gun_b\n";
+    PilotDb db;
+    db.add(parse_text_ini(text));
+    CHECK(db.size() == 2);
+    const Pilot* base = db.pilot("BASE");
+    const Pilot* child = db.pilot("child");
+    CHECK(base && child && !db.pilot("nobody"));
+    if (!base || !child) return;
+    CHECK(std::abs(base->gun.accuracy_cone_deg - 2) < 1e-4f && std::abs(child->gun.accuracy_cone_deg - 9) < 1e-4f);
+    CHECK(child->has_buzz && std::abs(child->buzz_head_toward.min_distance - 600) < 1e-3f);  // inherited
+    CHECK(child->buzz_pass_by.styles.size() == 1 && child->buzz_pass_by.styles[0].first == "straight_by");
+
+    // A head-on run: approach, pass by, head away, then come round again.
+    game::FighterAi ai(*base, 7);
+    game::AiBody self{{0, 0, 0}, {0, 0, -80}, {}};
+    game::AiBody tgt{{0, 0, -1000}, {0, 0, 0}, game::Quat::look({0, 0, 1})};
+    game::AiWeapons w{600, 700};
+    bool fired = false, passed = false, away = false;
+    for (int i = 0; i < 400; ++i) {
+        auto out = ai.update(self, tgt, 1.f, true, w, 0.05f);
+        fired |= out.fire;
+        if (ai.state() == game::FighterAi::State::PassBy) passed = true;
+        if (passed && ai.state() == game::FighterAi::State::HeadAway) away = true;
+        // Crude motion: fly where the steering points at a fixed speed.
+        Vec3 f = self.orient.forward();
+        self.orient = game::Quat::look(f + Vec3{out.input.steer.y * -0.05f, out.input.steer.x * 0.05f, 0});
+        self.vel = game::to_d(self.orient.forward() * 80.f);
+        self.pos = self.pos + self.vel * 0.05;
+    }
+    CHECK(fired && passed && away);
+
+    // Heavy damage: break away; more: flee.
+    game::FighterAi hurt(*base, 3);
+    game::AiBody me{{0, 0, 0}, {}, {}};
+    hurt.update(me, tgt, 1.f, true, w, 0.1f);
+    hurt.update(me, tgt, 0.85f, true, w, 0.1f);
+    CHECK(hurt.state() == game::FighterAi::State::Break);
+    hurt.update(me, tgt, 0.1f, true, w, 0.1f);
+    CHECK(hurt.state() == game::FighterAi::State::Flee);
+    CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
+}
+
 int main() {
     test_thn();
     test_flight();
@@ -527,6 +588,7 @@ int main() {
     test_vfs_normalize();
     test_vfs_layers();
     test_png();
+    test_pilots_and_ai();
     std::printf(failures ? "%d test(s) failed\n" : "all unit tests passed\n", failures);
     return failures ? 1 : 0;
 }
