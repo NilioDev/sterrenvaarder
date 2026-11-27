@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: MPL-2.0
+#pragma once
+// Ship and equipment archetypes from the user's own game data (shiparch.ini, equipment
+// INIs, loadouts). Only the values the engine needs are kept; unknown keys are ignored
+// so modded data with extra fields loads unchanged.
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+#include "sterrenvaarder/ini.hpp"
+#include "sterrenvaarder/math.hpp"
+#include "sterrenvaarder/vfs.hpp"
+
+namespace sterrenvaarder {
+
+struct ShipArchetype {
+    std::string nickname;
+    std::string type;    // FIGHTER, FREIGHTER, ...
+    std::string model;   // DA_archetype
+    std::vector<std::string> material_libraries;
+    std::vector<float> lod_ranges;
+    float mass = 100;
+    float linear_drag = 1;
+    Vec3 steering_torque{20000, 20000, 60000};  // pitch, yaw, roll
+    Vec3 angular_drag{20000, 20000, 60000};
+    Vec3 rotation_inertia{5000, 5000, 5000};
+    float strafe_force = 10000;
+    float nudge_force = 0;
+    float max_bank_angle = 30;      // degrees
+    Vec2 camera_offset{8, 34};      // up, back
+    float camera_angular_acceleration = 0.05f;
+    float camera_horizontal_turn_angle = 17;
+    float camera_vertical_turn_up_angle = 5;
+    float camera_vertical_turn_down_angle = 25;
+    float hit_pts = 1000;
+    float hold_size = 0;
+    int nanobot_limit = 0, shield_battery_limit = 0;
+};
+
+struct EngineArchetype {
+    std::string nickname;
+    float max_force = 48000;
+    float linear_drag = 600;
+    float reverse_fraction = 0.2f;
+    float cruise_charge_time = 5;
+};
+
+struct Loadout {
+    std::string nickname;
+    std::string archetype;
+    struct Equip { std::string item, hardpoint; };
+    std::vector<Equip> equip;
+};
+
+// Default data file lists, as given in an unmodified Freelancer.ini. Freelancer.ini
+// itself lives next to the executable, so it is read when the user points us at it.
+struct DataFiles {
+    std::vector<std::string> ships{"ships/shiparch.ini", "ships/rtc_shiparch.ini"};
+    std::vector<std::string> equipment{"equipment/light_equip.ini", "equipment/select_equip.ini",
+                                       "equipment/misc_equip.ini",  "equipment/engine_equip.ini",
+                                       "equipment/st_equip.ini",    "equipment/weapon_equip.ini",
+                                       "equipment/prop_equip.ini"};
+    std::vector<std::string> loadouts{"ships/loadouts.ini", "ships/loadouts_special.ini",
+                                      "ships/loadouts_utility.ini", "solar/loadouts.ini"};
+    // Reads the [Data] section of a Freelancer.ini (text), replacing the defaults for
+    // every list it mentions.
+    void read_freelancer_ini(std::string_view text);
+};
+
+class ShipDatabase {
+public:
+    ShipDatabase(const Vfs& vfs, const DataFiles& files = {});
+
+    const ShipArchetype* ship(std::string_view nickname) const;
+    const EngineArchetype* engine(std::string_view nickname) const;
+    const Loadout* loadout(std::string_view nickname) const;
+    // First loadout for this ship archetype, if any (used for NPC and test ships).
+    const Loadout* loadout_for_ship(std::string_view ship_nickname) const;
+    // The engine named in a loadout, or nullptr.
+    const EngineArchetype* engine_of(const Loadout& l) const;
+
+    // Cruise speed: 300 m/s unless the data sets [EngineEquipConsts] CRUISING_SPEED.
+    float cruise_speed() const { return cruise_speed_; }
+    const std::vector<std::string>& ship_order() const { return ship_order_; }
+
+private:
+    std::unordered_map<std::string, ShipArchetype> ships_;
+    std::unordered_map<std::string, EngineArchetype> engines_;
+    std::unordered_map<std::string, Loadout> loadouts_;
+    std::unordered_map<std::string, std::string> first_loadout_;
+    std::vector<std::string> ship_order_;
+    float cruise_speed_ = 300;
+};
+
+}  // namespace sterrenvaarder

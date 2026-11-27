@@ -23,8 +23,14 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/png.cpp
   src/sterrenvaarder/universe.cpp
   src/sterrenvaarder/sphere.cpp
+  src/sterrenvaarder/ships.cpp
 )
 target_include_directories(sterrenvaarder_data PUBLIC src)
+
+# Game logic without graphics (flight model); unit-tested headless.
+add_library(sterrenvaarder_game src/game/flight.cpp)
+target_include_directories(sterrenvaarder_game PUBLIC src)
+target_link_libraries(sterrenvaarder_game PUBLIC sterrenvaarder_data)
 
 add_executable(sv-dump tools/sv_dump.cpp)
 target_link_libraries(sv-dump PRIVATE sterrenvaarder_data)
@@ -34,7 +40,7 @@ target_link_libraries(sv-export PRIVATE sterrenvaarder_data)
 
 enable_testing()
 add_executable(sterrenvaarder_tests tests/unit_tests.cpp)
-target_link_libraries(sterrenvaarder_tests PRIVATE sterrenvaarder_data)
+target_link_libraries(sterrenvaarder_tests PRIVATE sterrenvaarder_game)
 add_test(NAME unit COMMAND sterrenvaarder_tests)
 
 add_executable(sterrenvaarder_corpus tests/corpus_test.cpp)
@@ -57,9 +63,11 @@ if(SV_BUILD_CLIENT)
   add_library(sterrenvaarder_render
     src/render/gpu.cpp
     src/render/renderer.cpp
+    src/render/hud_batch.cpp
+    src/game/hud.cpp
   )
   target_include_directories(sterrenvaarder_render PUBLIC src)
-  target_link_libraries(sterrenvaarder_render PUBLIC sterrenvaarder_data SDL3::SDL3-static)
+  target_link_libraries(sterrenvaarder_render PUBLIC sterrenvaarder_game SDL3::SDL3-static)
 
   add_executable(sterrenvaarder app/main.cpp)
   target_link_libraries(sterrenvaarder PRIVATE sterrenvaarder_render)

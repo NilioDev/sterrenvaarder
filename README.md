@@ -10,7 +10,9 @@ and later consoles).
 > Sterrenvaarder contains **no** game code or assets. It reads them from your own install.
 > Freelancer is a trademark of Microsoft; this project is not affiliated with Microsoft.
 
-## Status: phase 1, data layer
+## Status: phase 3, flight (in progress)
+
+Data layer (phase 1) and renderer (phase 2) are done. Data layer results:
 
 | Reader | Result on the retail v1.0 data |
 | --- | --- |
@@ -52,6 +54,27 @@ tonemapping, derived normal maps, anisotropic filtering. The field of view is Ho
 
 Shaders live in `shaders/`; after editing one, run `python3 scripts/compile_shaders.py`
 (needs `glslangValidator`) to refresh the embedded SPIR-V.
+
+## Flying (phase 3)
+
+Without `--free` the viewer puts you in your own ship (default `li_elite`, or `--ship`),
+using the ship's mass, drag, torque and inertia from `shiparch.ini` and the engine from
+its loadout. A light fighter tops out at ~80 m/s; cruise runs at 300 m/s (or the data's
+`CRUISING_SPEED`).
+
+Mouse = steer (Space toggles mouse flight), W/S = throttle, Shift+W = cruise, A/D =
+strafe, Q/E = roll, Z = stop engines, T = next target, F11 = fullscreen.
+
+The HUD is our own design, drawn at output resolution (crisp at any `--scale`). Its
+elements sit in a canvas of at most 16:9 (`--hud-aspect`), centred on wider screens, so
+on 21:9 and 32:9 the gauges stay in front of you. On 4:3, 5:4 and 16:10 the canvas is
+the whole screen and the HUD scales down to fit. Text uses a built-in stroke font, so no
+font files are needed.
+
+```sh
+./build/sterrenvaarder --data /path/to/DATA --width 3440 --height 1440 \
+    --screenshot fly.png --sim 4 --cursor 0.25,-0.05   # scripted flight, then a screenshot
+```
 
 ## Tools
 

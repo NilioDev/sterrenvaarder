@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 // Unit tests that need no game data. Run: sterrenvaarder_tests
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -18,6 +19,8 @@
 using namespace sterrenvaarder;
 
 static int failures = 0;
+#include "game/flight.hpp"
+
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
 static void put16(std::vector<std::uint8_t>& b, std::uint16_t v) { b.push_back(v & 0xFF); b.push_back(v >> 8); }
@@ -126,7 +129,41 @@ static void test_png() {
     CHECK(png.size() > 33 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G');
 }
 
+void test_flight() {
+    using namespace sterrenvaarder::game;
+    ShipArchetype ship;  // values of a typical light fighter
+    ship.mass = 150;
+    ship.linear_drag = 1;
+    ship.steering_torque = {50000, 50000, 230000};
+    ship.angular_drag = {40000, 40000, 141000};
+    ship.rotation_inertia = {8400, 8400, 8400};
+    EngineArchetype engine;
+    engine.max_force = 48000;
+    engine.linear_drag = 599;
+    FlightModel fm(FlightParams::from(ship, &engine, 300));
+    CHECK(std::fabs(fm.params().max_speed() - 80.f) < 0.01f);
+    ShipState s;
+    FlightInput in;
+    in.throttle = 1;
+    for (int i = 0; i < 100; ++i) fm.update(s, in, 0.1);  // update() caps one call at 0.25 s
+    CHECK(std::fabs(s.speed() - 80.f) < 0.5f);
+    CHECK(s.pos.z < -500);  // flew forward along -Z
+    in.cruise = true;
+    for (int i = 0; i < 30 * 10; ++i) fm.update(s, in, 0.1);
+    CHECK(s.cruising && std::fabs(s.speed() - 300.f) < 2.f);
+    // Yaw: turn rate saturates at torque / drag (1.25 rad/s).
+    ShipState t;
+    FlightInput turn;
+    turn.steer = {0, 1, 0};
+    for (int i = 0; i < 30; ++i) fm.update(t, turn, 0.1);
+    CHECK(std::fabs(t.ang_vel.y - 1.25f) < 0.02f);
+    CHECK(t.orient.forward().x < -0.1f || t.orient.forward().z > 0);  // nose swung left
+    CHECK(mouse_steer(0.01f, 0).y == 0);  // dead zone
+    CHECK(mouse_steer(1, 0).y < -0.99f && mouse_steer(0, -1).x > 0.99f);
+}
+
 int main() {
+    test_flight();
     test_hash();
     test_text_ini();
     test_bini();

@@ -16,11 +16,26 @@ namespace sterrenvaarder::render {
 // ---------------------------------------------------------------- camera
 
 Vec3 Camera::forward() const {
+    if (has_basis) return normalize(basis_forward);
     return {-std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
 }
-Vec3 Camera::right() const { return normalize(cross(forward(), {0, 1, 0})); }
+Vec3 Camera::right() const { return normalize(cross(forward(), has_basis ? basis_up : Vec3{0, 1, 0})); }
 Vec3 Camera::up() const { return cross(right(), forward()); }
+bool Camera::project(DVec3 world, float out_w, float out_h, float& px, float& py) const {
+    DVec3 d = world - pos;
+    Vec3 f = forward(), r = right(), u = up();
+    double z = d.x * f.x + d.y * f.y + d.z * f.z;
+    if (z <= 0.1) return false;
+    double x = d.x * r.x + d.y * r.y + d.z * r.z, y = d.x * u.x + d.y * u.y + d.z * u.z;
+    double t = std::tan(fov_y * 0.5);
+    double ndc_x = x / (z * t * (out_w / out_h)), ndc_y = y / (z * t);
+    px = static_cast<float>((ndc_x * 0.5 + 0.5) * out_w);
+    py = static_cast<float>((0.5 - ndc_y * 0.5) * out_h);
+    return true;
+}
+
 void Camera::look_at(DVec3 t) {
+    has_basis = false;
     DVec3 d = t - pos;
     double len = d.length();
     if (len <= 0) return;
@@ -227,6 +242,8 @@ struct Renderer::Impl {
         release_targets();
         release_pipelines();
         for (auto* b : buffers) SDL_ReleaseGPUBuffer(d, b);
+        if (hud_vb) SDL_ReleaseGPUBuffer(d, hud_vb);
+        if (hud_tb) SDL_ReleaseGPUTransferBuffer(d, hud_tb);
         for (auto* t : owned_textures) SDL_ReleaseGPUTexture(d, t);
     }
 
@@ -239,7 +256,7 @@ struct Renderer::Impl {
                 if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
                 p = nullptr;
             }
-        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit}) {
+        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe}) {
             if (*p) SDL_ReleaseGPUGraphicsPipeline(d, *p);
             *p = nullptr;
         }
@@ -335,6 +352,7 @@ struct Renderer::Impl {
                                 Blend::Opaque, false, false, false, SDL_GPU_SAMPLECOUNT_1);
         sharpen = make_pipeline("fullscreen.vert", 0, "sharpen.frag", 1, 1, output_format, Blend::Opaque, false, false, false,
                                 SDL_GPU_SAMPLECOUNT_1);
+        hud_pipe = make_hud_pipeline();
     }
 
     SDL_GPUGraphicsPipeline* make_background_pipeline(Blend b) {
@@ -704,6 +722,68 @@ struct Renderer::Impl {
     }
     std::unique_ptr<MaterialLibrary> star_lib;
 
+    struct DynamicInstance {
+        GpuModel* model;
+        DVec3 pos;
+        Mat4 rotation;
+        std::vector<float> lod_ranges;
+    };
+    std::vector<DynamicInstance> dynamic;
+
+    // HUD overlay: one growable vertex buffer, uploaded before the render passes.
+    SDL_GPUGraphicsPipeline* hud_pipe = nullptr;
+    SDL_GPUBuffer* hud_vb = nullptr;
+    SDL_GPUTransferBuffer* hud_tb = nullptr;
+    std::uint32_t hud_capacity = 0;
+
+    std::uint32_t upload_hud(SDL_GPUCommandBuffer* cmd, const HudBatch* hud) {
+        if (!hud || hud->vertices().empty()) return 0;
+        auto* d = gpu.device();
+        std::uint32_t bytes = static_cast<std::uint32_t>(hud->vertices().size() * sizeof(HudVertex));
+        if (bytes > hud_capacity) {
+            if (hud_vb) SDL_ReleaseGPUBuffer(d, hud_vb);
+            if (hud_tb) SDL_ReleaseGPUTransferBuffer(d, hud_tb);
+            hud_capacity = std::max<std::uint32_t>(bytes * 2, 64 * 1024);
+            SDL_GPUBufferCreateInfo bi{SDL_GPU_BUFFERUSAGE_VERTEX, hud_capacity, 0};
+            hud_vb = SDL_CreateGPUBuffer(d, &bi);
+            SDL_GPUTransferBufferCreateInfo ti{SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, hud_capacity, 0};
+            hud_tb = SDL_CreateGPUTransferBuffer(d, &ti);
+        }
+        void* map = SDL_MapGPUTransferBuffer(d, hud_tb, true);
+        std::memcpy(map, hud->vertices().data(), bytes);
+        SDL_UnmapGPUTransferBuffer(d, hud_tb);
+        auto* cp = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTransferBufferLocation src{hud_tb, 0};
+        SDL_GPUBufferRegion dst{hud_vb, 0, bytes};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+        SDL_EndGPUCopyPass(cp);
+        return static_cast<std::uint32_t>(hud->vertices().size());
+    }
+
+    SDL_GPUGraphicsPipeline* make_hud_pipeline() {
+        auto* d = gpu.device();
+        auto* vs = gpu.shader("hud.vert", 0, 1);
+        auto* fs = gpu.shader("hud.frag", 0, 0);
+        SDL_GPUGraphicsPipelineCreateInfo pi{};
+        pi.vertex_shader = vs;
+        pi.fragment_shader = fs;
+        SDL_GPUVertexBufferDescription vbd{0, sizeof(HudVertex), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0};
+        SDL_GPUVertexAttribute attrs[2] = {{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(HudVertex, x)},
+                                           {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(HudVertex, rgba)}};
+        pi.vertex_input_state = {&vbd, 1, attrs, 2};
+        pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        pi.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        pi.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        SDL_GPUColorTargetDescription ctd{output_format, blend_state(Blend::Alpha)};
+        pi.target_info.color_target_descriptions = &ctd;
+        pi.target_info.num_color_targets = 1;
+        auto* p = SDL_CreateGPUGraphicsPipeline(d, &pi);
+        SDL_ReleaseGPUShader(d, vs);
+        SDL_ReleaseGPUShader(d, fs);
+        if (!p) throw std::runtime_error(std::string("hud pipeline: ") + SDL_GetError());
+        return p;
+    }
+
     // ------------------------------------------------------------ drawing
 
     struct PendingDraw {
@@ -758,10 +838,9 @@ struct Renderer::Impl {
     }
 
     // Returns the LOD index to draw, or -1 if the object is beyond its original draw distance.
-    static int pick_lod(const SceneObject& so, const GpuPart& part, float dist, float lod_scale) {
+    static int pick_lod(const std::vector<float>& r, const GpuPart& part, float dist, float lod_scale) {
         if (part.lods.empty()) return -1;
-        if (so.lod_ranges.size() >= 2) {
-            const auto& r = so.lod_ranges;
+        if (r.size() >= 2) {
             for (std::size_t i = 0; i + 1 < r.size(); ++i)
                 if (dist < r[i + 1] * lod_scale) return static_cast<int>(std::min(i, part.lods.size() - 1));
             return -1;
@@ -772,11 +851,12 @@ struct Renderer::Impl {
     }
 
     void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::uint32_t out_w, std::uint32_t out_h, const Camera& cam,
-                const RenderSettings& s, double time, const StarSystem& sys, Stats& stats) {
+                const RenderSettings& s, double time, const StarSystem& sys, Stats& stats, const HudBatch* hud) {
         std::uint32_t w = std::max(16u, static_cast<std::uint32_t>(out_w * std::clamp(s.render_scale, 0.25f, 2.0f)));
         std::uint32_t h = std::max(16u, static_cast<std::uint32_t>(out_h * std::clamp(s.render_scale, 0.25f, 2.0f)));
         ensure_targets(w, h, out_w, out_h, s.msaa);
         stats = {};
+        std::uint32_t hud_verts = upload_hud(cmd, hud);
 
         const float aspect = static_cast<float>(out_w) / static_cast<float>(out_h);
         Mat4 proj = Mat4::perspective_reverse_z(cam.fov_y, aspect, 0.5f);
@@ -857,7 +937,7 @@ struct Renderer::Impl {
                              so.rotation * Mat4::rotate_y(static_cast<float>(angle));
             bool any = false;
             for (auto& part : so.model->parts) {
-                int lod = pick_lod(so, part, dist, s.lod_scale);
+                int lod = pick_lod(so.lod_ranges, part, dist, s.lod_scale);
                 if (lod < 0) continue;
                 any = true;
                 Mat4 world = obj_world * part.local;
@@ -871,6 +951,24 @@ struct Renderer::Impl {
             if (any) ++stats.objects_drawn;
             else ++stats.culled_by_lod;
         }
+        for (auto& inst : dynamic) {
+            DVec3 rel = inst.pos - cam.pos;
+            float dist = static_cast<float>(rel.length());
+            Mat4 obj_world =
+                Mat4::translate(static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z)) * inst.rotation;
+            for (auto& part : inst.model->parts) {
+                int lod = pick_lod(inst.lod_ranges, part, dist, s.lod_scale);
+                if (lod < 0) continue;
+                Mat4 world = obj_world * part.local;
+                for (auto& dr : part.lods[lod].draws) {
+                    if (inst.model->materials[dr.material].blend == Blend::Opaque)
+                        draw_range(inst.model, dr, world, false, Blend::Opaque, false);
+                    else
+                        transparent.push_back({inst.model, &dr, world, dist, 0});
+                }
+            }
+        }
+        dynamic.clear();
         std::sort(transparent.begin(), transparent.end(), [](auto& a, auto& b) { return a.dist > b.dist; });
         for (auto& t : transparent) draw_range(t.model, *t.range, t.world, false, Blend::Opaque, false);
 
@@ -929,6 +1027,22 @@ struct Renderer::Impl {
         }
         float su[4] = {1.f / out_w, 1.f / out_h, s.sharpness, 0};
         fullscreen(cmd, target, sharpen, {final_src}, su, sizeof su);
+
+        // ---- HUD, at output resolution
+        if (hud_verts) {
+            SDL_GPUColorTargetInfo hc{};
+            hc.texture = target;
+            hc.load_op = SDL_GPU_LOADOP_LOAD;
+            hc.store_op = SDL_GPU_STOREOP_STORE;
+            auto* hp = SDL_BeginGPURenderPass(cmd, &hc, 1, nullptr);
+            SDL_BindGPUGraphicsPipeline(hp, hud_pipe);
+            float su2[4] = {2.f / out_w, 2.f / out_h, 0, 0};
+            SDL_PushGPUVertexUniformData(cmd, 0, su2, sizeof su2);
+            SDL_GPUBufferBinding vb{hud_vb, 0};
+            SDL_BindGPUVertexBuffers(hp, 0, &vb, 1);
+            SDL_DrawGPUPrimitives(hp, hud_verts, 1, 0, 0);
+            SDL_EndGPURenderPass(hp);
+        }
     }
 };
 
@@ -951,7 +1065,17 @@ void Renderer::load_system(std::string_view nickname) {
 
 void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::uint32_t out_w, std::uint32_t out_h,
                       const Camera& cam, const RenderSettings& s, double time_seconds) {
-    impl_->render(cmd, target, out_w, out_h, cam, s, time_seconds, system_, stats_);
+    impl_->render(cmd, target, out_w, out_h, cam, s, time_seconds, system_, stats_, hud_);
+    hud_ = nullptr;
+}
+
+Renderer::ModelHandle Renderer::load_model(const std::string& path, const std::vector<std::string>& libs) {
+    return ModelHandle{impl_->load_model(path, libs, false)};
+}
+
+void Renderer::draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges) {
+    if (!m) return;
+    impl_->dynamic.push_back({static_cast<GpuModel*>(m.p), pos, rotation, lod_ranges});
 }
 
 }  // namespace sterrenvaarder::render
