@@ -48,7 +48,15 @@ void Vfs::mount(const std::filesystem::path& dir, std::string name) {
     for (auto& e : fs::recursive_directory_iterator(dir)) {
         if (!e.is_regular_file()) continue;
         auto rel = fs::relative(e.path(), dir).generic_string();
-        index_[normalize(rel)] = Entry{e.path(), layer};
+        auto key = normalize(rel);
+        auto it = index_.find(key);
+        if (it == index_.end()) {
+            index_[key] = Entry{e.path(), layer, {}};
+        } else {
+            it->second.shadowed.insert(it->second.shadowed.begin(), it->second.real);
+            it->second.real = e.path();
+            it->second.layer = layer;
+        }
     }
 }
 
@@ -56,6 +64,14 @@ std::optional<std::filesystem::path> Vfs::resolve(std::string_view game_path) co
     auto it = index_.find(normalize(game_path));
     if (it == index_.end()) return std::nullopt;
     return it->second.real;
+}
+
+std::vector<std::filesystem::path> Vfs::resolve_all(std::string_view game_path) const {
+    auto it = index_.find(normalize(game_path));
+    if (it == index_.end()) return {};
+    std::vector<std::filesystem::path> r{it->second.real};
+    r.insert(r.end(), it->second.shadowed.begin(), it->second.shadowed.end());
+    return r;
 }
 
 std::optional<std::string> Vfs::layer_of(std::string_view game_path) const {

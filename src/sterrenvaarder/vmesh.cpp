@@ -37,8 +37,9 @@ VMeshData VMeshData::parse(Bytes d) {
     if (!(m.fvf & kXYZ)) throw FormatError("VMeshData without positions (fvf " + std::to_string(m.fvf) + ")");
     std::size_t stride = 12 + ((m.fvf & kNormal) ? 12 : 0) + ((m.fvf & kDiffuse) ? 4 : 0) +
                          ((m.fvf & kSpecular) ? 4 : 0) + tex_sets * 8;
-    if (p + stride * vertex_count != d.size())
-        throw FormatError("VMeshData size mismatch: fvf " + std::to_string(m.fvf));
+    // Some mod-made meshes carry a few trailing bytes; the original game ignores them.
+    if (p + stride * vertex_count > d.size())
+        throw FormatError("VMeshData too small: fvf " + std::to_string(m.fvf));
 
     m.positions.resize(vertex_count);
     if (m.fvf & kNormal) m.normals.resize(vertex_count);
