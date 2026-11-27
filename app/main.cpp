@@ -211,6 +211,11 @@ struct RoomView {
     std::string base, current;
     struct Model { Renderer::ModelHandle mesh; DVec3 pos; Mat4 rot; };
     std::vector<Model> models;
+    // Ship dealer: the pads ([ForSaleShipPlacement] markers) and the ships shown on them.
+    struct Pad { std::string name; Vec3 pos; Mat3 orient; };
+    std::vector<Pad> pads;  // in room-file order
+    std::vector<Model> ships;
+    std::vector<std::string> shown_ships;  // ship nicknames on the pads, for change detection
     RoomLighting lighting;
     Camera cam;
     bool active() const { return !models.empty(); }
@@ -220,6 +225,9 @@ struct RoomView {
         base.clear();
         current.clear();
         models.clear();
+        pads.clear();
+        ships.clear();
+        shown_ships.clear();
     }
 
     void load_base(const Vfs& vfs, const std::string& b) {
@@ -240,7 +248,11 @@ struct RoomView {
         if (!info || iequals(info->nickname, current)) return;
         current = info->nickname;
         models.clear();
+        pads.clear();
+        ships.clear();
+        shown_ships.clear();
         lighting = {};
+        std::vector<Pad> markers;
         std::vector<std::string> scripts{info->set_script};
         scripts.insert(scripts.end(), info->scenes.begin(), info->scenes.end());
         bool have_cam = false;
@@ -278,6 +290,7 @@ struct RoomView {
                     cam.fov_y = 2.f * std::atan(std::tan(e.fovh * 3.14159265f / 360.f) / aspect);
                     cam.near_plane = e.near_plane > 0 ? e.near_plane : 0.2f;
                 }
+                if (e.type == "MARKER") markers.push_back({e.name, e.pos, e.orient});
                 if ((e.type == "COMPOUND" || e.type == "PROP") && e.flags.find("HIDDEN") == std::string::npos) {
                     const std::string* file = petal.model(e.template_name);
                     if (!file) continue;
@@ -296,10 +309,41 @@ struct RoomView {
         SDL_Log("room %s/%s: %zu models, %zu lights, camera %s", base.c_str(), current.c_str(), models.size(),
                 lighting.lights.size(), have_cam ? info->camera.c_str() : "(none)");
         if (!have_cam) models.clear();  // nothing sensible to show
+        for (auto& want : info->ship_placements)
+            for (auto& m : markers)
+                if (iequals(m.name, want)) { pads.push_back(m); break; }
+        // The pad the room camera looks at most directly comes first: it shows the
+        // selected ship.
+        auto facing = [&](const Pad& p) {
+            Vec3 d{p.pos.x - static_cast<float>(cam.pos.x), p.pos.y - static_cast<float>(cam.pos.y),
+                   p.pos.z - static_cast<float>(cam.pos.z)};
+            float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+            Vec3 f = cam.forward();
+            return len > 0 ? (d.x * f.x + d.y * f.y + d.z * f.z) / len : -1.f;
+        };
+        std::stable_sort(pads.begin(), pads.end(), [&](const Pad& a, const Pad& b) { return facing(a) > facing(b); });
+    }
+
+    // Puts these ships (archetype nicknames, selected first) on the dealer's pads.
+    void set_ships(const ShipDatabase& db, Renderer& r, const std::vector<std::string>& wanted) {
+        if (wanted == shown_ships) return;
+        shown_ships = wanted;
+        ships.clear();
+        for (std::size_t i = 0; i < wanted.size() && i < pads.size(); ++i) {
+            const ShipArchetype* a = db.ship(wanted[i]);
+            if (!a) continue;
+            try {
+                if (auto h = r.load_model(a->model, a->material_libraries))
+                    ships.push_back({h, {pads[i].pos.x, pads[i].pos.y, pads[i].pos.z}, Mat4::from_rows3(pads[i].orient)});
+            } catch (const std::exception& ex) {
+                SDL_Log("dealer ship %s: %s", a->model.c_str(), ex.what());
+            }
+        }
     }
 
     void draw(Renderer& r) const {
         for (auto& m : models) r.draw_model(m.mesh, m.pos, m.rot, {});
+        for (auto& m : ships) r.draw_model(m.mesh, m.pos, m.rot, {});
     }
 };
 
@@ -345,6 +389,7 @@ struct FlightSession {
     RoomView room;
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
+    const ShipDatabase* shipdb = nullptr;
     // The room that goes with the open dealer tab (the base's own room names).
     std::string room_for_tab() const {
         switch (trade_tab) {
@@ -493,6 +538,24 @@ struct FlightSession {
                 out.push_back(std::move(r));
             }
         }
+        return out;
+    }
+
+    // Ship dealer: the ships to put on the pads, the selected one first, then the rest
+    // of the offer in market order. Empty on the other dealer tabs.
+    std::vector<std::string> dealer_ships() const {
+        std::vector<std::string> out;
+        if (trade_tab != Tab::Ships || !econ) return out;
+        auto rows = trade_rows();
+        auto ship_of = [&](const TradeRow& r) -> std::string {
+            const Good* g = econ->good(r.good);
+            const Good* hull = g ? econ->good(g->hull) : nullptr;
+            return hull ? to_lower(hull->ship) : std::string();
+        };
+        if (trade_sel >= 0 && trade_sel < static_cast<int>(rows.size()) && rows[trade_sel].kind == TradeRow::Ship)
+            out.push_back(ship_of(rows[trade_sel]));
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+            if (i != trade_sel && rows[i].kind == TradeRow::Ship) out.push_back(ship_of(rows[i]));
         return out;
     }
 
@@ -1105,6 +1168,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
     if (fs && fs->docked() && fs->vfs && fs->petal) {
         if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
         fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_for_tab());
+        if (fs->shipdb) fs->room.set_ships(*fs->shipdb, renderer, fs->dealer_ships());
     }
     bool in_room = fs && fs->docked() && fs->room.active();
     if (in_room) {
@@ -1176,6 +1240,7 @@ int run(const Args& args) {
             fs->factions = &factions;
             fs->vfs = &vfs;
             fs->petal = &petal;
+            fs->shipdb = ships.get();
             auto start = read_new_character(vfs);
             fs->player.credits = start ? start->money : 2000;
             const auto start_rep = initial_rep(exe_dir, factions, start);
