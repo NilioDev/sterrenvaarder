@@ -542,14 +542,17 @@ struct FlightSession {
         double speed = p.vel.length();
         if (speed <= 0) return false;
         DVec3 back = p.vel * (-1.0 / speed);
+        // Widths in the data are full widths; the sprites take half-widths. The original shows
+        // a bright round head and a thin tail with a white-hot core inside the outer colour.
         Color3 head{b->core_color.r * b->head_brightness, b->core_color.g * b->head_brightness, b->core_color.b * b->head_brightness};
-        r.draw_sprite(p.pos, b->head_width, 0, head, 1, b->head_texture, true);
-        r.draw_sprite(p.pos, b->head_width * 1.8f, 0, b->outer_color, 0.6f, b->head_texture, true);
-        // The tail: one band from the outer colour at the head to the tail colour at its end,
-        // fading out and narrowing as it goes.
+        r.draw_sprite(p.pos, b->head_width * 0.5f, 0, head, 1, b->head_texture, true);
+        r.draw_sprite(p.pos, b->head_width * 1.2f, 0, b->outer_color, 0.7f, b->head_texture, true);
         const std::string& tex = b->trail_texture.empty() ? b->head_texture : b->trail_texture;
-        r.draw_streak(p.pos, p.pos + back * b->tail_length, b->core_width, b->core_width * 0.4f, b->outer_color,
-                      b->trail_brightness, b->tail_color, 0.f, tex, true);
+        DVec3 end = p.pos + back * b->tail_length;
+        float w = b->core_width * 0.5f;
+        r.draw_streak(p.pos, end, w, w * 0.3f, b->outer_color, b->trail_brightness, b->tail_color, 0.f, tex, true);
+        r.draw_streak(p.pos, p.pos + back * (b->tail_length * 0.6), w * 0.35f, w * 0.1f, b->core_color,
+                      b->trail_brightness, b->outer_color, 0.f, tex, true);
         return true;
     }
     // The room that goes with the open dealer tab (the base's own room names).
