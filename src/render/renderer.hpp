@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "render/gpu.hpp"
+#include "render/hud_batch.hpp"
 #include "render/mat.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/universe.hpp"
@@ -21,6 +22,12 @@ struct Camera {
     DVec3 pos;
     float yaw = 0, pitch = 0;  // radians; yaw 0 looks down -Z
     float fov_y = 0.80f;       // vertical FOV (Hor+: wider screens see more, not less)
+    // Full orientation (e.g. a chase camera that rolls with the ship); overrides yaw/pitch.
+    bool has_basis = false;
+    Vec3 basis_forward{0, 0, -1}, basis_up{0, 1, 0};
+    void set_basis(Vec3 fwd, Vec3 up) { has_basis = true; basis_forward = fwd; basis_up = up; }
+    // Projects a world point to output pixels. Returns false if it is behind the camera.
+    bool project(DVec3 world, float out_w, float out_h, float& px, float& py) const;
     Vec3 forward() const;
     Vec3 right() const;
     Vec3 up() const;
@@ -50,6 +57,14 @@ public:
                 const Camera& cam, const RenderSettings& s, double time_seconds);
     void set_output_format(SDL_GPUTextureFormat fmt);
 
+    // Models outside the static system (ships, loot). Loaded once and cached.
+    struct ModelHandle { void* p = nullptr; explicit operator bool() const { return p; } };
+    ModelHandle load_model(const std::string& path, const std::vector<std::string>& material_libraries);
+    // Queues one instance for the next render() call. lod_ranges as in the archetype.
+    void draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges);
+    // Optional overlay for the next render() call, in output pixels.
+    void set_hud(const HudBatch* hud) { hud_ = hud; }
+
     struct Stats { int objects_drawn = 0, draw_calls = 0, triangles = 0, culled_by_lod = 0; };
     const Stats& stats() const { return stats_; }
 
@@ -57,6 +72,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     StarSystem system_;
+    const HudBatch* hud_ = nullptr;
     Stats stats_;
 };
 
