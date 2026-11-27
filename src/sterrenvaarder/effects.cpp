@@ -13,6 +13,11 @@ std::string first(const IniSection& s, std::string_view key) {
     return (e && !e->values.empty()) ? e->values[0].as_string() : std::string();
 }
 
+bool flag(const IniSection& s, std::string_view key, bool fallback) {
+    auto e = s.find(key);
+    return (e && !e->values.empty()) ? e->values[0].as_bool() : fallback;
+}
+
 float number(const IniSection& s, std::string_view key, float fallback) {
     auto e = s.find(key);
     return (e && !e->values.empty()) ? e->values[0].as_float() : fallback;
@@ -46,6 +51,9 @@ EffectDb::EffectDb(const Vfs& vfs, const std::vector<std::string>& files) : vfs_
                 if (!ve.empty()) effect_to_vis_[to_lower(nick)] = to_lower(ve);
                 std::string vb = first(sec, "vis_beam");
                 if (!vb.empty()) effect_to_beam_[to_lower(nick)] = to_lower(vb);
+            } else if (iequals(sec.name, "explosion")) {
+                std::string fx = first(sec, "effect");
+                if (!fx.empty()) explosion_effect_[to_lower(nick)] = fx;
             } else if (iequals(sec.name, "BeamSpear") || iequals(sec.name, "BeamBolt")) {
                 BeamSpear b;
                 b.nickname = nick;
@@ -103,6 +111,44 @@ ResolvedEffect EffectDb::resolve(std::string_view name) const {
     if (!r.effect) r.effect = lib->effect(r.vis->nickname);
     if (!r.effect && !lib->effects().empty()) r.effect = &lib->effects().front();
     return r;
+}
+
+const std::string& EffectDb::explosion_effect(std::string_view explosion) const {
+    static const std::string none;
+    auto it = explosion_effect_.find(to_lower(std::string(explosion)));
+    return it == explosion_effect_.end() ? none : it->second;
+}
+
+void EffectDb::add_fuses(const std::vector<std::string>& files) {
+    if (!vfs_) return;
+    for (auto& f : files) {
+        if (!vfs_->exists(f)) continue;
+        Fuse* cur = nullptr;
+        // Sections belong to the [fuse] above them.
+        for (auto& sec : parse_ini(vfs_->read(f))) {
+            if (iequals(sec.name, "fuse")) {
+                std::string name = first(sec, "name");
+                Fuse fu;
+                fu.name = name;
+                fu.lifetime = number(sec, "lifetime", 1);
+                fu.death_fuse = flag(sec, "death_fuse", false);
+                cur = &(fuses_[to_lower(name)] = std::move(fu));
+            } else if (cur && iequals(sec.name, "start_effect")) {
+                Fuse::Start st;
+                st.effect = first(sec, "effect");
+                for (auto* h : sec.find_all("hardpoint"))
+                    if (!h->values.empty()) st.hardpoints.push_back(h->values[0].as_string());
+                st.at_t = number(sec, "at_t", 0);
+                st.attached = flag(sec, "attached", true);
+                if (!st.effect.empty()) cur->starts.push_back(std::move(st));
+            }
+        }
+    }
+}
+
+const Fuse* EffectDb::fuse(std::string_view name) const {
+    auto it = fuses_.find(to_lower(std::string(name)));
+    return it == fuses_.end() ? nullptr : &it->second;
 }
 
 }  // namespace sterrenvaarder

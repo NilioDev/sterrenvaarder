@@ -40,6 +40,21 @@ struct ResolvedEffect {
     explicit operator bool() const { return effect != nullptr; }
 };
 
+// A fuse (fx/fuse*.ini): effects started at hardpoints as the fuse burns. Damage fuses
+// keep their attached effects running on the ship.
+struct Fuse {
+    struct Start {
+        std::string effect;
+        std::vector<std::string> hardpoints;  // one of them is used
+        float at_t = 0;
+        bool attached = true;
+    };
+    std::string name;
+    float lifetime = 1;
+    bool death_fuse = false;
+    std::vector<Start> starts;
+};
+
 class EffectDb {
 public:
     EffectDb() = default;
@@ -50,6 +65,11 @@ public:
     const VisEffect* vis(std::string_view name) const;
     // The bolt look named by an [Effect]'s vis_beam (or a beam nickname itself).
     const BeamSpear* beam(std::string_view name) const;
+    // The effect an [explosion] (fx/explosions.ini, a ship's explosion_arch) plays, or "".
+    const std::string& explosion_effect(std::string_view explosion) const;
+    // Reads the fuse files (freelancer.ini fuses =).
+    void add_fuses(const std::vector<std::string>& files);
+    const Fuse* fuse(std::string_view name) const;
     std::size_t size() const { return vis_.size(); }
 
 private:
@@ -58,6 +78,8 @@ private:
     std::unordered_map<std::string, std::string> effect_to_vis_;  // [Effect] -> vis_effect
     std::unordered_map<std::string, std::string> effect_to_beam_;  // [Effect] -> vis_beam
     std::unordered_map<std::string, BeamSpear> beams_;
+    std::unordered_map<std::string, std::string> explosion_effect_;
+    std::unordered_map<std::string, Fuse> fuses_;
     mutable std::unordered_map<std::string, std::shared_ptr<const AleLibrary>> libs_;
 };
 

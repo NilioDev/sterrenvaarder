@@ -41,7 +41,7 @@ void each_section(const Vfs& vfs, const std::vector<std::string>& files, F f) {
 }  // namespace
 
 void DataFiles::read_freelancer_ini(std::string_view text) {
-    std::vector<std::string> s, e, l, g, m, fx, ex;
+    std::vector<std::string> s, e, l, g, m, fx, ex, fu;
     for (auto& sec : parse_text_ini(text)) {
         if (!iequals(sec.name, "Data")) continue;
         for (auto& entry : sec.entries) {
@@ -54,6 +54,7 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
             else if (iequals(entry.key, "markets")) m.push_back(v);
             else if (iequals(entry.key, "effects")) fx.push_back(v);
             else if (iequals(entry.key, "explosions")) ex.push_back(v);
+            else if (iequals(entry.key, "fuses")) fu.push_back(v);
         }
     }
     if (!s.empty()) ships = s;
@@ -63,6 +64,7 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
     if (!m.empty()) markets = m;
     if (!fx.empty()) effects = fx;
     if (!ex.empty()) explosions = ex;
+    if (!fu.empty()) fuses = fu;
 }
 
 ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
@@ -92,6 +94,14 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         a.camera_vertical_turn_down_angle = num(sec, "camera_vertical_turn_down_angle", a.camera_vertical_turn_down_angle);
         a.hit_pts = num(sec, "hit_pts", a.hit_pts);
         a.explosion_arch = str(sec, "explosion_arch");
+        for (auto* f : sec.find_all("fuse")) {
+            if (f->values.empty()) continue;
+            ShipArchetype::FuseRef r;
+            r.name = f->values[0].as_string();
+            if (f->values.size() > 1) r.delay = f->values[1].as_float();
+            if (f->values.size() > 2) r.hit_pts = f->values[2].as_float();
+            a.fuses.push_back(std::move(r));
+        }
         a.hold_size = num(sec, "hold_size", a.hold_size);
         a.nanobot_limit = static_cast<int>(num(sec, "nanobot_limit", 0));
         a.shield_battery_limit = static_cast<int>(num(sec, "shield_battery_limit", 0));
