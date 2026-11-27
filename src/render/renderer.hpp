@@ -60,8 +60,14 @@ public:
     // Models outside the static system (ships, loot). Loaded once and cached.
     struct ModelHandle { void* p = nullptr; explicit operator bool() const { return p; } };
     ModelHandle load_model(const std::string& path, const std::vector<std::string>& material_libraries);
+    // Shared mesh files (.vms) that models may reference, e.g. interface/interface.generic.vms.
+    void add_mesh_library(const std::string& path);
     // Queues one instance for the next render() call. lod_ranges as in the archetype.
     void draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges);
+    // Draws a model as a flat HUD element for the next render() call (e.g. the original
+    // interface models from the user's own data). The model's local x/y units are mapped
+    // to pixels around (px, py), y up. Drawn unlit, before the vector HUD.
+    void draw_hud_model(ModelHandle m, float px, float py, float pixels_per_unit, HudColor tint = {});
     // Optional overlay for the next render() call, in output pixels.
     void set_hud(const HudBatch* hud) { hud_ = hud; }
 

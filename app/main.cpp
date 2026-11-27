@@ -3,7 +3,7 @@
 //
 //   sterrenvaarder --data <Freelancer DATA dir> [--mod <dir>]... [--system Li01]
 //                  [--ship li_elite] [--width 2560 --height 1080] [--scale 0.77] [--msaa 4]
-//                  [--lod-scale 1] [--hud-aspect 1.778] [--free]
+//                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--free]
 //                  [--screenshot out.png [--sim 4 --throttle 1 --cursor 0.3,-0.1]]
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
 //
@@ -16,7 +16,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
+#include <cstdlib>
 #include <memory>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -48,7 +51,8 @@ struct Args {
     DVec3 camera, look;
     bool free = false;
     std::string ship = "li_elite";
-    float hud_aspect = 16.f / 9.f;
+    float hud_aspect = -1;  // < 0: from the HUD config
+    std::string hud_config;
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -78,6 +82,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--free") a.free = true;
         else if (k == "--ship") a.ship = next();
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
+        else if (k == "--hud-config") a.hud_config = next();
         else if (k == "--sim") a.sim = std::stod(next());
         else if (k == "--throttle") a.throttle = std::stof(next());
         else if (k == "--cursor") std::sscanf(next().c_str(), "%f,%f", &a.cursor_x, &a.cursor_y);
@@ -109,6 +114,25 @@ struct FlightSession {
     bool mouse_flight = true;
     int target = -1;  // index into contacts
     std::vector<game::HudContact> contacts;
+    float win_fovx = 54.432f;  // cameras.ini [WinCamera]: the original interface view
+    std::unordered_map<std::string, Renderer::ModelHandle> hud_models;
+    bool hud_meshes_loaded = false;
+
+    // Original interface models come from the player's own data, loaded on first use.
+    Renderer::ModelHandle hud_model(Renderer& r, const std::string& path) {
+        if (auto it = hud_models.find(path); it != hud_models.end()) return it->second;
+        Renderer::ModelHandle h;
+        try {
+            if (!hud_meshes_loaded) {
+                hud_meshes_loaded = true;
+                r.add_mesh_library("interface/interface.generic.vms");
+            }
+            h = r.load_model(path, {"interface/hud/hud.txm"});
+        } catch (const std::exception& e) {
+            SDL_Log("HUD model %s: %s", path.c_str(), e.what());
+        }
+        return hud_models[path] = h;
+    }
 
     void spawn(const StarSystem& sys, const Args& args) {
         // Default: in front of the first station, facing it.
@@ -187,15 +211,18 @@ struct FlightSession {
 };
 
 void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, Uint32 w, Uint32 h,
-                  const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, float hud_aspect,
+                  const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, const game::HudConfig& hud_cfg,
                   float cursor_x, float cursor_y, HudBatch& hud) {
     (void)gpu;
     if (fs) {
         fs->draw(renderer);
         hud.clear();
-        auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_aspect);
-        game::build_flight_hud(hud, layout, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
+        auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
+        game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
         renderer.set_hud(&hud);
+        if (hud_cfg.style == game::HudStyle::Classic)
+            for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
+                renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu);
     }
     renderer.render(cmd, target, w, h, cam, settings, time);
 }
@@ -246,8 +273,10 @@ int run(const Args& args) {
             float fovx = 70;
             if (vfs.exists("cameras.ini"))
                 for (auto& sec : parse_ini(vfs.read("cameras.ini")))
-                    if (iequals(sec.name, "ChaseCamera"))
-                        if (auto* e = sec.find("fovx"); e && !e->values.empty()) fovx = e->values[0].as_float();
+                    if (auto* e = sec.find("fovx"); e && !e->values.empty()) {
+                        if (iequals(sec.name, "ChaseCamera")) fovx = e->values[0].as_float();
+                        else if (iequals(sec.name, "WinCamera")) fs->win_fovx = e->values[0].as_float();
+                    }
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->spawn(renderer.system(), args);
             fs->update_contacts(renderer.system());
@@ -257,6 +286,23 @@ int run(const Args& args) {
                     fs->model.params().cruise_speed);
         }
         HudBatch hud;
+        // HUD layout: built-in defaults, then sterrenvaarder/hud.ini from the data layers
+        // (so a mod can ship one), then --hud-config, then --hud-aspect.
+        game::HudConfig hud_cfg;
+        auto apply_hud = [&](std::string_view text, const std::string& from) {
+            for (auto& w : hud_cfg.apply_ini(text)) SDL_Log("%s: %s", from.c_str(), w.c_str());
+        };
+        if (vfs.exists("sterrenvaarder/hud.ini")) {
+            auto b = vfs.read("sterrenvaarder/hud.ini");
+            apply_hud(std::string_view(reinterpret_cast<const char*>(b.data()), b.size()), "hud.ini");
+        }
+        if (!args.hud_config.empty()) {
+            std::ifstream f(args.hud_config, std::ios::binary);
+            if (!f) throw std::runtime_error("cannot read " + args.hud_config);
+            std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            apply_hud(text, args.hud_config);
+        }
+        if (args.hud_aspect >= 0) hud_cfg.max_aspect = args.hud_aspect;
 
         if (offscreen) {
             float cx = args.width * 0.5f + args.cursor_x * args.height * 0.5f;
@@ -274,7 +320,7 @@ int run(const Args& args) {
             renderer.set_output_format(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
             auto* out = gpu.render_target(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, args.width, args.height);
             auto* cmd = SDL_AcquireGPUCommandBuffer(gpu.device());
-            render_frame(gpu, renderer, cmd, out, args.width, args.height, cam, settings, args.sim, fs.get(), args.hud_aspect, cx, cy,
+            render_frame(gpu, renderer, cmd, out, args.width, args.height, cam, settings, args.sim, fs.get(), hud_cfg, cx, cy,
                          hud);
             SDL_SubmitGPUCommandBuffer(cmd);
             Image img;
@@ -361,7 +407,7 @@ int run(const Args& args) {
                 if (SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window, &swap, &w, &h) && swap && w && h) {
                     // Mouse is in window points; the swapchain may be in pixels (HiDPI).
                     float sx = ww > 0 ? static_cast<float>(w) / ww : 1.f, sy = wh > 0 ? static_cast<float>(h) / wh : 1.f;
-                    render_frame(gpu, renderer, cmd, swap, w, h, cam, settings, time, fs.get(), args.hud_aspect, mx * sx, my * sy,
+                    render_frame(gpu, renderer, cmd, swap, w, h, cam, settings, time, fs.get(), hud_cfg, mx * sx, my * sy,
                                  hud);
                 }
                 SDL_SubmitGPUCommandBuffer(cmd);

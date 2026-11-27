@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstdio>
 
+#include "sterrenvaarder/bytes.hpp"
+#include "sterrenvaarder/ini.hpp"
+
 namespace sterrenvaarder::game {
 
 using render::HudBatch;
@@ -48,7 +51,7 @@ void panel(HudBatch& h, float x, float y, float w, float ph, float s) {
 
 }  // namespace
 
-HudLayout HudLayout::make(float w, float h, float max_aspect) {
+HudLayout HudLayout::make(float w, float h, float max_aspect, float user_scale) {
     HudLayout l;
     l.screen_w = w;
     l.screen_h = h;
@@ -59,11 +62,188 @@ HudLayout HudLayout::make(float w, float h, float max_aspect) {
     l.canvas_w = max_aspect > 0 ? std::min(w, h * max_aspect) : w;
     l.canvas_x = (w - l.canvas_w) * 0.5f;
     l.canvas_y = 0;
-    l.scale = std::min(h / 1080.f, l.canvas_w / 1440.f);
+    l.scale = std::min(h / 1080.f, l.canvas_w / 1440.f) * std::clamp(user_scale, 0.25f, 4.f);
     return l;
 }
 
-void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam, const DVec3& player_pos, const HudState& st) {
+void HudLayout::place(const HudPanelConfig& p, float w, float h, float& x, float& y) const {
+    using A = HudPanelConfig::Anchor;
+    float ox = p.offset_x * scale, oy = p.offset_y * scale;
+    int col = 0, row = 0;  // 0 = start, 1 = middle, 2 = end
+    switch (p.anchor) {
+        case A::TopLeft: col = 0; row = 0; break;
+        case A::Top: col = 1; row = 0; break;
+        case A::TopRight: col = 2; row = 0; break;
+        case A::Left: col = 0; row = 1; break;
+        case A::Center: col = 1; row = 1; break;
+        case A::Right: col = 2; row = 1; break;
+        case A::BottomLeft: col = 0; row = 2; break;
+        case A::Bottom: col = 1; row = 2; break;
+        case A::BottomRight: col = 2; row = 2; break;
+    }
+    x = col == 0 ? canvas_x + ox : col == 1 ? canvas_x + (canvas_w - w) * 0.5f + ox : canvas_x + canvas_w - w - ox;
+    y = row == 0 ? canvas_y + oy : row == 1 ? canvas_y + (canvas_h - h) * 0.5f + oy : canvas_y + canvas_h - h - oy;
+}
+
+std::vector<std::string> HudConfig::apply_ini(std::string_view text) {
+    using A = HudPanelConfig::Anchor;
+    std::vector<std::string> warnings;
+    auto anchor = [&](const std::string& v, A fallback) {
+        static const std::pair<const char*, A> names[] = {
+            {"top_left", A::TopLeft}, {"top", A::Top},         {"top_right", A::TopRight},
+            {"left", A::Left},        {"center", A::Center},   {"right", A::Right},
+            {"bottom_left", A::BottomLeft}, {"bottom", A::Bottom}, {"bottom_right", A::BottomRight}};
+        for (auto& [n, a] : names)
+            if (iequals(v, n)) return a;
+        warnings.push_back("unknown anchor " + v);
+        return fallback;
+    };
+    for (auto& sec : parse_text_ini(text)) {
+        if (iequals(sec.name, "Canvas")) {
+            if (auto e = sec.find("max_aspect"); e && !e->values.empty()) max_aspect = std::max(0.f, e->values[0].as_float());
+            if (auto e = sec.find("scale"); e && !e->values.empty()) scale = e->values[0].as_float();
+            if (auto e = sec.find("style"); e && !e->values.empty()) {
+                auto v = e->values[0].as_string();
+                if (iequals(v, "classic")) style = HudStyle::Classic;
+                else if (iequals(v, "modern")) style = HudStyle::Modern;
+                else warnings.push_back("unknown style " + v);
+            }
+        } else if (iequals(sec.name, "Panel")) {
+            auto n = sec.find("name");
+            if (!n || n->values.empty()) continue;
+            std::string name = n->values[0].as_string();
+            HudPanelConfig* p = iequals(name, "ship") ? &ship : iequals(name, "target") ? &target
+                              : iequals(name, "system") ? &system : iequals(name, "gauges") ? &gauges : nullptr;
+            if (!p) { warnings.push_back("unknown panel " + name); continue; }
+            if (auto e = sec.find("anchor"); e && !e->values.empty()) p->anchor = anchor(e->values[0].as_string(), p->anchor);
+            if (auto e = sec.find("offset"); e && e->values.size() >= 2) {
+                p->offset_x = e->values[0].as_float();
+                p->offset_y = e->values[1].as_float();
+            }
+            if (auto e = sec.find("scale"); e && !e->values.empty()) p->scale = std::clamp(e->values[0].as_float(), 0.25f, 4.f);
+            if (auto e = sec.find("visible"); e && !e->values.empty()) p->visible = e->values[0].as_bool();
+        }
+    }
+    return warnings;
+}
+
+namespace {
+
+// Bounds of the retail interface models (x0, x1, y0, y1 in model units, y up), measured
+// from the data. They only decide where a piece is anchored; modded models still draw.
+struct Box { float x0, x1, y0, y1; };
+constexpr Box kShipInfo{-0.119f, 0.127f, -0.106f, 0.106f};
+constexpr Box kTargetBox{-0.127f, 0.119f, -0.106f, 0.106f};
+constexpr Box kGaugeWindow{-0.103f, 0.103f, -0.025f, 0.019f};
+
+float classic_ppu(const HudLayout& L, float win_fovx_deg) {
+    // Height of the original 4:3 interface view at depth 1.
+    float half_w = std::tan(win_fovx_deg * 3.14159265f / 360.f);
+    float view_h = 2.f * half_w * 0.75f;
+    return L.scale * 1080.f / view_h;
+}
+
+// Places a model by its bounds; returns the origin in pixels and the panel rect.
+void place_box(const HudLayout& L, const HudPanelConfig& p, const Box& b, float ppu, float& ox, float& oy, float& x, float& y,
+               float& w, float& h) {
+    ppu *= p.scale;
+    w = (b.x1 - b.x0) * ppu;
+    h = (b.y1 - b.y0) * ppu;
+    L.place(p, w, h, x, y);
+    ox = x - b.x0 * ppu;
+    oy = y + b.y1 * ppu;
+}
+
+}  // namespace
+
+namespace {
+
+// Text and live values drawn over the original interface models.
+void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg, const DVec3& player_pos, const HudState& st) {
+    float ppu = classic_ppu(L, 54.432f), ox, oy, x, y, w, hh;
+    char buf[64];
+    if (cfg.gauges.visible) {
+        place_box(L, cfg.gauges, kGaugeWindow, ppu, ox, oy, x, y, w, hh);
+        float p = ppu * cfg.gauges.scale;
+        // Shield and hull fills inside the gauge window.
+        float gx = ox - 0.083f * p, gw = 0.166f * p, gh = 0.0045f * p;
+        auto fill = [&](float model_y, float frac, HudColor c) {
+            float yy = oy - model_y * p - gh * 0.5f;
+            h.rect(gx, yy, gw * std::clamp(frac, 0.f, 1.f), gh, c);
+        };
+        fill(0.0035f, st.shield, kShield);
+        fill(-0.0055f, st.hull, kHull);
+        // Speed and throttle in the two number boxes either side.
+        float ts = 0.014f * p;
+        std::snprintf(buf, sizeof buf, "%d", static_cast<int>(std::round(st.speed)));
+        h.text(ox - 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.cruising ? kCruise : kLine, TextAlign::Center);
+        std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::round(std::fabs(st.throttle) * 100)));
+        h.text(ox + 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.throttle < 0 ? kHull : kLine, TextAlign::Center);
+        if (st.cruising || st.cruise_charge > 0) {
+            float a0 = -1.5707963f, cr = 0.012f * p;
+            float cx = ox, cy = oy + 0.045f * p;
+            h.circle(cx, cy, cr, 1.f * L.scale, kDim);
+            h.arc(cx, cy, cr, a0, a0 + 6.2831853f * (st.cruising ? 1.f : st.cruise_charge), 3.f * L.scale, kCruise);
+        }
+    }
+    if (cfg.ship.visible) {
+        // Left window: the contact list.
+        place_box(L, cfg.ship, kShipInfo, ppu, ox, oy, x, y, w, hh);
+        float sc = cfg.ship.scale * L.scale;
+        float row = y + 0.062f * ppu * cfg.ship.scale;
+        int shown = 0;
+        for (auto& c : st.contacts) {
+            if (shown++ >= 8) break;
+            HudColor col = c.selected ? kTarget : kLine.with_alpha(0.85f);
+            std::string name = c.name.size() > 22 ? c.name.substr(0, 22) : c.name;
+            h.text(x + 18 * sc, row, 8.5f * sc, name, col);
+            h.text(x + w - 18 * sc, row, 8.5f * sc, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
+            row += 17 * sc;
+        }
+    }
+    if (cfg.target.visible) {
+        place_box(L, cfg.target, kTargetBox, ppu, ox, oy, x, y, w, hh);
+        float sc = cfg.target.scale * L.scale;
+        for (auto& c : st.contacts) {
+            if (!c.selected) continue;
+            float ty = y + 0.035f * ppu * cfg.target.scale;
+            h.text(x + w * 0.5f, ty, 10 * sc, c.name.size() > 24 ? c.name.substr(0, 24) : c.name, kTarget, TextAlign::Center);
+            h.text(x + w * 0.5f, y + hh - 34 * sc, 10 * sc, fmt_distance((c.pos - player_pos).length()), kLine, TextAlign::Center);
+            break;
+        }
+    }
+    if (cfg.system.visible && !st.system_name.empty()) {
+        float ts = 12 * L.scale * cfg.system.scale;
+        float tw = HudBatch::text_width(ts, st.system_name);
+        L.place(cfg.system, tw, ts, x, y);
+        h.text(x, y, ts, st.system_name, kLine);
+    }
+}
+
+}  // namespace
+
+std::vector<HudModelDraw> classic_hud_models(const HudLayout& L, const HudConfig& cfg, float win_fovx_deg) {
+    std::vector<HudModelDraw> out;
+    float ppu = classic_ppu(L, win_fovx_deg), ox, oy, x, y, w, h;
+    if (cfg.ship.visible) {
+        place_box(L, cfg.ship, kShipInfo, ppu, ox, oy, x, y, w, h);
+        out.push_back({"interface/hud/hud_shipinfo.cmp", ox, oy, ppu * cfg.ship.scale});
+    }
+    if (cfg.target.visible) {
+        place_box(L, cfg.target, kTargetBox, ppu, ox, oy, x, y, w, h);
+        out.push_back({"interface/hud/hud_target.cmp", ox, oy, ppu * cfg.target.scale});
+    }
+    if (cfg.gauges.visible) {
+        place_box(L, cfg.gauges, kGaugeWindow, ppu, ox, oy, x, y, w, h);
+        float p = ppu * cfg.gauges.scale;
+        out.push_back({"interface/hud/hud_guagewindow.cmp", ox, oy, p});
+        out.push_back({"interface/hud/hud_numberboxes.cmp", ox, oy, p});
+    }
+    return out;
+}
+
+void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, const render::Camera& cam, const DVec3& player_pos,
+                      const HudState& st) {
     const float s = L.scale;
     const float cx = L.screen_w * 0.5f, cy = L.screen_h * 0.5f;  // optical centre = screen centre
     const float lw = 1.5f * s;
@@ -96,7 +276,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
             if (onscreen) {
                 double z = std::max(1.0, (c.pos - cam.pos).length());
                 float rpx = static_cast<float>(c.radius / (z * std::tan(cam.fov_y * 0.5)) * L.screen_h * 0.5);
-                float b = std::clamp(rpx, 18 * s, L.canvas_h * 0.4f), t = std::max(8 * s, b * 0.35f);
+                float b = std::clamp(rpx, 18 * s, L.canvas_h * 0.22f), t = std::max(8 * s, b * 0.35f);
                 for (int i = 0; i < 4; ++i) {
                     float sx = (i & 1) ? 1.f : -1.f, sy = (i & 2) ? 1.f : -1.f;
                     float x0 = px + sx * b, y0 = py + sy * b;
@@ -130,12 +310,20 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
 
     // The space below the reticle belongs to the ship, so the gauges sit in the two
     // lower corners of the canvas: own ship on the left, target and contacts right.
-    const float pw = 340 * s, ph = 190 * s, margin = 40 * s;
-    const float py0 = L.canvas_y + L.canvas_h - ph - margin;
     char buf[64];
 
-    // ---- bottom left: own ship
-    float px0 = L.canvas_x + margin;
+    if (cfg.style == HudStyle::Classic) {
+        build_classic_overlay(h, L, cfg, player_pos, st);
+    }
+
+    // ---- own ship (default: bottom left)
+    if (cfg.style == HudStyle::Modern && cfg.ship.visible) {
+    const float s0 = s;
+    {
+    const float s = s0 * cfg.ship.scale;
+    const float pw = 340 * s, ph = 190 * s;
+    float px0, py0;
+    L.place(cfg.ship, pw, ph, px0, py0);
     panel(h, px0, py0, pw, ph, s);
     h.text(px0 + 16 * s, py0 + 14 * s, 10 * s, "SHIP", kLine);
     std::snprintf(buf, sizeof buf, "%03d", static_cast<int>(std::round(st.speed)));
@@ -162,14 +350,22 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
     bar(h, bx, py0 + 120 * s, bw, bh, st.shield, kShield, s);
     h.text(px0 + 16 * s, py0 + 148 * s, 10 * s, "HULL", kHull);
     bar(h, bx, py0 + 150 * s, bw, bh, st.hull, kHull, s);
+    }
+    }
 
-    // ---- bottom right: target and nearest contacts
-    float qx = L.canvas_x + L.canvas_w - pw - margin;
+    // ---- target and nearest contacts (default: bottom right)
+    if (cfg.style == HudStyle::Modern && cfg.target.visible) {
+    const float s0 = s;
+    {
+    const float s = s0 * cfg.target.scale;
+    const float pw = 340 * s, ph = 190 * s;
+    float qx, py0;
+    L.place(cfg.target, pw, ph, qx, py0);
     panel(h, qx, py0, pw, ph, s);
     h.text(qx + 16 * s, py0 + 14 * s, 10 * s, "TARGET", kLine);
     for (auto& c : st.contacts) {
         if (!c.selected) continue;
-        h.text(qx + 16 * s, py0 + 36 * s, 12 * s, c.name.size() > 22 ? c.name.substr(0, 22) : c.name, kTarget);
+        h.text(qx + 16 * s, py0 + 36 * s, 11 * s, c.name.size() > 26 ? c.name.substr(0, 26) : c.name, kTarget);
         h.text(qx + pw - 16 * s, py0 + 14 * s, 10 * s, fmt_distance((c.pos - player_pos).length()), kTarget, TextAlign::Right);
         break;
     }
@@ -184,9 +380,16 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
         h.text(qx + pw - 16 * s, row, 8.5f * s, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
         row += 17 * s;
     }
+    }
+    }
 
     // ---- top centre: system name
-    if (!st.system_name.empty()) h.text(L.cx(), L.canvas_y + 30 * s, 12 * s, st.system_name, kLine, TextAlign::Center);
+    if (cfg.style == HudStyle::Modern && cfg.system.visible && !st.system_name.empty()) {
+        float ts = 12 * s * cfg.system.scale;
+        float w = HudBatch::text_width(ts, st.system_name), x, y;
+        L.place(cfg.system, w, ts, x, y);
+        h.text(x, y, ts, st.system_name, kLine);
+    }
 }
 
 }  // namespace sterrenvaarder::game
