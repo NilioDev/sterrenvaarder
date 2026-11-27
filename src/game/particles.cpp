@@ -96,6 +96,7 @@ void EffectInstance::spawn(Emitter& e, std::uint16_t index, DVec3 pos, const Qua
     p.vel = {static_cast<float>(vel.x) + wv.x, static_cast<float>(vel.y) + wv.y, static_cast<float>(vel.z) + wv.z};
     p.life = std::max(0.01f, curve(n, ale::kParticleLife, spark, t, 1));
     p.spin = rand01() * 6.2831853f;
+    p.orient = q;
     p.emitter = index;
     particles_.push_back(p);
     ++e.live;
@@ -154,6 +155,13 @@ void EffectInstance::sprites(std::vector<Sprite>& out) const {
         s.texture = a->get<std::string>(ale::kTexture);
         s.frame = anim(a, ale::kTexFrame, spark_, t, 0.f);
         if (auto* b = a->get<AleBlend>(ale::kBlend)) s.additive = b->dst == 2;  // ...ONE: additive
+        if (a->kind == "FxPerpAppearance") {
+            float c = std::cos(s.rotation), sn = std::sin(s.rotation);
+            Vec3 u = p.orient.rotate({1, 0, 0}), v = p.orient.rotate({0, 0, 1});
+            s.flat = true;
+            s.axis_u = u * c + v * sn;
+            s.axis_v = v * c - u * sn;
+        }
         if (s.size <= 0 || s.alpha <= 0.002f) continue;
         out.push_back(s);
     }

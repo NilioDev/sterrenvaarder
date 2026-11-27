@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "sterrenvaarder/ships.hpp"
 
+#include <algorithm>
+
 #include "sterrenvaarder/universe.hpp"
 
 namespace sterrenvaarder {
@@ -39,6 +41,14 @@ void each_section(const Vfs& vfs, const std::vector<std::string>& files, F f) {
 }
 
 }  // namespace
+
+const std::string& ShieldArchetype::hit_effect(float damage) const {
+    static const std::string none;
+    const std::string* best = &none;
+    for (auto& [threshold, fx] : hit_effects)
+        if (threshold <= damage) best = &fx;
+    return *best;
+}
 
 void DataFiles::read_freelancer_ini(std::string_view text) {
     std::vector<std::string> s, e, l, g, m, fx, ex, fu;
@@ -145,6 +155,10 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             sh.regeneration_rate = num(sec, "regeneration_rate", 0);
             sh.offline_rebuild_time = num(sec, "offline_rebuild_time", 0);
             sh.offline_threshold = num(sec, "offline_threshold", 0);
+            for (auto* e : sec.find_all("shield_hit_effects"))
+                if (e->values.size() >= 2) sh.hit_effects.emplace_back(e->values[0].as_float(), e->values[1].as_string());
+            std::sort(sh.hit_effects.begin(), sh.hit_effects.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
             shields_[to_lower(sh.nickname)] = std::move(sh);
             return;
         }

@@ -4,6 +4,7 @@
 namespace sterrenvaarder::game {
 
 void Combatant::set_shield(const ShieldArchetype* s) {
+    shield_arch = s;
     if (!s) {
         shield = max_shield = 0;
         return;

@@ -794,6 +794,8 @@ struct Renderer::Impl {
         Vec3 axis{};  // streaks: half the segment, centre to end
         float color2[4] = {};  // streaks: colour at the far end (sprites: same as color)
         float taper = 1;       // streaks: far-end width relative to the near end
+        bool flat = false;     // lies in the plane of ax_u, ax_v
+        Vec3 ax_u{}, ax_v{};
     };
     std::vector<SpriteInstance> sprites;
     // Animated effect textures: a node with "Frame count" and "Frame rects" whose frames are
@@ -1200,7 +1202,12 @@ struct Renderer::Impl {
                 gu.center[1] = static_cast<float>(rel.y);
                 gu.center[2] = static_cast<float>(rel.z);
                 gu.center[3] = sp.size;
-                if (sp.streak) {
+                if (sp.flat) {
+                    gu.r[0] = sp.ax_u.x; gu.r[1] = sp.ax_u.y; gu.r[2] = sp.ax_u.z;
+                    gu.u[0] = sp.ax_v.x; gu.u[1] = sp.ax_v.y; gu.u[2] = sp.ax_v.z;
+                    gu.rot[0] = 1;
+                    gu.rot[1] = 0;
+                } else if (sp.streak) {
                     // A quad along the segment, turned to face the camera: the texture's u runs
                     // across it and v along it.
                     Vec3 view{static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z)};
@@ -1225,6 +1232,14 @@ struct Renderer::Impl {
                 std::copy(std::begin(sp.color), std::end(sp.color), fu);
                 const float* far = sp.streak ? sp.color2 : sp.color;
                 std::copy(far, far + 4, fu + 4);
+                // Fade out what comes right up to the camera, so an effect on our own ship
+                // (a shield hit behind us) doesn't cover the whole screen.
+                if (!sp.streak) {
+                    double dist = std::sqrt(rel.x * rel.x + rel.y * rel.y + rel.z * rel.z);
+                    float near_fade = static_cast<float>(std::clamp((dist - sp.size) / (2.0 * sp.size + 1.0), 0.0, 1.0));
+                    fu[3] *= near_fade;
+                    fu[7] *= near_fade;
+                }
                 SDL_PushGPUFragmentUniformData(cmd, 0, fu, sizeof fu);
                 SDL_GPUTextureSamplerBinding b{sp.tex, gpu.clamp_sampler()};
                 SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
@@ -1431,6 +1446,17 @@ void Renderer::draw_streak(DVec3 from, DVec3 to, float width_from, float width_t
     sp.color2[2] = color_to.b;
     sp.color2[3] = std::clamp(alpha_to, 0.f, 1.f);
     sp.taper = width_from > 0 ? width_to / width_from : 1.f;
+}
+
+void Renderer::draw_flat_sprite(DVec3 pos, float size, Vec3 u, Vec3 v, Color3 color, float alpha,
+                                const std::string& texture, bool additive, float frame) {
+    std::size_t before = impl_->sprites.size();
+    draw_sprite(pos, size, 0, color, alpha, texture, additive, frame);
+    if (impl_->sprites.size() == before) return;
+    auto& sp = impl_->sprites.back();
+    sp.flat = true;
+    sp.ax_u = u;
+    sp.ax_v = v;
 }
 
 }  // namespace sterrenvaarder::render

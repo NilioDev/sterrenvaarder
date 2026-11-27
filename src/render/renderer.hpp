@@ -81,6 +81,9 @@ public:
     // frame (0..1) picks the frame of an animated texture over its frames.
     void draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
                      bool additive, float frame = 0);
+    // A sprite lying in the plane spanned by the unit vectors u and v instead of facing the camera.
+    void draw_flat_sprite(DVec3 pos, float size, Vec3 u, Vec3 v, Color3 color, float alpha, const std::string& texture,
+                          bool additive, float frame = 0);
     // A textured band from one point to another, facing the camera; half-width, colour and
     // alpha blend smoothly from the first end to the second.
     void draw_streak(DVec3 from, DVec3 to, float width_from, float width_to, Color3 color_from, float alpha_from,

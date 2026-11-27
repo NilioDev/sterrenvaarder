@@ -22,6 +22,10 @@ struct Sprite {
     const std::string* texture = nullptr;
     bool additive = true;
     float frame = 0;  // 0..1 through an animated texture's frames
+    // Perp appearances lie flat in the plane across their emitter's axis instead of facing
+    // the camera; axis_u and axis_v span that plane (unit length).
+    bool flat = false;
+    Vec3 axis_u{1, 0, 0}, axis_v{0, 0, 1};
 };
 
 class EffectInstance {
@@ -51,6 +55,7 @@ private:
         Vec3 vel;
         float age = 0, life = 1;
         float spin = 0;
+        Quat orient;  // the emitter's orientation when the particle left it
         std::uint16_t emitter = 0;
     };
 

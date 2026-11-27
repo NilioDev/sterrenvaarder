@@ -443,6 +443,7 @@ struct FlightSession {
     // Effects from the original data: engine flames, muzzle flashes, impacts.
     std::vector<AttachedFx> engine_fx;
     DamageFx damage;
+    int shield_hits = 0;  // shield hit effects played (reported by screenshot runs)
     struct LooseFx {
         DVec3 pos, vel;
         Quat orient;
@@ -530,7 +531,10 @@ struct FlightSession {
             for (auto& e : n.damage.fx) e.fx.sprites(sprite_buf);
         for (auto& f : loose_fx) f.fx.sprites(sprite_buf);
         for (auto& s : sprite_buf)
-            if (s.texture) r.draw_sprite(s.pos, s.size, s.rotation, s.color, s.alpha, *s.texture, s.additive, s.frame);
+            if (s.texture) {
+                if (s.flat) r.draw_flat_sprite(s.pos, s.size, s.axis_u, s.axis_v, s.color, s.alpha, *s.texture, s.additive, s.frame);
+                else r.draw_sprite(s.pos, s.size, s.rotation, s.color, s.alpha, *s.texture, s.additive, s.frame);
+            }
     }
 
     // A bolt drawn the way its munition's beam entry describes: a bright head and a
@@ -1054,10 +1058,29 @@ struct FlightSession {
         std::vector<game::Combatant*> targets{&body};
         for (auto& n : npcs) targets.push_back(&n.body);
         world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
-            if (p.munition && fxdb && fxdb->vis(p.munition->hit_effect))
+            // A hit on a raised shield plays the shield's effect, turned to face out from the
+            // ship at the point of impact; otherwise the munition's own hit effect.
+            const std::string* shield_fx = nullptr;
+            if (t.shield > 0 && t.shield_arch && fxdb) {
+                auto& name = t.shield_arch->hit_effect(p.hull_damage + p.energy_damage);
+                if (!name.empty() && fxdb->vis(name)) shield_fx = &name;
+            }
+            if (shield_fx) {
+                DVec3 out = p.pos - t.pos;
+                double len = out.length();
+                Vec3 n = len > 1e-6 ? Vec3{static_cast<float>(out.x / len), static_cast<float>(out.y / len), static_cast<float>(out.z / len)}
+                                    : Vec3{0, 1, 0};
+                Vec3 axis{-n.z, 0, n.x};  // +Y x n
+                float s2 = std::sqrt(axis.x * axis.x + axis.z * axis.z);
+                Quat q = s2 > 1e-5f ? Quat::axis_angle({axis.x / s2, 0, axis.z / s2}, std::atan2(s2, n.y))
+                                    : (n.y > 0 ? Quat{} : Quat::axis_angle({1, 0, 0}, 3.14159265f));
+                spawn_fx(*shield_fx, p.pos, {}, q);
+                ++shield_hits;
+            } else if (p.munition && fxdb && fxdb->vis(p.munition->hit_effect)) {
                 spawn_fx(p.munition->hit_effect, p.pos, {}, Quat{});
-            else
+            } else {
                 flashes.push_back({p.pos, 0, t.shield > 0});
+            }
         });
         for (auto& n : npcs)
             if (!n.body.alive() && n.mesh) {
@@ -1602,7 +1625,7 @@ int run(const Args& args) {
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
-                if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f", fs->body.hull, fs->body.max_hull, fs->body.shield);
+                if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits);
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
                             !n.body.alive() ? "destroyed" : n.ai ? std::string(game::FighterAi::name(n.ai->state())).c_str() : "test AI",
