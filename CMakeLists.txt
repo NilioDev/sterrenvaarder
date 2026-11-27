@@ -26,6 +26,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/ships.cpp
   src/sterrenvaarder/resources.cpp
   src/sterrenvaarder/economy.cpp
+  src/sterrenvaarder/factions.cpp
 )
 target_include_directories(sterrenvaarder_data PUBLIC src)
 

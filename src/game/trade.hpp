@@ -27,6 +27,10 @@ struct PlayerState {
     float hold_size = 0;
     std::map<std::string, int> cargo;  // good nickname (lower case) -> units
     std::vector<Mounted> equipment;
+    std::map<std::string, float> rep;  // faction group (lower case) -> -1..1
+    std::string base_faction;          // owner of the docked base (not saved; set on docking)
+
+    float rep_with(std::string_view group) const;
     std::optional<Vec3> position;      // set when saved in space
 
     int units(std::string_view good) const;
@@ -34,7 +38,7 @@ struct PlayerState {
 
 float cargo_used(const Economy& econ, const PlayerState& p);
 
-enum class TradeResult { Ok, NotDocked, NotSold, NotBought, NoMoney, NoRoom, NoneOwned, NoHardpoint, LevelTooLow };
+enum class TradeResult { Ok, NotDocked, NotSold, NotBought, NoMoney, NoRoom, NoneOwned, NoHardpoint, LevelTooLow, RepTooLow };
 const char* trade_message(TradeResult r);
 
 // Most units of a good the player can buy here right now (money and hold space).
@@ -42,7 +46,8 @@ int max_buy(const Economy& econ, const PlayerState& p, std::string_view good);
 TradeResult buy(const Economy& econ, PlayerState& p, std::string_view good, int count);
 TradeResult sell(const Economy& econ, PlayerState& p, std::string_view good, int count);
 
-// Whether the base offers a market line to this player (sold here, level reached).
+// Whether the base offers a market line to this player: sold here, level reached and
+// enough standing with the base's owner.
 bool offered(const MarketEntry& m, const PlayerState& p);
 
 // Equipment dealer: buying mounts the item on the first free hardpoint that accepts it.

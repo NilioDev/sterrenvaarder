@@ -24,6 +24,13 @@ const HudColor kShield{0.35f, 0.75f, 1.0f, 0.95f};
 const HudColor kHull{1.0f, 0.72f, 0.25f, 0.95f};
 const HudColor kCruise{0.6f, 1.0f, 0.75f, 0.95f};
 const HudColor kTarget{1.0f, 0.85f, 0.3f, 0.95f};
+const HudColor kHostile{1.0f, 0.32f, 0.25f, 0.95f};
+const HudColor kFriendly{0.45f, 1.0f, 0.5f, 0.95f};
+
+// Contact colour by attitude; neutral contacts use `neutral`.
+HudColor attitude_color(const HudContact& c, HudColor neutral) {
+    return c.hostile ? kHostile : c.friendly ? kFriendly : neutral;
+}
 
 std::string fmt_distance(double m) {
     char b[32];
@@ -198,7 +205,7 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
         int shown = 0;
         for (auto& c : st.contacts) {
             if (shown++ >= 8) break;
-            HudColor col = c.selected ? kTarget : kLine.with_alpha(0.85f);
+            HudColor col = attitude_color(c, c.selected ? kTarget : kLine).with_alpha(c.selected ? 1.f : 0.8f);
             std::string name = c.display().size() > 22 ? c.display().substr(0, 22) : c.display();
             h.text(x + 18 * sc, row, 8.5f * sc, name, col);
             h.text(x + w - 18 * sc, row, 8.5f * sc, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
@@ -211,7 +218,9 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
         for (auto& c : st.contacts) {
             if (!c.selected) continue;
             float ty = y + 0.035f * ppu * cfg.target.scale;
-            h.text(x + w * 0.5f, ty, 10 * sc, c.display().size() > 24 ? c.display().substr(0, 24) : c.display(), kTarget, TextAlign::Center);
+            h.text(x + w * 0.5f, ty, 10 * sc, c.display().size() > 24 ? c.display().substr(0, 24) : c.display(), attitude_color(c, kTarget), TextAlign::Center);
+            if (!c.faction.empty())
+                h.text(x + w * 0.5f, ty + 16 * sc, 8 * sc, c.faction.size() > 30 ? c.faction.substr(0, 30) : c.faction, kDim, TextAlign::Center);
             h.text(x + w * 0.5f, y + hh - 34 * sc, 10 * sc, fmt_distance((c.pos - player_pos).length()), kLine, TextAlign::Center);
             if (c.hull >= 0) {
                 float bw = w * 0.6f, bx = x + (w - bw) * 0.5f, bh = 6 * sc;
@@ -285,6 +294,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
         bool front = cam.project(c.pos, L.screen_w, L.screen_h, px, py);
         double dist = (c.pos - player_pos).length();
         if (c.selected) {
+            HudColor bc = attitude_color(c, kTarget);
             bool onscreen = front && px > 0 && px < L.screen_w && py > 0 && py < L.screen_h;
             if (onscreen) {
                 double z = std::max(1.0, (c.pos - cam.pos).length());
@@ -293,11 +303,11 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
                 for (int i = 0; i < 4; ++i) {
                     float sx = (i & 1) ? 1.f : -1.f, sy = (i & 2) ? 1.f : -1.f;
                     float x0 = px + sx * b, y0 = py + sy * b;
-                    h.line(x0, y0, x0 - sx * t, y0, 2 * s, kTarget);
-                    h.line(x0, y0, x0, y0 - sy * t, 2 * s, kTarget);
+                    h.line(x0, y0, x0 - sx * t, y0, 2 * s, bc);
+                    h.line(x0, y0, x0, y0 - sy * t, 2 * s, bc);
                 }
-                h.text(px, py + b + 8 * s, 13 * s, c.display(), kTarget, TextAlign::Center);
-                h.text(px, py + b + 28 * s, 11 * s, fmt_distance(dist), kTarget.with_alpha(0.8f), TextAlign::Center);
+                h.text(px, py + b + 8 * s, 13 * s, c.display(), bc, TextAlign::Center);
+                h.text(px, py + b + 28 * s, 11 * s, fmt_distance(dist), bc.with_alpha(0.8f), TextAlign::Center);
             } else {
                 // Off-screen: an arrow on a ring around the reticle pointing towards it.
                 Vec3 d{static_cast<float>(c.pos.x - cam.pos.x), static_cast<float>(c.pos.y - cam.pos.y),
@@ -387,7 +397,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     int shown = 0;
     for (auto& c : st.contacts) {
         if (shown++ >= 6) break;
-        HudColor col = c.selected ? kTarget : kLine.with_alpha(0.8f);
+        HudColor col = attitude_color(c, c.selected ? kTarget : kLine).with_alpha(c.selected ? 1.f : 0.8f);
         std::string name = c.display().size() > 24 ? c.display().substr(0, 24) : c.display();
         h.text(qx + 16 * s, row, 8.5f * s, name, col);
         h.text(qx + pw - 16 * s, row, 8.5f * s, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);

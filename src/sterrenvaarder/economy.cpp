@@ -228,6 +228,7 @@ std::optional<NewGameProfile> read_new_character(const Vfs& vfs) {
     if (!faction) return std::nullopt;
     NewGameProfile p;
     p.base = str(*faction, "base");
+    p.rep_group = str(*faction, "rep_group");
     auto package = str(*faction, "Package");
     for (auto& sec : ini)
         if (iequals(sec.name, "Package") && iequals(str(sec, "nickname"), package)) {

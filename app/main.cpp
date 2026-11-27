@@ -8,7 +8,7 @@
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
 //                  [--new-game] [--load save.ini] [--save-file save.ini] [--exe <EXE dir>]
 //                  [--buy good,count]... [--tab 0-2]  (screenshot runs: trade after docking)
-//                  [--credits n] [--rank n]  (testing)
+//                  [--credits n] [--rank n] [--rep group,value]  (testing)
 //
 // Flight controls: mouse = steer (Space toggles mouse flight), W/S = throttle,
 //   Shift+W = cruise, A/D = strafe, Q/E = roll, Z = stop engines, T = next target,
@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -38,6 +39,7 @@
 #include "game/trade.hpp"
 #include "render/renderer.hpp"
 #include "sterrenvaarder/economy.hpp"
+#include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
 #include "sterrenvaarder/png.hpp"
@@ -74,6 +76,7 @@ struct Args {
     bool ship_given = false;
     bool new_game = false;
     std::string load, save_file, exe;
+    std::vector<std::pair<std::string, float>> reps;  // testing: --rep group,value
     std::vector<std::pair<std::string, int>> buys;  // screenshot runs: trades once docked
     int tab = 0;                                      // screenshot runs: base screen tab (0-2)
     long long credits = -1;                           // testing: override credits
@@ -113,6 +116,12 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--tab") a.tab = std::stoi(next());
         else if (k == "--credits") a.credits = std::stoll(next());
         else if (k == "--rank") a.rank = std::stoi(next());
+        else if (k == "--rep") {
+            auto v = next();
+            auto comma = v.find(',');
+            if (comma == std::string::npos) throw std::runtime_error("--rep wants group,value");
+            a.reps.emplace_back(to_lower(v.substr(0, comma)), std::stof(v.substr(comma + 1)));
+        }
         else if (k == "--buy") {
             auto v = next();
             auto comma = v.find(',');
@@ -231,7 +240,10 @@ struct FlightSession {
     // Player, economy and text
     const Economy* econ = nullptr;
     const GameStrings* strings = nullptr;
+    const Factions* factions = nullptr;
     game::PlayerState player;
+    std::string notice;  // short message on the status line (e.g. docking refused)
+    float notice_time = 0;
     int trade_sel = 0;
     std::string trade_msg;
     std::string docked_label;
@@ -252,6 +264,7 @@ struct FlightSession {
         ship.vel = {};
         input.cruise = false;
         player.base = !o.base.empty() ? o.base : o.dock_with;
+        player.base_faction = o.reputation;
         docked_label = player.base.empty() ? label_of(o) : base_label(player.base);
         trade_tab = Tab::Commodities;
         trade_sel = 0;
@@ -496,11 +509,17 @@ struct FlightSession {
         if (target < 0 || target >= static_cast<int>(contacts.size())) return;
         const SystemObject* o = game::find_object(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
+        if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
+            notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
+            notice_time = 4.f;
+            return;
+        }
         nav_target = o->nickname;
         nav = Nav::Approach;
     }
 
     std::string nav_status() const {
+        if (notice_time > 0) return notice;
         switch (nav) {
             case Nav::Approach: return "AUTOPILOT: " + nav_target;
             case Nav::Lane: return "TRADE LANE";
@@ -511,6 +530,7 @@ struct FlightSession {
 
     // Returns true while navigation owns the controls.
     bool update_nav(const StarSystem& sys, double dt) {
+        notice_time = std::max(0.f, notice_time - static_cast<float>(dt));
         if (nav == Nav::Free) return false;
         if (nav == Nav::Docked) { ship.vel = {}; return true; }
         if (nav == Nav::Lane) {
@@ -711,6 +731,13 @@ struct FlightSession {
             game::HudContact c;
             c.name = o.nickname;
             c.label = label_of(o);
+            if (!o.reputation.empty()) {
+                auto att = attitude_of(player.rep_with(o.reputation));
+                c.hostile = att == Attitude::Hostile;
+                c.friendly = att == Attitude::Friendly;
+                const Faction* f = factions ? factions->faction(o.reputation) : nullptr;
+                if (f && strings) c.faction = strings->name(f->ids_name, "");
+            }
             c.pos = {o.pos.x, o.pos.y, o.pos.z};
             c.radius = 200;
             contacts.push_back(std::move(c));
@@ -818,6 +845,36 @@ void set_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Rendere
     refit(fs, db, vfs, r, args, spawn_npcs);
 }
 
+// The game's EXE folder (Freelancer.ini and the text DLLs): --exe, or EXE next to DATA.
+std::filesystem::path find_ci(const std::filesystem::path& dir, std::string_view name) {
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (iequals(e.path().filename().string(), name)) return e.path();
+    return {};
+}
+
+std::filesystem::path find_exe_dir(const Args& args) {
+    if (!args.exe.empty()) return args.exe;
+    auto data = std::filesystem::absolute(args.mounts[0]).lexically_normal();
+    if (!data.has_filename()) data = data.parent_path();
+    return find_ci(data.parent_path(), "EXE");
+}
+
+// Standing of a new player: the house lines of EXE/MPNewCharacter.FL, or else how the
+// new character's faction (NewCharacter.ini rep_group) feels about everyone.
+std::map<std::string, float> initial_rep(const std::filesystem::path& exe, const Factions& factions,
+                                         const std::optional<NewGameProfile>& start) {
+    if (!exe.empty())
+        if (auto f = find_ci(exe, "mpnewcharacter.fl"); !f.empty()) {
+            auto b = read_file(f);
+            auto rep = read_house_lines(std::string_view(reinterpret_cast<const char*>(b.data()), b.size()));
+            if (!rep.empty()) return rep;
+        }
+    if (start)
+        if (auto* g = factions.faction(start->rep_group)) return g->rep;
+    return {};
+}
+
 // Puts a saved or new player into the world: system, ship, then docked or in space.
 void apply_player(FlightSession& fs, game::PlayerState p, const ShipDatabase& db, const Vfs& vfs, Renderer& r, Camera& cam,
                   const Args& args) {
@@ -871,20 +928,6 @@ std::optional<game::PlayerState> read_save_file(const std::string& path) {
     return game::read_save(text);
 }
 
-// The game's EXE folder (Freelancer.ini and the text DLLs): --exe, or EXE next to DATA.
-std::filesystem::path find_ci(const std::filesystem::path& dir, std::string_view name) {
-    std::error_code ec;
-    for (auto& e : std::filesystem::directory_iterator(dir, ec))
-        if (iequals(e.path().filename().string(), name)) return e.path();
-    return {};
-}
-
-std::filesystem::path find_exe_dir(const Args& args) {
-    if (!args.exe.empty()) return args.exe;
-    auto data = std::filesystem::absolute(args.mounts[0]).lexically_normal();
-    if (!data.has_filename()) data = data.parent_path();
-    return find_ci(data.parent_path(), "EXE");
-}
 
 // Reads Freelancer.ini ([Data] file lists) and the text resources, if the EXE folder is there.
 GameStrings load_strings(const std::filesystem::path& exe, DataFiles& files) {
@@ -966,7 +1009,9 @@ int run(const Args& args) {
     for (std::size_t i = 0; i < args.mounts.size(); ++i) vfs.mount(args.mounts[i], i == 0 ? "base" : args.mounts[i]);
     Universe universe(vfs);
     DataFiles files;
-    GameStrings strings = load_strings(find_exe_dir(args), files);
+    const auto exe_dir = find_exe_dir(args);
+    GameStrings strings = load_strings(exe_dir, files);
+    Factions factions(vfs);
 
     const bool offscreen = !args.screenshot.empty();
     if (offscreen) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
@@ -1002,8 +1047,11 @@ int run(const Args& args) {
             fs = std::make_unique<FlightSession>();
             fs->econ = econ.get();
             fs->strings = &strings;
+            fs->factions = &factions;
             auto start = read_new_character(vfs);
             fs->player.credits = start ? start->money : 2000;
+            const auto start_rep = initial_rep(exe_dir, factions, start);
+            fs->player.rep = start_rep;
             // Field of view: the chase camera's fovx from cameras.ini was defined for 4:3.
             // Keep that vertical angle and let wider screens see more to the sides (Hor+).
             float fovx = 70;
@@ -1022,6 +1070,7 @@ int run(const Args& args) {
             if (!args.load.empty()) {
                 auto p = read_save_file(args.load);
                 if (!p) throw std::runtime_error("cannot read save " + args.load);
+                if (p->rep.empty()) p->rep = start_rep;
                 apply_player(*fs, *p, *ships, vfs, renderer, cam, args);
             } else if (args.new_game) {
                 if (!start) throw std::runtime_error("characters/newcharacter.ini not found");
@@ -1031,10 +1080,13 @@ int run(const Args& args) {
                 p.system = econ->base(start->base) ? econ->base(start->base)->system : args.system;
                 p.ship = args.ship_given ? args.ship : start->ship;
                 p.loadout = args.ship_given ? std::string() : start->loadout;
+                p.rep = start_rep;
                 apply_player(*fs, p, *ships, vfs, renderer, cam, args);
             }
             if (args.credits >= 0) fs->player.credits = args.credits;
             if (args.rank >= 0) fs->player.rank = args.rank;
+            for (auto& [g, v] : args.reps) fs->player.rep[g] = v;
+            SDL_Log("factions: %zu, player standing with %zu", factions.size(), fs->player.rep.size());
             fs->update_contacts(renderer.system());
             if (!fs->docked()) fs->next_target();
             fs->update_camera(cam, 1.0);

@@ -10,6 +10,11 @@
 
 namespace sterrenvaarder::game {
 
+float PlayerState::rep_with(std::string_view group) const {
+    auto it = rep.find(to_lower(group));
+    return it == rep.end() ? 0.f : it->second;
+}
+
 int PlayerState::units(std::string_view good) const {
     auto it = cargo.find(to_lower(good));
     return it == cargo.end() ? 0 : it->second;
@@ -32,6 +37,7 @@ const char* trade_message(TradeResult r) {
         case TradeResult::NoneOwned: return "NONE IN CARGO";
         case TradeResult::NoHardpoint: return "NO FREE HARDPOINT FOR THIS";
         case TradeResult::LevelTooLow: return "LEVEL TOO LOW";
+        case TradeResult::RepTooLow: return "REPUTATION TOO LOW";
     }
     return "";
 }
@@ -78,7 +84,11 @@ TradeResult sell(const Economy& econ, PlayerState& p, std::string_view good, int
     return TradeResult::Ok;
 }
 
-bool offered(const MarketEntry& m, const PlayerState& p) { return m.base_sells && m.level_required <= p.rank; }
+bool rep_ok(const MarketEntry& m, const PlayerState& p) {
+    return p.base_faction.empty() || p.rep_with(p.base_faction) >= m.rep_required - 1e-4f;
+}
+
+bool offered(const MarketEntry& m, const PlayerState& p) { return m.base_sells && m.level_required <= p.rank && rep_ok(m, p); }
 
 std::string free_hardpoint(const Economy& econ, const PlayerState& p, std::string_view item) {
     for (auto& hp : econ.hardpoints_for(p.ship, item)) {
@@ -96,6 +106,7 @@ TradeResult buy_equipment(const Economy& econ, PlayerState& p, std::string_view 
     auto g = econ.good(good);
     if (!m || !m->base_sells || !g || g->category != GoodCategory::Equipment) return TradeResult::NotSold;
     if (m->level_required > p.rank) return TradeResult::LevelTooLow;
+    if (!rep_ok(*m, p)) return TradeResult::RepTooLow;
     std::string item = g->equipment.empty() ? g->nickname : g->equipment;
     std::string hp = free_hardpoint(econ, p, item);
     if (hp.empty()) return TradeResult::NoHardpoint;
@@ -137,6 +148,7 @@ TradeResult buy_ship(const Economy& econ, PlayerState& p, std::string_view packa
     auto g = econ.good(package);
     if (!m || !m->base_sells || !g || g->category != GoodCategory::Ship) return TradeResult::NotSold;
     if (m->level_required > p.rank) return TradeResult::LevelTooLow;
+    if (!rep_ok(*m, p)) return TradeResult::RepTooLow;
     auto hull = econ.good(g->hull);
     auto info = hull ? econ.ship(hull->ship) : nullptr;
     if (!info) return TradeResult::NotSold;
@@ -171,6 +183,11 @@ std::string write_save(const PlayerState& p) {
     std::snprintf(hold, sizeof hold, "hold_size = %g\n", p.hold_size);
     out += hold;
     for (auto& [good, n] : p.cargo) out += "cargo = " + good + ", " + std::to_string(n) + "\n";
+    for (auto& [group, v] : p.rep) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "house = %.3f, %s\n", v, group.c_str());
+        out += buf;
+    }
     for (auto& m : p.equipment) out += "equip = " + m.item + (m.hardpoint.empty() ? "" : ", " + m.hardpoint) + "\n";
     return out;
 }
@@ -194,6 +211,8 @@ std::optional<PlayerState> read_save(std::string_view text) {
         if (auto pos = sec.find("pos"); pos && pos->values.size() >= 3)
             p.position = Vec3{pos->values[0].as_float(), pos->values[1].as_float(), pos->values[2].as_float()};
         if (auto r = sec.find("rank"); r && !r->values.empty()) p.rank = r->values[0].as_int();
+        for (auto* h : sec.find_all("house"))
+            if (h->values.size() >= 2) p.rep[to_lower(h->values[1].as_string())] = h->values[0].as_float();
         for (auto* e : sec.find_all("equip"))
             if (!e->values.empty()) p.equipment.push_back({e->values[0].as_string(), e->values.size() > 1 ? e->values[1].as_string() : ""});
         for (auto* c : sec.find_all("cargo"))

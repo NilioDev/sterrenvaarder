@@ -77,7 +77,9 @@ struct HudContact {
     DVec3 pos;
     float radius = 0;   // for bracket size
     bool selected = false;
-    bool hostile = false;
+    bool hostile = false;   // red
+    bool friendly = false;  // green
+    std::string faction;    // owner's name, shown in the target box
     float hull = -1, shield = -1;  // 0..1 for ships, < 0 for objects without them
     const std::string& display() const { return label.empty() ? name : label; }
 };
