@@ -41,7 +41,7 @@ void each_section(const Vfs& vfs, const std::vector<std::string>& files, F f) {
 }  // namespace
 
 void DataFiles::read_freelancer_ini(std::string_view text) {
-    std::vector<std::string> s, e, l;
+    std::vector<std::string> s, e, l, g, m;
     for (auto& sec : parse_text_ini(text)) {
         if (!iequals(sec.name, "Data")) continue;
         for (auto& entry : sec.entries) {
@@ -50,11 +50,15 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
             if (iequals(entry.key, "ships")) s.push_back(v);
             else if (iequals(entry.key, "equipment")) e.push_back(v);
             else if (iequals(entry.key, "loadouts")) l.push_back(v);
+            else if (iequals(entry.key, "goods")) g.push_back(v);
+            else if (iequals(entry.key, "markets")) m.push_back(v);
         }
     }
     if (!s.empty()) ships = s;
     if (!e.empty()) equipment = e;
     if (!l.empty()) loadouts = l;
+    if (!g.empty()) goods = g;
+    if (!m.empty()) markets = m;
 }
 
 ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {

@@ -88,6 +88,10 @@ struct DataFiles {
                                        "equipment/prop_equip.ini"};
     std::vector<std::string> loadouts{"ships/loadouts.ini", "ships/loadouts_special.ini",
                                       "ships/loadouts_utility.ini", "solar/loadouts.ini"};
+    std::vector<std::string> goods{"equipment/goods.ini", "equipment/engine_good.ini", "equipment/misc_good.ini",
+                                   "equipment/st_good.ini", "equipment/weapon_good.ini"};
+    std::vector<std::string> markets{"equipment/market_misc.ini", "equipment/market_ships.ini",
+                                     "equipment/market_commodities.ini"};
     // Reads the [Data] section of a Freelancer.ini (text), replacing the defaults for
     // every list it mentions.
     void read_freelancer_ini(std::string_view text);
