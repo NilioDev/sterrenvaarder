@@ -172,6 +172,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         e.cruise_charge_time = num(sec, "cruise_charge_time", e.cruise_charge_time);
         e.flame_effect = str(sec, "flame_effect");
         e.trail_effect = str(sec, "trail_effect");
+        e.trail_effect_player = str(sec, "trail_effect_player");
         engines_[to_lower(e.nickname)] = std::move(e);
     });
     each_section(vfs, files.loadouts, [&](const IniSection& sec) {
