@@ -102,12 +102,18 @@ std::vector<std::string> HudConfig::apply_ini(std::string_view text) {
         if (iequals(sec.name, "Canvas")) {
             if (auto e = sec.find("max_aspect"); e && !e->values.empty()) max_aspect = std::max(0.f, e->values[0].as_float());
             if (auto e = sec.find("scale"); e && !e->values.empty()) scale = e->values[0].as_float();
+            if (auto e = sec.find("style"); e && !e->values.empty()) {
+                auto v = e->values[0].as_string();
+                if (iequals(v, "classic")) style = HudStyle::Classic;
+                else if (iequals(v, "modern")) style = HudStyle::Modern;
+                else warnings.push_back("unknown style " + v);
+            }
         } else if (iequals(sec.name, "Panel")) {
             auto n = sec.find("name");
             if (!n || n->values.empty()) continue;
             std::string name = n->values[0].as_string();
             HudPanelConfig* p = iequals(name, "ship") ? &ship : iequals(name, "target") ? &target
-                              : iequals(name, "system") ? &system : nullptr;
+                              : iequals(name, "system") ? &system : iequals(name, "gauges") ? &gauges : nullptr;
             if (!p) { warnings.push_back("unknown panel " + name); continue; }
             if (auto e = sec.find("anchor"); e && !e->values.empty()) p->anchor = anchor(e->values[0].as_string(), p->anchor);
             if (auto e = sec.find("offset"); e && e->values.size() >= 2) {
@@ -119,6 +125,121 @@ std::vector<std::string> HudConfig::apply_ini(std::string_view text) {
         }
     }
     return warnings;
+}
+
+namespace {
+
+// Bounds of the retail interface models (x0, x1, y0, y1 in model units, y up), measured
+// from the data. They only decide where a piece is anchored; modded models still draw.
+struct Box { float x0, x1, y0, y1; };
+constexpr Box kShipInfo{-0.119f, 0.127f, -0.106f, 0.106f};
+constexpr Box kTargetBox{-0.127f, 0.119f, -0.106f, 0.106f};
+constexpr Box kGaugeWindow{-0.103f, 0.103f, -0.025f, 0.019f};
+
+float classic_ppu(const HudLayout& L, float win_fovx_deg) {
+    // Height of the original 4:3 interface view at depth 1.
+    float half_w = std::tan(win_fovx_deg * 3.14159265f / 360.f);
+    float view_h = 2.f * half_w * 0.75f;
+    return L.scale * 1080.f / view_h;
+}
+
+// Places a model by its bounds; returns the origin in pixels and the panel rect.
+void place_box(const HudLayout& L, const HudPanelConfig& p, const Box& b, float ppu, float& ox, float& oy, float& x, float& y,
+               float& w, float& h) {
+    ppu *= p.scale;
+    w = (b.x1 - b.x0) * ppu;
+    h = (b.y1 - b.y0) * ppu;
+    L.place(p, w, h, x, y);
+    ox = x - b.x0 * ppu;
+    oy = y + b.y1 * ppu;
+}
+
+}  // namespace
+
+namespace {
+
+// Text and live values drawn over the original interface models.
+void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg, const DVec3& player_pos, const HudState& st) {
+    float ppu = classic_ppu(L, 54.432f), ox, oy, x, y, w, hh;
+    char buf[64];
+    if (cfg.gauges.visible) {
+        place_box(L, cfg.gauges, kGaugeWindow, ppu, ox, oy, x, y, w, hh);
+        float p = ppu * cfg.gauges.scale;
+        // Shield and hull fills inside the gauge window.
+        float gx = ox - 0.083f * p, gw = 0.166f * p, gh = 0.0045f * p;
+        auto fill = [&](float model_y, float frac, HudColor c) {
+            float yy = oy - model_y * p - gh * 0.5f;
+            h.rect(gx, yy, gw * std::clamp(frac, 0.f, 1.f), gh, c);
+        };
+        fill(0.0035f, st.shield, kShield);
+        fill(-0.0055f, st.hull, kHull);
+        // Speed and throttle in the two number boxes either side.
+        float ts = 0.014f * p;
+        std::snprintf(buf, sizeof buf, "%d", static_cast<int>(std::round(st.speed)));
+        h.text(ox - 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.cruising ? kCruise : kLine, TextAlign::Center);
+        std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::round(std::fabs(st.throttle) * 100)));
+        h.text(ox + 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.throttle < 0 ? kHull : kLine, TextAlign::Center);
+        if (st.cruising || st.cruise_charge > 0) {
+            float a0 = -1.5707963f, cr = 0.012f * p;
+            float cx = ox, cy = oy + 0.045f * p;
+            h.circle(cx, cy, cr, 1.f * L.scale, kDim);
+            h.arc(cx, cy, cr, a0, a0 + 6.2831853f * (st.cruising ? 1.f : st.cruise_charge), 3.f * L.scale, kCruise);
+        }
+    }
+    if (cfg.ship.visible) {
+        // Left window: the contact list.
+        place_box(L, cfg.ship, kShipInfo, ppu, ox, oy, x, y, w, hh);
+        float sc = cfg.ship.scale * L.scale;
+        float row = y + 0.062f * ppu * cfg.ship.scale;
+        int shown = 0;
+        for (auto& c : st.contacts) {
+            if (shown++ >= 8) break;
+            HudColor col = c.selected ? kTarget : kLine.with_alpha(0.85f);
+            std::string name = c.name.size() > 22 ? c.name.substr(0, 22) : c.name;
+            h.text(x + 18 * sc, row, 8.5f * sc, name, col);
+            h.text(x + w - 18 * sc, row, 8.5f * sc, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
+            row += 17 * sc;
+        }
+    }
+    if (cfg.target.visible) {
+        place_box(L, cfg.target, kTargetBox, ppu, ox, oy, x, y, w, hh);
+        float sc = cfg.target.scale * L.scale;
+        for (auto& c : st.contacts) {
+            if (!c.selected) continue;
+            float ty = y + 0.035f * ppu * cfg.target.scale;
+            h.text(x + w * 0.5f, ty, 10 * sc, c.name.size() > 24 ? c.name.substr(0, 24) : c.name, kTarget, TextAlign::Center);
+            h.text(x + w * 0.5f, y + hh - 34 * sc, 10 * sc, fmt_distance((c.pos - player_pos).length()), kLine, TextAlign::Center);
+            break;
+        }
+    }
+    if (cfg.system.visible && !st.system_name.empty()) {
+        float ts = 12 * L.scale * cfg.system.scale;
+        float tw = HudBatch::text_width(ts, st.system_name);
+        L.place(cfg.system, tw, ts, x, y);
+        h.text(x, y, ts, st.system_name, kLine);
+    }
+}
+
+}  // namespace
+
+std::vector<HudModelDraw> classic_hud_models(const HudLayout& L, const HudConfig& cfg, float win_fovx_deg) {
+    std::vector<HudModelDraw> out;
+    float ppu = classic_ppu(L, win_fovx_deg), ox, oy, x, y, w, h;
+    if (cfg.ship.visible) {
+        place_box(L, cfg.ship, kShipInfo, ppu, ox, oy, x, y, w, h);
+        out.push_back({"interface/hud/hud_shipinfo.cmp", ox, oy, ppu * cfg.ship.scale});
+    }
+    if (cfg.target.visible) {
+        place_box(L, cfg.target, kTargetBox, ppu, ox, oy, x, y, w, h);
+        out.push_back({"interface/hud/hud_target.cmp", ox, oy, ppu * cfg.target.scale});
+    }
+    if (cfg.gauges.visible) {
+        place_box(L, cfg.gauges, kGaugeWindow, ppu, ox, oy, x, y, w, h);
+        float p = ppu * cfg.gauges.scale;
+        out.push_back({"interface/hud/hud_guagewindow.cmp", ox, oy, p});
+        out.push_back({"interface/hud/hud_numberboxes.cmp", ox, oy, p});
+    }
+    return out;
 }
 
 void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, const render::Camera& cam, const DVec3& player_pos,
@@ -191,8 +312,12 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     // lower corners of the canvas: own ship on the left, target and contacts right.
     char buf[64];
 
+    if (cfg.style == HudStyle::Classic) {
+        build_classic_overlay(h, L, cfg, player_pos, st);
+    }
+
     // ---- own ship (default: bottom left)
-    if (cfg.ship.visible) {
+    if (cfg.style == HudStyle::Modern && cfg.ship.visible) {
     const float s0 = s;
     {
     const float s = s0 * cfg.ship.scale;
@@ -229,7 +354,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     }
 
     // ---- target and nearest contacts (default: bottom right)
-    if (cfg.target.visible) {
+    if (cfg.style == HudStyle::Modern && cfg.target.visible) {
     const float s0 = s;
     {
     const float s = s0 * cfg.target.scale;
@@ -259,7 +384,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     }
 
     // ---- top centre: system name
-    if (cfg.system.visible && !st.system_name.empty()) {
+    if (cfg.style == HudStyle::Modern && cfg.system.visible && !st.system_name.empty()) {
         float ts = 12 * s * cfg.system.scale;
         float w = HudBatch::text_width(ts, st.system_name), x, y;
         L.place(cfg.system, w, ts, x, y);

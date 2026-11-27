@@ -27,22 +27,30 @@ struct HudPanelConfig {
 // User and mod adjustable HUD settings, read from a small INI file:
 //
 //   [Canvas]
+//   style = classic         ; classic (original HUD models) or modern
 //   max_aspect = 1.7778     ; widest HUD area; 0 = use the full screen width
 //   scale = 1.0             ; overall HUD size
 //
 //   [Panel]
-//   name = target           ; ship, target, system
+//   name = target           ; ship, target, system, gauges
 //   anchor = bottom_right   ; top_left, top, top_right, left, center, right,
 //                           ; bottom_left, bottom, bottom_right
 //   offset = 40, 40
 //   scale = 1.0
 //   visible = true
+enum class HudStyle {
+    Classic,  // the original interface models from the player's own data (default)
+    Modern,   // Sterrenvaarder's own vector HUD, no game files needed
+};
+
 struct HudConfig {
+    HudStyle style = HudStyle::Classic;
     float max_aspect = 16.f / 9.f;
     float scale = 1;
     HudPanelConfig ship{HudPanelConfig::Anchor::BottomLeft, 40, 40, 1, true};
     HudPanelConfig target{HudPanelConfig::Anchor::BottomRight, 40, 40, 1, true};
     HudPanelConfig system{HudPanelConfig::Anchor::Top, 0, 30, 1, true};
+    HudPanelConfig gauges{HudPanelConfig::Anchor::Bottom, 0, 24, 1, true};  // classic style
 
     // Applies the settings in `text` on top of the current values. Unknown keys and
     // panels are ignored so newer files still load. Returns warnings, if any.
@@ -79,6 +87,18 @@ struct HudState {
     std::string system_name;
     std::vector<HudContact> contacts;  // nearest first
 };
+
+// One original interface model to draw (classic style), loaded from the player's data.
+struct HudModelDraw {
+    const char* model;  // game path
+    float px, py;       // model origin in output pixels
+    float ppu;          // pixels per model unit
+};
+
+// Classic style: where the original interface models go. Model units are those of the
+// original 4:3 interface camera (cameras.ini [WinCamera] fovx), so at 4:3 each piece is
+// exactly its original size; on wider screens the pieces sit on the centred canvas.
+std::vector<HudModelDraw> classic_hud_models(const HudLayout& layout, const HudConfig& config, float win_fovx_deg = 54.432f);
 
 void build_flight_hud(render::HudBatch& out, const HudLayout& layout, const HudConfig& config,
                       const render::Camera& cam, const DVec3& player_pos, const HudState& state);

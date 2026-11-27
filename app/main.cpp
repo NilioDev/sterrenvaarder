@@ -17,7 +17,9 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <cstdlib>
 #include <memory>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -112,6 +114,25 @@ struct FlightSession {
     bool mouse_flight = true;
     int target = -1;  // index into contacts
     std::vector<game::HudContact> contacts;
+    float win_fovx = 54.432f;  // cameras.ini [WinCamera]: the original interface view
+    std::unordered_map<std::string, Renderer::ModelHandle> hud_models;
+    bool hud_meshes_loaded = false;
+
+    // Original interface models come from the player's own data, loaded on first use.
+    Renderer::ModelHandle hud_model(Renderer& r, const std::string& path) {
+        if (auto it = hud_models.find(path); it != hud_models.end()) return it->second;
+        Renderer::ModelHandle h;
+        try {
+            if (!hud_meshes_loaded) {
+                hud_meshes_loaded = true;
+                r.add_mesh_library("interface/interface.generic.vms");
+            }
+            h = r.load_model(path, {"interface/hud/hud.txm"});
+        } catch (const std::exception& e) {
+            SDL_Log("HUD model %s: %s", path.c_str(), e.what());
+        }
+        return hud_models[path] = h;
+    }
 
     void spawn(const StarSystem& sys, const Args& args) {
         // Default: in front of the first station, facing it.
@@ -199,6 +220,9 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
         game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
         renderer.set_hud(&hud);
+        if (hud_cfg.style == game::HudStyle::Classic)
+            for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
+                renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu);
     }
     renderer.render(cmd, target, w, h, cam, settings, time);
 }
@@ -249,8 +273,10 @@ int run(const Args& args) {
             float fovx = 70;
             if (vfs.exists("cameras.ini"))
                 for (auto& sec : parse_ini(vfs.read("cameras.ini")))
-                    if (iequals(sec.name, "ChaseCamera"))
-                        if (auto* e = sec.find("fovx"); e && !e->values.empty()) fovx = e->values[0].as_float();
+                    if (auto* e = sec.find("fovx"); e && !e->values.empty()) {
+                        if (iequals(sec.name, "ChaseCamera")) fovx = e->values[0].as_float();
+                        else if (iequals(sec.name, "WinCamera")) fs->win_fovx = e->values[0].as_float();
+                    }
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->spawn(renderer.system(), args);
             fs->update_contacts(renderer.system());

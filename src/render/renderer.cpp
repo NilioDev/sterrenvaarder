@@ -256,7 +256,7 @@ struct Renderer::Impl {
                 if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
                 p = nullptr;
             }
-        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe}) {
+        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe}) {
             if (*p) SDL_ReleaseGPUGraphicsPipeline(d, *p);
             *p = nullptr;
         }
@@ -353,6 +353,8 @@ struct Renderer::Impl {
         sharpen = make_pipeline("fullscreen.vert", 0, "sharpen.frag", 1, 1, output_format, Blend::Opaque, false, false, false,
                                 SDL_GPU_SAMPLECOUNT_1);
         hud_pipe = make_hud_pipeline();
+        hud_mesh_pipe = make_pipeline("mesh.vert", 1, "mesh.frag", 4, 1, output_format, Blend::Alpha, true, false, false,
+                                      SDL_GPU_SAMPLECOUNT_1);
     }
 
     SDL_GPUGraphicsPipeline* make_background_pipeline(Blend b) {
@@ -531,6 +533,10 @@ struct Renderer::Impl {
             Model model = Model::load(file);
             MeshLibrary meshes;
             meshes.add_from(file);
+            auto find_mesh = [&](std::uint32_t id) -> const VMeshData* {
+                if (auto* m = meshes.mesh(id)) return m;
+                return shared_meshes.mesh(id);
+            };
             // Part transforms: walk joints from the root.
             std::map<std::string, Mat4> world;
             if (!model.parts.empty()) world[to_lower(model.parts[0].name)] = Mat4{};
@@ -547,7 +553,7 @@ struct Renderer::Impl {
                 for (auto& lod : part.lods) {
                     GpuLod gl;
                     gl.range_end = lod.range_end;
-                    const VMeshData* vm = meshes.mesh(lod.ref.mesh_id);
+                    const VMeshData* vm = find_mesh(lod.ref.mesh_id);
                     if (!vm) continue;
                     std::size_t cursor = lod.ref.start_index;
                     for (std::size_t g = lod.ref.start_group; g < std::size_t(lod.ref.start_group) + lod.ref.group_count; ++g) {
@@ -729,6 +735,15 @@ struct Renderer::Impl {
         std::vector<float> lod_ranges;
     };
     std::vector<DynamicInstance> dynamic;
+    MeshLibrary shared_meshes;
+
+    struct HudModel {
+        GpuModel* model;
+        float px, py, ppu;
+        HudColor tint;
+    };
+    std::vector<HudModel> hud_models;
+    SDL_GPUGraphicsPipeline* hud_mesh_pipe = nullptr;
 
     // HUD overlay: one growable vertex buffer, uploaded before the render passes.
     SDL_GPUGraphicsPipeline* hud_pipe = nullptr;
@@ -1029,18 +1044,49 @@ struct Renderer::Impl {
         fullscreen(cmd, target, sharpen, {final_src}, su, sizeof su);
 
         // ---- HUD, at output resolution
-        if (hud_verts) {
+        if (hud_verts || !hud_models.empty()) {
             SDL_GPUColorTargetInfo hc{};
             hc.texture = target;
             hc.load_op = SDL_GPU_LOADOP_LOAD;
             hc.store_op = SDL_GPU_STOREOP_STORE;
             auto* hp = SDL_BeginGPURenderPass(cmd, &hc, 1, nullptr);
+            if (!hud_models.empty()) {
+                SDL_BindGPUGraphicsPipeline(hp, hud_mesh_pipe);
+                FragmentUniforms hb{};
+                for (auto& hm : hud_models) {
+                    // Orthographic: model units -> pixels -> clip space; flat depth.
+                    Mat4 ortho;
+                    ortho.at(0, 0) = hm.ppu * 2.f / out_w;
+                    ortho.at(1, 1) = hm.ppu * 2.f / out_h;
+                    ortho.at(2, 2) = 0;
+                    ortho.at(0, 3) = hm.px * 2.f / out_w - 1.f;
+                    ortho.at(1, 3) = 1.f - hm.py * 2.f / out_h;
+                    ortho.at(2, 3) = 0.5f;
+                    for (auto& part : hm.model->parts) {
+                        if (part.lods.empty()) continue;
+                        for (auto& dr : part.lods[0].draws) {
+                            VertexUniforms vu{ortho, part.local, part.local.normal_matrix()};
+                            SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof vu);
+                            GpuMaterial m = hm.model->materials[dr.material];
+                            m.unlit = true;
+                            m.dc = {m.dc.x * hm.tint.r, m.dc.y * hm.tint.g, m.dc.z * hm.tint.b};
+                            m.opacity *= hm.tint.a;
+                            bind_material(cmd, hp, m, hb, s);
+                            SDL_GPUBufferBinding mvb{hm.model->vb, 0}, mib{hm.model->ib, 0};
+                            SDL_BindGPUVertexBuffers(hp, 0, &mvb, 1);
+                            SDL_BindGPUIndexBuffer(hp, &mib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+                            SDL_DrawGPUIndexedPrimitives(hp, dr.index_count, 1, dr.first_index, dr.vertex_offset, 0);
+                        }
+                    }
+                }
+                hud_models.clear();
+            }
             SDL_BindGPUGraphicsPipeline(hp, hud_pipe);
             float su2[4] = {2.f / out_w, 2.f / out_h, 0, 0};
             SDL_PushGPUVertexUniformData(cmd, 0, su2, sizeof su2);
             SDL_GPUBufferBinding vb{hud_vb, 0};
             SDL_BindGPUVertexBuffers(hp, 0, &vb, 1);
-            SDL_DrawGPUPrimitives(hp, hud_verts, 1, 0, 0);
+            if (hud_verts) SDL_DrawGPUPrimitives(hp, hud_verts, 1, 0, 0);
             SDL_EndGPURenderPass(hp);
         }
     }
@@ -1071,6 +1117,16 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::ui
 
 Renderer::ModelHandle Renderer::load_model(const std::string& path, const std::vector<std::string>& libs) {
     return ModelHandle{impl_->load_model(path, libs, false)};
+}
+
+void Renderer::add_mesh_library(const std::string& path) {
+    impl_->shared_meshes.add_from(
+        impl_->vfs.load_with_fallback(path, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }));
+}
+
+void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudColor tint) {
+    if (!m) return;
+    impl_->hud_models.push_back({static_cast<GpuModel*>(m.p), px, py, ppu, tint});
 }
 
 void Renderer::draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges) {

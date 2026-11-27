@@ -3,11 +3,13 @@
 ; Offsets are in 1080p units and scale with the screen, so one file fits every resolution.
 
 [Canvas]
+style = classic       ; classic = the original HUD from your own game data (default)
+                      ; modern  = Sterrenvaarder's own vector HUD
 max_aspect = 1.7778   ; widest HUD area: 1.7778 = 16:9, 1.6 = 16:10, 0 = full screen width
 scale = 1.0           ; overall HUD size
 
 [Panel]
-name = ship           ; speed, throttle, shield and hull
+name = ship           ; classic: contact list window; modern: speed, shield and hull
 anchor = bottom_left  ; top_left, top, top_right, left, center, right,
                       ; bottom_left, bottom, bottom_right
 offset = 40, 40
@@ -18,6 +20,11 @@ visible = true
 name = target         ; selected target and nearest contacts
 anchor = bottom_right
 offset = 40, 40
+
+[Panel]
+name = gauges         ; classic style: shield/hull gauges with speed and throttle
+anchor = bottom
+offset = 0, 24
 
 [Panel]
 name = system         ; current system name

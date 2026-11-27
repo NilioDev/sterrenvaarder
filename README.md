@@ -65,8 +65,10 @@ its loadout. A light fighter tops out at ~80 m/s; cruise runs at 300 m/s (or the
 Mouse = steer (Space toggles mouse flight), W/S = throttle, Shift+W = cruise, A/D =
 strafe, Q/E = roll, Z = stop engines, T = next target, F11 = fullscreen.
 
-The HUD is our own design, drawn at output resolution (crisp at any `--scale`). Its
-elements sit in a canvas of at most 16:9 (`--hud-aspect`), centred on wider screens, so
+By default the HUD is the original one: its interface models are loaded from your own
+game data (`DATA/INTERFACE/HUD`) and placed by the engine; no game files are part of this
+repository. A second style, `modern`, is our own vector design that needs no game files.
+Both are drawn at output resolution (crisp at any `--scale`). HUD elements sit in a canvas of at most 16:9 (`--hud-aspect`), centred on wider screens, so
 on 21:9 and 32:9 the gauges stay in front of you. On 4:3, 5:4 and 16:10 the canvas is
 the whole screen and the HUD scales down to fit. Text uses a built-in stroke font, so no
 font files are needed.
