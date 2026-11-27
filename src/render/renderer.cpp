@@ -847,9 +847,10 @@ struct Renderer::Impl {
                 float r = std::sqrt(u * u + v * v), a;
                 if (key == "star") {
                     float core = std::max(0.f, 1 - r);
-                    float rays = std::max(std::max(0.f, 1 - std::abs(u) * 12) * std::max(0.f, 1 - std::abs(v)),
-                                          std::max(0.f, 1 - std::abs(v) * 12) * std::max(0.f, 1 - std::abs(u)));
-                    a = std::min(1.f, core * core * core + rays * 0.8f);
+                    float rays = std::max(std::max(0.f, 1 - std::abs(u) * 16) * std::max(0.f, 1 - std::abs(v) * 1.4f),
+                                          std::max(0.f, 1 - std::abs(v) * 16) * std::max(0.f, 1 - std::abs(u) * 1.4f));
+                    // A round glow with faint short rays, as the heads look in the original.
+                    a = std::min(1.f, core * core + rays * rays * 0.35f);
                 } else if (key == "wide" || key == "thin") {
                     // Across the beam (u): bright core fading to the edges; along it (v): even.
                     float w = key == "wide" ? 1.f : 0.45f;
