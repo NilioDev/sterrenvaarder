@@ -6,6 +6,7 @@ namespace sterrenvaarder {
 
 struct Vec2 { float x = 0, y = 0; };
 struct Vec3 { float x = 0, y = 0, z = 0; };
+struct Color3 { float r = 0, g = 0, b = 0; };
 
 // Row-major 3x3 rotation as stored in model joints (row i = rotated basis i).
 using Mat3 = std::array<float, 9>;

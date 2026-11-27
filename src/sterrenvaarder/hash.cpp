@@ -56,6 +56,12 @@ std::uint32_t fl_model_crc(std::string_view name) {
     return ~c;
 }
 
+std::uint32_t fl_model_crc_exact(std::string_view name) {
+    std::uint32_t c = 0xFFFFFFFFu;
+    for (char ch : name) c = (c >> 8) ^ kModelTable[(c ^ static_cast<std::uint8_t>(ch)) & 0xFFu];
+    return ~c;
+}
+
 std::uint32_t fl_create_id(std::string_view nickname) {
     std::uint32_t h = 0;
     for (char ch : nickname) h = (h >> 8) ^ kIdTable[(h & 0xFFu) ^ lower(ch)];

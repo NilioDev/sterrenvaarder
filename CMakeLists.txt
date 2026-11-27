@@ -28,6 +28,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/economy.cpp
   src/sterrenvaarder/factions.cpp
   src/sterrenvaarder/pilots.cpp
+  src/sterrenvaarder/ale.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )

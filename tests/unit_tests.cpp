@@ -26,6 +26,8 @@ static int failures = 0;
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
+#include "sterrenvaarder/ale.hpp"
+#include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
@@ -513,6 +515,72 @@ static void test_thn() {
     fs::remove_all(root);
 }
 
+static void test_ale() {
+    using namespace sterrenvaarder;
+    std::vector<std::uint8_t> b;
+    auto u8 = [&](unsigned v) { b.push_back(static_cast<std::uint8_t>(v)); };
+    auto u16 = [&](unsigned v) { u8(v & 0xff); u8(v >> 8); };
+    auto u32 = [&](std::uint32_t v) { u16(v & 0xffff); u16(v >> 16); };
+    auto f32 = [&](float f) { std::uint32_t v; std::memcpy(&v, &f, 4); u32(v); };
+    auto str = [&](const std::string& s) {
+        u16(static_cast<unsigned>(s.size() + 1));
+        for (char c : s) u8(static_cast<unsigned char>(c));
+        u8(0);
+        if ((s.size() + 1) & 1) u8(0);
+    };
+    // Node library: one emitter, one appearance.
+    f32(1.1f); u32(2);
+    str("FxSphereEmitter");
+    u16(0x0103); u32(ale::kName); str("Puff.emt");
+    u16(0x0003); u32(ale::kLifespan); f32(2.5f);
+    u16(0x0105); u32(ale::kTransform); u16(0x0304); u16(0x0005);
+    u16(0x0202); u32(ale::kFrequency); u8(4); u8(2);  // 10/s at param 0, 30/s at param 1
+    f32(0); f32(10); u16(0); u16(0);
+    f32(1); f32(0); u16(0); u16(1); f32(0); f32(30); f32(0); f32(0);
+    u16(0);
+    str("FxBasicAppearance");
+    u16(0x0103); u32(ale::kName); str("Puff.app");
+    u16(0x8001); u32(0x12345678u);
+    u16(0x0200); u32(ale::kSize); u8(4); u8(1); f32(0); u8(4); u8(2); f32(0); f32(1); f32(1); f32(3);
+    u16(0x0201); u32(ale::kColor); u8(4); u8(1); f32(0); u8(4); u8(1); f32(0); f32(1); f32(0.5f); f32(0);
+    u16(0x0104); u32(ale::kBlend); u32(5); u32(2);
+    u16(0);
+    std::vector<std::uint8_t> nodes = b;
+    b.clear();
+    // Effect library (version 1.0: no per-effect floats).
+    f32(1.0f); u32(1);
+    str("puff");
+    u32(3);
+    u32(1); u32(kAleRoot); u32(0x8000); u32(1);
+    u32(0); u32(fl_model_crc_exact("Puff.emt")); u32(1); u32(2);
+    u32(0); u32(fl_model_crc_exact("Puff.app")); u32(1); u32(3);
+    u32(1); u32(2); u32(3);
+
+    AleLibrary lib;
+    lib.parse_nodes(nodes);
+    lib.parse_effects(b);
+    CHECK(lib.nodes().size() == 2 && lib.effects().size() == 1);
+    auto* e = lib.effect("PUFF");
+    CHECK(e && e->refs.size() == 3 && e->pairs.size() == 1 && e->pairs[0].second == 3);
+    const AleNode* em = e ? lib.node(e->refs[1].node_crc) : nullptr;
+    const AleNode* ap = e ? lib.node(e->refs[2].node_crc) : nullptr;
+    CHECK(em && em->is_emitter() && em->name == "Puff.emt" && std::abs(em->number(ale::kLifespan, 0) - 2.5f) < 1e-6f);
+    CHECK(ap && ap->is_appearance() && ap->flag(0x12345678u, false));
+    if (em) {
+        auto* f = em->get<AleCurve>(ale::kFrequency);
+        CHECK(f && std::abs(f->eval(0, 0) - 10) < 1e-4f && std::abs(f->eval(1, 0) - 30) < 1e-4f &&
+              std::abs(f->eval(0.5f, 0) - 20) < 1e-4f);
+    }
+    if (ap) {
+        auto* sz = ap->get<AleAnimFloat>(ale::kSize);
+        CHECK(sz && std::abs(sz->eval(0, 0.5f) - 2) < 1e-4f);
+        auto* c = ap->get<AleAnimColor>(ale::kColor);
+        CHECK(c && std::abs(c->eval(0, 0.3f).g - 0.5f) < 1e-4f);
+        auto* bl = ap->get<AleBlend>(ale::kBlend);
+        CHECK(bl && bl->src == 5 && bl->dst == 2);
+    }
+}
+
 static void test_pilots_and_ai() {
     using namespace sterrenvaarder;
     using namespace sterrenvaarder::game;
@@ -589,6 +657,7 @@ int main() {
     test_vfs_layers();
     test_png();
     test_pilots_and_ai();
+    test_ale();
     std::printf(failures ? "%d test(s) failed\n" : "all unit tests passed\n", failures);
     return failures ? 1 : 0;
 }

@@ -12,7 +12,6 @@
 
 namespace sterrenvaarder {
 
-struct Color3 { float r = 0, g = 0, b = 0; };
 
 struct SolarArchetype {
     std::string nickname;

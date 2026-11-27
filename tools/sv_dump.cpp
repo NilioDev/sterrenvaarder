@@ -3,12 +3,14 @@
 //   sv-dump <file>            file on disk
 //   sv-dump --data <DATA> <game path>
 // A compiled Lua scene script (.thn) prints its globals as Lua text.
+// An effect file (.ale) prints its effects and nodes.
 // A resource DLL (.dll) prints its strings as "id<TAB>text" and its infocard ids.
 #include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <string>
 
+#include "sterrenvaarder/ale.hpp"
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/resources.hpp"
@@ -50,6 +52,27 @@ int main(int argc, char** argv) {
         }
         if (data.size() > 5 && data[0] == 0x1B && data[1] == 'L' && data[2] == 'u' && data[3] == 'a') {
             for (auto& [name, v] : LuaChunk::parse(data).globals) std::cout << name << " = " << to_lua_text(v) << "\n";
+            return 0;
+        }
+        if (UtfFile::is_utf(data) && UtfFile::parse(data)->root().find("ALEffectLib/ALEffectLib")) {
+            auto lib = AleLibrary::parse(data);
+            for (auto& e : lib.effects()) {
+                std::cout << "effect " << e.name << "\n";
+                for (auto& r : e.refs) {
+                    const AleNode* n = lib.node(r.node_crc);
+                    std::cout << "  #" << r.id << " parent " << (r.parent == 0x8000 ? std::string("-") : std::to_string(r.parent))
+                              << "  " << (r.node_crc == kAleRoot ? std::string("(root)") : n ? n->kind + " " + n->name : "?") << "\n";
+                }
+                for (auto& [a, b] : e.pairs) std::cout << "  emitter #" << a << " -> appearance #" << b << "\n";
+            }
+            for (auto& n : lib.nodes()) {
+                std::cout << "node " << n.kind << " " << n.name << ": " << n.props.size() << " properties";
+                if (auto* t = n.get<std::string>(ale::kTexture)) std::cout << ", texture " << *t;
+                if (n.is_emitter())
+                    std::cout << ", " << n.number(ale::kFrequency, 0) << "/s, life " << n.number(ale::kParticleLife, 0)
+                              << " s, speed " << n.number(ale::kPressure, 0) << " m/s";
+                std::cout << "\n";
+            }
             return 0;
         }
         if (UtfFile::is_utf(data)) print_tree(UtfFile::parse(std::move(data))->root(), 0);

@@ -49,3 +49,33 @@ Records: parent name[64], child name[64], then
 ## Level of detail
 `MultiLevel/Switch2` holds N+1 floats: switch distances for N levels. Ships also carry
 `LODranges` in shiparch.ini. Sterrenvaarder keeps these as the default visibility rules.
+
+## Alchemy effects (`.ale`)
+A UTF file with two leaves, `ALEffectLib/ALEffectLib` and `AlchemyNodeLibrary/AlchemyNodeLibrary`.
+Both start with f32 version and u32 count. Strings are u16 length (with the NUL), the
+bytes, then padding to an even length. Worked out by observing all 596 files of a retail
+install; every file reads to its last byte with the rules below.
+
+Node library, per node: kind string (`FxSphereEmitter`, `FxBasicAppearance`, ...), then
+properties until a u16 0. A property is u16 type, u32 name hash, payload:
+
+| type | payload |
+|------|---------|
+| 0x0001 / 0x8001 | bool false / true (no payload) |
+| 0x0002 | 32-bit integer |
+| 0x0003 | f32 |
+| 0x0103 | string |
+| 0x0104 | blend: u32 source, u32 destination (Direct3D blend factors) |
+| 0x0105 | transform: u16, u16 flags; with flags & 0x8000, nine curves (translate, rotate, scale) |
+| 0x0200 | animated float: u8, u8 n, n x (f32 param, u8, u8 m, m x (f32 t, f32 v)) |
+| 0x0201 | animated colour: as 0x0200 with keys (f32 t, f32 r, g, b) |
+| 0x0202 | curve: u8, u8 n, n x (f32 param, f32 value, u16 flags, u16 m, m x (f32 time, value, tangent in, out)) |
+
+Every node has its name as a string property (hash 0xEFA8CE01). The "param" of animated
+values is the effect's spark parameter (an engine's throttle, for instance); the `t` of
+animated floats and colours is a particle's normalised age.
+
+Effect library, per effect: name; with version 1.1 four f32; u32 n and n references
+(u32 flags, u32 node CRC, u32 parent id, u32 id); u32 m and m pairs (emitter id,
+appearance id). The root reference has CRC 0xEE223B51 and parent 0x8000. Node CRCs are
+the model CRC of the node name *without* folding case.
