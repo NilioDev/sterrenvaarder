@@ -21,6 +21,7 @@ struct Sprite {
     float alpha = 1;
     const std::string* texture = nullptr;
     bool additive = true;
+    float frame = 0;  // 0..1 through an animated texture's frames
 };
 
 class EffectInstance {

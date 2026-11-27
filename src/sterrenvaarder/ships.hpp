@@ -21,6 +21,9 @@ struct ShipArchetype {
     std::vector<std::string> material_libraries;
     std::vector<float> lod_ranges;
     std::string explosion_arch;
+    // fuse = name, delay, hit points: the fuse lights once the hull drops to that value.
+    struct FuseRef { std::string name; float delay = 0, hit_pts = 0; };
+    std::vector<FuseRef> fuses;
     float mass = 100;
     float linear_drag = 1;
     Vec3 steering_torque{20000, 20000, 60000};  // pitch, yaw, roll
@@ -101,6 +104,7 @@ struct DataFiles {
                                      "fx/space/space_ale.ini",        "fx/weapons/weapons_ale.ini",
                                      "fx/effects.ini",                "fx/effects_explosion.ini"};
     std::vector<std::string> explosions{"fx/explosions.ini"};
+    std::vector<std::string> fuses{"fx/fuse.ini"};
     std::vector<std::string> markets{"equipment/market_misc.ini", "equipment/market_ships.ini",
                                      "equipment/market_commodities.ini"};
     // Reads the [Data] section of a Freelancer.ini (text), replacing the defaults for

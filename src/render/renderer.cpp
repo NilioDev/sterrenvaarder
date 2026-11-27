@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <array>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -787,8 +789,41 @@ struct Renderer::Impl {
         float color[4];
         SDL_GPUTexture* tex;
         bool additive;
+        float uv[4];
+        bool streak = false;
+        Vec3 axis{};  // streaks: half the segment, centre to end
     };
     std::vector<SpriteInstance> sprites;
+    // Animated effect textures: a node with "Frame count" and "Frame rects" whose frames are
+    // rectangles in the images <name>_0, <name>_1, ...
+    struct Flipbook {
+        std::vector<SDL_GPUTexture*> images;
+        std::vector<std::array<float, 5>> frames;  // image index, u0, v0, u1, v1 (v up)
+    };
+    std::unordered_map<std::string, std::optional<Flipbook>> flipbooks;
+
+    const Flipbook* flipbook(const std::string& name) {
+        auto key = to_lower(name);
+        if (auto it = flipbooks.find(key); it != flipbooks.end()) return it->second ? &*it->second : nullptr;
+        auto& slot = flipbooks[key];
+        const UtfNode* node = fx_lib ? fx_lib->texture(name) : nullptr;
+        if (!node || !is_animation_node(*node)) return nullptr;
+        const UtfNode* rects = node->child("Frame rects");
+        const UtfNode* count = node->child("Texture count");
+        if (!rects) return nullptr;
+        Flipbook fb;
+        int images = count && count->data.size() >= 4 ? std::max(1, count->as<std::int32_t>()) : 1;
+        for (int i = 0; i < images; ++i) fb.images.push_back(texture(*fx_lib, node->name + "_" + std::to_string(i), true, false, nullptr));
+        for (std::size_t o = 0; o + 20 <= rects->data.size(); o += 20) {
+            std::array<float, 5> f;
+            f[0] = static_cast<float>(read_le<std::uint32_t>(rects->data, o));
+            for (int k = 0; k < 4; ++k) f[k + 1] = read_le<float>(rects->data, o + 4 + k * 4);
+            fb.frames.push_back(f);
+        }
+        if (fb.frames.empty()) return nullptr;
+        slot = std::move(fb);
+        return &*slot;
+    }
     std::vector<std::string> fx_lib_paths;
     std::unique_ptr<MaterialLibrary> fx_lib;
     std::unordered_map<std::string, SDL_GPUTexture*> builtin_fx;
@@ -1154,16 +1189,33 @@ struct Renderer::Impl {
                     bound = want;
                 }
                 DVec3 rel = sp.pos - cam.pos;
-                struct { Mat4 vp; float center[4], r[4], u[4], rot[4]; } gu{};
+                struct { Mat4 vp; float center[4], r[4], u[4], rot[4], uv[4]; } gu{};
+                std::copy(std::begin(sp.uv), std::end(sp.uv), gu.uv);
                 gu.vp = view_proj;
                 gu.center[0] = static_cast<float>(rel.x);
                 gu.center[1] = static_cast<float>(rel.y);
                 gu.center[2] = static_cast<float>(rel.z);
                 gu.center[3] = sp.size;
-                gu.r[0] = right.x; gu.r[1] = right.y; gu.r[2] = right.z;
-                gu.u[0] = up.x; gu.u[1] = up.y; gu.u[2] = up.z;
-                gu.rot[0] = std::cos(sp.rotation);
-                gu.rot[1] = std::sin(sp.rotation);
+                if (sp.streak) {
+                    // A quad along the segment, turned to face the camera: the texture's u runs
+                    // across it and v along it.
+                    Vec3 view{static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z)};
+                    Vec3 side = cross(sp.axis, view);
+                    float len = std::sqrt(side.x * side.x + side.y * side.y + side.z * side.z);
+                    float k = len > 1e-6f ? sp.size / len : 0.f;
+                    side = len > 1e-6f ? Vec3{side.x * k, side.y * k, side.z * k}
+                                       : Vec3{right.x * sp.size, right.y * sp.size, right.z * sp.size};
+                    gu.center[3] = 1;
+                    gu.r[0] = side.x; gu.r[1] = side.y; gu.r[2] = side.z;
+                    gu.u[0] = sp.axis.x; gu.u[1] = sp.axis.y; gu.u[2] = sp.axis.z;
+                    gu.rot[0] = 1;
+                    gu.rot[1] = 0;
+                } else {
+                    gu.r[0] = right.x; gu.r[1] = right.y; gu.r[2] = right.z;
+                    gu.u[0] = up.x; gu.u[1] = up.y; gu.u[2] = up.z;
+                    gu.rot[0] = std::cos(sp.rotation);
+                    gu.rot[1] = std::sin(sp.rotation);
+                }
                 SDL_PushGPUVertexUniformData(cmd, 0, &gu, sizeof gu);
                 SDL_PushGPUFragmentUniformData(cmd, 0, sp.color, sizeof sp.color);
                 SDL_GPUTextureSamplerBinding b{sp.tex, gpu.clamp_sampler()};
@@ -1325,11 +1377,25 @@ void Renderer::add_effect_textures(const std::string& txm_path) {
 }
 
 void Renderer::draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
-                           bool additive) {
+                           bool additive, float frame) {
     if (!impl_->fx_lib || alpha <= 0 || size <= 0) return;
-    SDL_GPUTexture* tex = impl_->texture(*impl_->fx_lib, texture, true, false, nullptr);
-    if (tex == impl_->white) tex = impl_->builtin_fx_texture(texture);
-    impl_->sprites.push_back({pos, size, rotation, {color.r, color.g, color.b, std::min(alpha, 1.f)}, tex, additive});
+    Impl::SpriteInstance sp{pos, size, rotation, {color.r, color.g, color.b, std::min(alpha, 1.f)}, nullptr, additive, {0, 0, 1, 1}};
+    if (auto* fb = impl_->flipbook(texture)) {
+        auto n = fb->frames.size();
+        auto i = static_cast<std::size_t>(std::clamp(frame, 0.f, 1.f) * static_cast<float>(n));
+        const auto& f = fb->frames[std::min(i, n - 1)];
+        auto img = static_cast<std::size_t>(f[0]);
+        sp.tex = fb->images[std::min(img, fb->images.size() - 1)];
+        // Frame rects count v upwards; our images run top-down.
+        sp.uv[0] = f[1];
+        sp.uv[1] = 1 - f[2];
+        sp.uv[2] = f[3];
+        sp.uv[3] = 1 - f[4];
+    } else {
+        sp.tex = impl_->texture(*impl_->fx_lib, texture, true, false, nullptr);
+        if (sp.tex == impl_->white) sp.tex = impl_->builtin_fx_texture(texture);
+    }
+    impl_->sprites.push_back(sp);
 }
 
 void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudColor tint) {
@@ -1340,6 +1406,16 @@ void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudC
 void Renderer::draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges) {
     if (!m) return;
     impl_->dynamic.push_back({static_cast<GpuModel*>(m.p), pos, rotation, lod_ranges});
+}
+
+void Renderer::draw_streak(DVec3 from, DVec3 to, float width, Color3 color, float alpha, const std::string& texture,
+                           bool additive) {
+    draw_sprite((from + to) * 0.5, width, 0, color, alpha, texture, additive);
+    if (impl_->sprites.empty()) return;
+    auto& sp = impl_->sprites.back();
+    DVec3 half = (to - from) * 0.5;
+    sp.streak = true;
+    sp.axis = {static_cast<float>(half.x), static_cast<float>(half.y), static_cast<float>(half.z)};
 }
 
 }  // namespace sterrenvaarder::render

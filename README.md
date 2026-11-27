@@ -106,7 +106,12 @@ engine flames scale with the throttle, guns show their muzzle flash, impacts pla
 munition's hit effect, and bolts are drawn from `fx/beam_effects.ini`. Particles follow
 the emitter's frequency, speed, spread and lifetime and the appearance's size, colour and
 alpha over their life. The beam textures the game draws in code (star, ball, wide, thin)
-are our own. Fields, trails and death explosions are not in yet.
+are our own. Ships die with the effect their `explosion_arch` names in `fx/explosions.ini`,
+and the damage fuses from `shiparch.ini` (`fuse = name, delay, hit points`, defined in the
+`fx/fuse*.ini` files) start sparks, fire and smoke at the ship's hardpoints as the hull
+drops. Animated textures (frame rects in the `.txm`) play over each particle's life.
+Fields, engine trails and flying debris are not in yet. `--npc-die <seconds>` destroys the
+test NPCs at that moment in a screenshot run.
 
 ## Trading and saves (phase 4)
 

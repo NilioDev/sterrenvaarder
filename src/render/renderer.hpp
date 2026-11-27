@@ -78,7 +78,11 @@ public:
     void draw_glow(DVec3 pos, float size, Color3 color, float intensity);
     // Effect particles: textures come from the .txm libraries named by the effect.
     void add_effect_textures(const std::string& txm_path);
+    // frame (0..1) picks the frame of an animated texture over its frames.
     void draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
+                     bool additive, float frame = 0);
+    // A textured band from one point to another, width = half-width, facing the camera.
+    void draw_streak(DVec3 from, DVec3 to, float width, Color3 color, float alpha, const std::string& texture,
                      bool additive);
     // Draws a model as a flat HUD element for the next render() call (e.g. the original
     // interface models from the user's own data). The model's local x/y units are mapped

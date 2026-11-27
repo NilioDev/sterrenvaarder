@@ -152,6 +152,7 @@ void EffectInstance::sprites(std::vector<Sprite>& out) const {
         if (auto* c = a->get<AleAnimColor>(ale::kColor)) s.color = c->eval(spark_, t);
         s.rotation = p.spin + anim(a, ale::kRotate, spark_, t, 0.f) * kDeg;
         s.texture = a->get<std::string>(ale::kTexture);
+        s.frame = anim(a, ale::kTexFrame, spark_, t, 0.f);
         if (auto* b = a->get<AleBlend>(ale::kBlend)) s.additive = b->dst == 2;  // ...ONE: additive
         if (s.size <= 0 || s.alpha <= 0.002f) continue;
         out.push_back(s);
