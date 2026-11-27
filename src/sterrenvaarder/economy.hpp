@@ -103,6 +103,7 @@ struct NewGameProfile {
     std::string base;
     std::string ship, loadout;
     std::int64_t money = 0;
+    std::string rep_group;  // faction whose standing a new player starts with
 };
 std::optional<NewGameProfile> read_new_character(const Vfs& vfs);
 

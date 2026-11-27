@@ -125,6 +125,7 @@ std::optional<StarSystem> Universe::load_system(std::string_view nickname) const
             o.ids_name = static_cast<int>(num(sec, "ids_name"));
             o.base = str(sec, "base");
             o.dock_with = str(sec, "dock_with");
+            o.reputation = str(sec, "reputation");
             o.next_ring = str(sec, "next_ring");
             o.prev_ring = str(sec, "prev_ring");
             if (auto g = sec.find("goto"); g && g->values.size() >= 2) {

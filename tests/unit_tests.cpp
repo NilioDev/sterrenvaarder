@@ -24,6 +24,7 @@ static int failures = 0;
 #include "game/navigation.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
+#include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/resources.hpp"
 
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
@@ -408,6 +409,35 @@ static void test_dealers() {
     fs::remove_all(root);
 }
 
+static void test_factions() {
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_faction_test";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    std::ofstream(root / "initialworld.ini") << "[Group]\nnickname = li_n_grp\nids_name = 10\nrep = 0.91, li_p_grp\nrep = -0.65, fc_x_grp\n";
+    Vfs vfs;
+    vfs.mount(root, "base");
+    Factions f(vfs);
+    CHECK(f.size() == 1 && f.rep("LI_N_GRP", "fc_x_grp") == -0.65f && f.rep("li_n_grp", "nobody") == 0);
+    CHECK(attitude_of(-0.65f) == Attitude::Hostile && attitude_of(0) == Attitude::Neutral && attitude_of(0.91f) == Attitude::Friendly);
+    auto house = read_house_lines("[Player]\nname = %%NAME%%\n;house = 1, x_grp\nhouse = 0.91, li_n_grp\r\nhouse=-0.3, fc_b_grp ; note\n");
+    CHECK(house.size() == 2 && house["li_n_grp"] == 0.91f && house["fc_b_grp"] == -0.3f);
+
+    MarketEntry m;
+    m.rep_required = 0.1f;
+    game::PlayerState p;
+    p.base_faction = "li_p_grp";
+    p.rep["li_p_grp"] = 0.05f;
+    CHECK(!game::offered(m, p));
+    p.rep["li_p_grp"] = 0.2f;
+    CHECK(game::offered(m, p));
+    p.system = "Li01";
+    p.ship = "s";
+    auto back = game::read_save(game::write_save(p));
+    CHECK(back && std::fabs(back->rep_with("LI_P_GRP") - 0.2f) < 1e-3f && back->base_faction.empty());
+    fs::remove_all(root);
+}
+
 int main() {
     test_flight();
     test_lanes();
@@ -415,6 +445,7 @@ int main() {
     test_resources();
     test_trade();
     test_dealers();
+    test_factions();
     test_hash();
     test_text_ini();
     test_bini();
