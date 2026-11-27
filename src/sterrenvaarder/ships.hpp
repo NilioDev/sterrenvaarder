@@ -76,6 +76,9 @@ struct ShieldArchetype {
     float regeneration_rate = 0;
     float offline_rebuild_time = 0;
     float offline_threshold = 0;
+    // shield_hit_effects = damage, effect: the strongest entry at or below a hit's damage plays.
+    std::vector<std::pair<float, std::string>> hit_effects;
+    const std::string& hit_effect(float damage) const;
 };
 
 struct Loadout {
