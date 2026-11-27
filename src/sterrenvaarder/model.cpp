@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "sterrenvaarder/model.hpp"
 
+#include <unordered_map>
+
 #include "sterrenvaarder/hash.hpp"
 
 namespace sterrenvaarder {
@@ -117,7 +119,17 @@ ModelPart load_part(const UtfNode& node, std::string name) {
     if (auto w = node.find("VMeshWire/VWireData")) part.wire = WireMesh::parse(w->data);
     if (auto hp = node.child("Hardpoints"))
         for (auto& group : hp->children)
-            for (auto& h : group.children) part.hardpoints.push_back(h.name);
+            for (auto& h : group.children) {
+                part.hardpoints.push_back(h.name);
+                Hardpoint hd;
+                hd.name = h.name;
+                hd.revolute = iequals(group.name, "Revolute");
+                if (auto p = h.child("Position"); p && p->leaf && p->data.size() >= 12)
+                    hd.position = {read_le<float>(p->data, 0), read_le<float>(p->data, 4), read_le<float>(p->data, 8)};
+                if (auto o = h.child("Orientation"); o && o->leaf && o->data.size() >= 36)
+                    for (int i = 0; i < 9; ++i) hd.orientation[i] = read_le<float>(o->data, i * 4);
+                part.hardpoint_data.push_back(std::move(hd));
+            }
     return part;
 }
 
@@ -178,6 +190,54 @@ Model Model::load(std::shared_ptr<UtfFile> file) {
         m.parts.push_back(load_part(root, "Root"));
     }
     return m;
+}
+
+namespace {
+
+// p' = M p with M(i, j) = r[j * 3 + i]: the data stores the transpose of the matrix that
+// maps child space into parent space (same convention as the renderer).
+Vec3 xform_point(const Mat3& r, Vec3 p) {
+    return {r[0] * p.x + r[3] * p.y + r[6] * p.z, r[1] * p.x + r[4] * p.y + r[7] * p.z, r[2] * p.x + r[5] * p.y + r[8] * p.z};
+}
+
+// a * b for matrices in the stored (transposed) layout.
+Mat3 compose(const Mat3& a, const Mat3& b) {
+    Mat3 out{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            float sum = 0;
+            for (int k = 0; k < 3; ++k) sum += a[k * 3 + i] * b[j * 3 + k];
+            out[j * 3 + i] = sum;
+        }
+    return out;
+}
+
+}  // namespace
+
+std::vector<Hardpoint> Model::hardpoints_in_model_space() const {
+    struct Xf { Vec3 t; Mat3 r = kIdentity3; };
+    std::unordered_map<std::string, Xf> world;
+    if (!parts.empty()) world[to_lower(parts[0].name)] = Xf{};
+    for (int pass = 0; pass < 8; ++pass)
+        for (auto& j : joints) {
+            auto p = world.find(to_lower(j.parent));
+            if (p == world.end() || world.count(to_lower(j.child))) continue;
+            Vec3 o = xform_point(p->second.r, j.origin);
+            world[to_lower(j.child)] = Xf{{p->second.t.x + o.x, p->second.t.y + o.y, p->second.t.z + o.z},
+                                          compose(p->second.r, j.rotation)};
+        }
+    std::vector<Hardpoint> out;
+    for (auto& part : parts) {
+        auto w = world.find(to_lower(part.name));
+        Xf xf = w == world.end() ? Xf{} : w->second;
+        for (auto h : part.hardpoint_data) {
+            Vec3 p = xform_point(xf.r, h.position);
+            h.position = {xf.t.x + p.x, xf.t.y + p.y, xf.t.z + p.z};
+            h.orientation = compose(xf.r, h.orientation);
+            out.push_back(std::move(h));
+        }
+    }
+    return out;
 }
 
 }  // namespace sterrenvaarder

@@ -19,6 +19,7 @@
 using namespace sterrenvaarder;
 
 static int failures = 0;
+#include "game/combat.hpp"
 #include "game/flight.hpp"
 
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
@@ -162,8 +163,55 @@ void test_flight() {
     CHECK(mouse_steer(1, 0).y < -0.99f && mouse_steer(0, -1).x > 0.99f);
 }
 
+void test_combat() {
+    using namespace sterrenvaarder::game;
+    ShieldArchetype sh;
+    sh.max_capacity = 600;
+    sh.regeneration_rate = 13.3f;
+    sh.offline_rebuild_time = 12;
+    sh.offline_threshold = 0.15f;
+    Combatant c;
+    c.id = 2;
+    c.radius = 10;
+    c.hull = c.max_hull = 1600;
+    c.set_shield(&sh);
+    c.damage(16.3f, 0);
+    CHECK(std::fabs(c.shield - 583.7f) < 0.01f && c.hull == 1600);
+    c.damage(1000, 0);  // collapses the shield, hull untouched by that hit
+    CHECK(c.shield == 0 && c.hull == 1600 && c.shield_offline == 12);
+    c.damage(100, 50);  // shield down: hull takes hull damage only
+    CHECK(c.hull == 1500);
+    for (int i = 0; i < 121; ++i) c.update(0.1f);
+    CHECK(c.shield > 89 && c.shield < 92);  // back at 15 % (+ a little regeneration)
+
+    GunArchetype ga;
+    ga.refire_delay = 0.12f;
+    ga.muzzle_velocity = 750;
+    MunitionArchetype mu;
+    mu.hull_damage = 16.3f;
+    mu.lifetime = 0.8f;
+    std::vector<Gun> guns{{&ga, &mu, {1, 0, 0}, 0}, {&ga, &mu, {-1, 0, 0}, 0}};
+    CombatWorld w;
+    Quat q;
+    w.fire(guns, 1, {0, 0, 0}, q, {0, 0, 0}, {0, 0, -1});
+    CHECK(w.projectiles().size() == 2);
+    w.fire(guns, 1, {0, 0, 0}, q, {0, 0, 0}, {0, 0, -1});  // still cooling down
+    CHECK(w.projectiles().size() == 2);
+    Combatant target;
+    target.id = 2;
+    target.pos = {0, 0, -300};
+    target.radius = 5;
+    target.hull = 100;
+    std::vector<Combatant*> ts{&target};
+    int hits = 0;
+    for (int i = 0; i < 60; ++i) w.update(1.f / 60, ts, [&](Combatant&, const Projectile&) { ++hits; });
+    CHECK(hits == 2 && std::fabs(target.hull - (100 - 2 * 16.3f)) < 0.01f);
+    CHECK(w.projectiles().empty());
+}
+
 int main() {
     test_flight();
+    test_combat();
     test_hash();
     test_text_ini();
     test_bini();

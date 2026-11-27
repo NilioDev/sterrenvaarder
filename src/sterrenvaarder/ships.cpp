@@ -91,6 +91,42 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         ships_[key] = std::move(a);
     });
     each_section(vfs, files.equipment, [&](const IniSection& sec) {
+        if (iequals(sec.name, "Gun")) {
+            GunArchetype g;
+            g.nickname = str(sec, "nickname");
+            if (g.nickname.empty()) return;
+            g.model = str(sec, "DA_archetype");
+            for (auto* m : sec.find_all("material_library"))
+                if (!m->values.empty()) g.material_libraries.push_back(m->values[0].as_string());
+            g.projectile = str(sec, "projectile_archetype");
+            g.refire_delay = num(sec, "refire_delay", g.refire_delay);
+            g.muzzle_velocity = num(sec, "muzzle_velocity", g.muzzle_velocity);
+            g.power_usage = num(sec, "power_usage", g.power_usage);
+            guns_[to_lower(g.nickname)] = std::move(g);
+            return;
+        }
+        if (iequals(sec.name, "Munition")) {
+            MunitionArchetype m;
+            m.nickname = str(sec, "nickname");
+            if (m.nickname.empty()) return;
+            m.hull_damage = num(sec, "hull_damage", 0);
+            m.energy_damage = num(sec, "energy_damage", 0);
+            m.lifetime = num(sec, "lifetime", m.lifetime);
+            m.const_effect = str(sec, "const_effect");
+            munitions_[to_lower(m.nickname)] = std::move(m);
+            return;
+        }
+        if (iequals(sec.name, "ShieldGenerator")) {
+            ShieldArchetype sh;
+            sh.nickname = str(sec, "nickname");
+            if (sh.nickname.empty()) return;
+            sh.max_capacity = num(sec, "max_capacity", 0);
+            sh.regeneration_rate = num(sec, "regeneration_rate", 0);
+            sh.offline_rebuild_time = num(sec, "offline_rebuild_time", 0);
+            sh.offline_threshold = num(sec, "offline_threshold", 0);
+            shields_[to_lower(sh.nickname)] = std::move(sh);
+            return;
+        }
         if (!iequals(sec.name, "Engine")) return;
         EngineArchetype e;
         e.nickname = str(sec, "nickname");
@@ -139,6 +175,24 @@ const Loadout* ShipDatabase::loadout_for_ship(std::string_view s) const {
 const EngineArchetype* ShipDatabase::engine_of(const Loadout& l) const {
     for (auto& e : l.equip)
         if (auto* eng = engine(e.item)) return eng;
+    return nullptr;
+}
+
+const GunArchetype* ShipDatabase::gun(std::string_view n) const {
+    auto it = guns_.find(to_lower(n));
+    return it == guns_.end() ? nullptr : &it->second;
+}
+const MunitionArchetype* ShipDatabase::munition(std::string_view n) const {
+    auto it = munitions_.find(to_lower(n));
+    return it == munitions_.end() ? nullptr : &it->second;
+}
+const ShieldArchetype* ShipDatabase::shield(std::string_view n) const {
+    auto it = shields_.find(to_lower(n));
+    return it == shields_.end() ? nullptr : &it->second;
+}
+const ShieldArchetype* ShipDatabase::shield_of(const Loadout& l) const {
+    for (auto& e : l.equip)
+        if (auto* s = shield(e.item)) return s;
     return nullptr;
 }
 
