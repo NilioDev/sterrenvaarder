@@ -81,9 +81,10 @@ public:
     // frame (0..1) picks the frame of an animated texture over its frames.
     void draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
                      bool additive, float frame = 0);
-    // A textured band from one point to another, width = half-width, facing the camera.
-    void draw_streak(DVec3 from, DVec3 to, float width, Color3 color, float alpha, const std::string& texture,
-                     bool additive);
+    // A textured band from one point to another, facing the camera; half-width, colour and
+    // alpha blend smoothly from the first end to the second.
+    void draw_streak(DVec3 from, DVec3 to, float width_from, float width_to, Color3 color_from, float alpha_from,
+                     Color3 color_to, float alpha_to, const std::string& texture, bool additive);
     // Draws a model as a flat HUD element for the next render() call (e.g. the original
     // interface models from the user's own data). The model's local x/y units are mapped
     // to pixels around (px, py), y up. Drawn unlit, before the vector HUD.

@@ -792,6 +792,8 @@ struct Renderer::Impl {
         float uv[4];
         bool streak = false;
         Vec3 axis{};  // streaks: half the segment, centre to end
+        float color2[4] = {};  // streaks: colour at the far end (sprites: same as color)
+        float taper = 1;       // streaks: far-end width relative to the near end
     };
     std::vector<SpriteInstance> sprites;
     // Animated effect textures: a node with "Frame count" and "Frame rects" whose frames are
@@ -1189,7 +1191,8 @@ struct Renderer::Impl {
                     bound = want;
                 }
                 DVec3 rel = sp.pos - cam.pos;
-                struct { Mat4 vp; float center[4], r[4], u[4], rot[4], uv[4]; } gu{};
+                struct { Mat4 vp; float center[4], r[4], u[4], rot[4], uv[4], taper[4]; } gu{};
+                gu.taper[0] = sp.streak ? sp.taper : 1.f;
                 std::copy(std::begin(sp.uv), std::end(sp.uv), gu.uv);
                 gu.vp = view_proj;
                 gu.center[0] = static_cast<float>(rel.x);
@@ -1217,7 +1220,11 @@ struct Renderer::Impl {
                     gu.rot[1] = std::sin(sp.rotation);
                 }
                 SDL_PushGPUVertexUniformData(cmd, 0, &gu, sizeof gu);
-                SDL_PushGPUFragmentUniformData(cmd, 0, sp.color, sizeof sp.color);
+                float fu[8];
+                std::copy(std::begin(sp.color), std::end(sp.color), fu);
+                const float* far = sp.streak ? sp.color2 : sp.color;
+                std::copy(far, far + 4, fu + 4);
+                SDL_PushGPUFragmentUniformData(cmd, 0, fu, sizeof fu);
                 SDL_GPUTextureSamplerBinding b{sp.tex, gpu.clamp_sampler()};
                 SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
                 SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
@@ -1408,14 +1415,21 @@ void Renderer::draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const 
     impl_->dynamic.push_back({static_cast<GpuModel*>(m.p), pos, rotation, lod_ranges});
 }
 
-void Renderer::draw_streak(DVec3 from, DVec3 to, float width, Color3 color, float alpha, const std::string& texture,
-                           bool additive) {
-    draw_sprite((from + to) * 0.5, width, 0, color, alpha, texture, additive);
-    if (impl_->sprites.empty()) return;
+void Renderer::draw_streak(DVec3 from, DVec3 to, float width_from, float width_to, Color3 color_from, float alpha_from,
+                           Color3 color_to, float alpha_to, const std::string& texture, bool additive) {
+    std::size_t before = impl_->sprites.size();
+    draw_sprite((from + to) * 0.5, width_from, 0, color_from, std::max(alpha_from, 1e-4f), texture, additive);
+    if (impl_->sprites.size() == before) return;
     auto& sp = impl_->sprites.back();
     DVec3 half = (to - from) * 0.5;
     sp.streak = true;
     sp.axis = {static_cast<float>(half.x), static_cast<float>(half.y), static_cast<float>(half.z)};
+    sp.color[3] = std::clamp(alpha_from, 0.f, 1.f);
+    sp.color2[0] = color_to.r;
+    sp.color2[1] = color_to.g;
+    sp.color2[2] = color_to.b;
+    sp.color2[3] = std::clamp(alpha_to, 0.f, 1.f);
+    sp.taper = width_from > 0 ? width_to / width_from : 1.f;
 }
 
 }  // namespace sterrenvaarder::render

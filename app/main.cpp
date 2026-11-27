@@ -545,18 +545,11 @@ struct FlightSession {
         Color3 head{b->core_color.r * b->head_brightness, b->core_color.g * b->head_brightness, b->core_color.b * b->head_brightness};
         r.draw_sprite(p.pos, b->head_width, 0, head, 1, b->head_texture, true);
         r.draw_sprite(p.pos, b->head_width * 1.8f, 0, b->outer_color, 0.6f, b->head_texture, true);
-        // The tail: a band fading from the outer colour to the tail colour, in a few pieces
-        // so the colour and width can change along it.
-        const int steps = 4;
+        // The tail: one band from the outer colour at the head to the tail colour at its end,
+        // fading out and narrowing as it goes.
         const std::string& tex = b->trail_texture.empty() ? b->head_texture : b->trail_texture;
-        for (int i = 0; i < steps; ++i) {
-            float f0 = static_cast<float>(i) / steps, f1 = static_cast<float>(i + 1) / steps, f = (f0 + f1) * 0.5f;
-            Color3 c{b->outer_color.r + (b->tail_color.r - b->outer_color.r) * f,
-                     b->outer_color.g + (b->tail_color.g - b->outer_color.g) * f,
-                     b->outer_color.b + (b->tail_color.b - b->outer_color.b) * f};
-            r.draw_streak(p.pos + back * (b->tail_length * f0), p.pos + back * (b->tail_length * f1),
-                          b->core_width * (1.f - 0.5f * f), c, b->trail_brightness * (1.f - f), tex, true);
-        }
+        r.draw_streak(p.pos, p.pos + back * b->tail_length, b->core_width, b->core_width * 0.4f, b->outer_color,
+                      b->trail_brightness, b->tail_color, 0.f, tex, true);
         return true;
     }
     // The room that goes with the open dealer tab (the base's own room names).
