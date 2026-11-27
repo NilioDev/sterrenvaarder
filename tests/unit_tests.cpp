@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,10 +24,12 @@ static int failures = 0;
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/navigation.hpp"
+#include "game/particles.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/ale.hpp"
+#include "sterrenvaarder/effects.hpp"
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/pilots.hpp"
@@ -579,6 +582,19 @@ static void test_ale() {
         auto* bl = ap->get<AleBlend>(ale::kBlend);
         CHECK(bl && bl->src == 5 && bl->dst == 2);
     }
+    // Run the effect: 10 particles a second at spark 0, each living the default second,
+    // until the emitter's 2.5 s lifespan is over.
+    auto shared = std::make_shared<AleLibrary>(std::move(lib));
+    ResolvedEffect fx{nullptr, shared, shared->effect("puff")};
+    game::EffectInstance inst(fx, 7);
+    for (int i = 0; i < 10; ++i) inst.update(0.1, {}, game::Quat{}, {}, 0.f);
+    CHECK(inst.particle_count() >= 9 && inst.particle_count() <= 11);
+    std::vector<game::Sprite> sprites;
+    inst.sprites(sprites);
+    CHECK(!sprites.empty() && sprites[0].additive && sprites[0].size > 0 && sprites[0].size <= 3);
+    CHECK(!inst.finished());
+    for (int i = 0; i < 40; ++i) inst.update(0.1, {}, game::Quat{}, {}, 0.f);
+    CHECK(inst.particle_count() == 0 && inst.finished());
 }
 
 static void test_pilots_and_ai() {

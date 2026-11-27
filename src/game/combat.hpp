@@ -16,6 +16,8 @@ struct Projectile {
     float life = 1;
     float hull_damage = 0, energy_damage = 0;
     int owner = -1;  // combatant id that fired it
+    const GunArchetype* gun = nullptr;
+    const MunitionArchetype* munition = nullptr;
 };
 
 struct Combatant {

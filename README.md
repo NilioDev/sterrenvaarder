@@ -101,6 +101,13 @@ for the NPC's ship, or `--npc-pilot <nickname>`. The behaviour is our own readin
 what those values describe. Wingmen trail from separate spots and hold fire while an
 ally is in the line of fire.
 
+Effects come from the original Alchemy files (`fx/*.ale`, listed in `freelancer.ini`):
+engine flames scale with the throttle, guns show their muzzle flash, impacts play the
+munition's hit effect, and bolts are drawn from `fx/beam_effects.ini`. Particles follow
+the emitter's frequency, speed, spread and lifetime and the appearance's size, colour and
+alpha over their life. The beam textures the game draws in code (star, ball, wide, thin)
+are our own. Fields, trails and death explosions are not in yet.
+
 ## Trading and saves (phase 4)
 
 Names come from the game's own text DLLs in the `EXE` folder next to `DATA` (or `--exe`),
