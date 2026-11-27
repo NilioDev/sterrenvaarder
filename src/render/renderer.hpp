@@ -76,6 +76,10 @@ public:
     // A camera-facing additive glow for the next render() call (weapon bolts, flashes,
     // explosions). Size is the half-width in metres; intensity scales HDR brightness.
     void draw_glow(DVec3 pos, float size, Color3 color, float intensity);
+    // Effect particles: textures come from the .txm libraries named by the effect.
+    void add_effect_textures(const std::string& txm_path);
+    void draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
+                     bool additive);
     // Draws a model as a flat HUD element for the next render() call (e.g. the original
     // interface models from the user's own data). The model's local x/y units are mapped
     // to pixels around (px, py), y up. Drawn unlit, before the vector HUD.

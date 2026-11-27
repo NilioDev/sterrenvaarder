@@ -20,6 +20,7 @@ struct ShipArchetype {
     std::string model;   // DA_archetype
     std::vector<std::string> material_libraries;
     std::vector<float> lod_ranges;
+    std::string explosion_arch;
     float mass = 100;
     float linear_drag = 1;
     Vec3 steering_torque{20000, 20000, 60000};  // pitch, yaw, roll
@@ -44,13 +45,15 @@ struct EngineArchetype {
     float linear_drag = 600;
     float reverse_fraction = 0.2f;
     float cruise_charge_time = 5;
+    std::string flame_effect, trail_effect;  // visual effects at the ship's engine hardpoints
 };
 
 struct MunitionArchetype {
     std::string nickname;
     float hull_damage = 0, energy_damage = 0;  // energy damage hits shields only
     float lifetime = 1;
-    std::string const_effect;  // projectile effect (visuals come from the player's data later)
+    std::string const_effect;  // the bolt's own effect
+    std::string hit_effect;    // munition_hit_effect
 };
 
 struct GunArchetype {
@@ -61,6 +64,7 @@ struct GunArchetype {
     float refire_delay = 0.2f;
     float muzzle_velocity = 600;
     float power_usage = 0;
+    std::string flash_effect;  // flash_particle_name: muzzle flash
 };
 
 struct ShieldArchetype {
@@ -90,6 +94,13 @@ struct DataFiles {
                                       "ships/loadouts_utility.ini", "solar/loadouts.ini"};
     std::vector<std::string> goods{"equipment/goods.ini", "equipment/engine_good.ini", "equipment/misc_good.ini",
                                    "equipment/st_good.ini", "equipment/weapon_good.ini"};
+    std::vector<std::string> effects{"fx/effect_types.ini",          "fx/beam_effects.ini",
+                                     "fx/engines/engines_ale.ini",    "fx/equipment/equipment_ale.ini",
+                                     "fx/explosions/explosions_ale.ini", "fx/hull_hits/hull_hits_ale.ini",
+                                     "fx/misc/misc_ale.ini",          "fx/shields/shields_ale.ini",
+                                     "fx/space/space_ale.ini",        "fx/weapons/weapons_ale.ini",
+                                     "fx/effects.ini",                "fx/effects_explosion.ini"};
+    std::vector<std::string> explosions{"fx/explosions.ini"};
     std::vector<std::string> markets{"equipment/market_misc.ini", "equipment/market_ships.ini",
                                      "equipment/market_commodities.ini"};
     // Reads the [Data] section of a Freelancer.ini (text), replacing the defaults for

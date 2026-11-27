@@ -198,6 +198,8 @@ struct Renderer::Impl {
     // Pipelines: scene (blend x depth-test), post-processing.
     SDL_GPUGraphicsPipeline* scene[3][2] = {};
     SDL_GPUGraphicsPipeline* glow = nullptr;
+    SDL_GPUGraphicsPipeline* sprite_add = nullptr;
+    SDL_GPUGraphicsPipeline* sprite_alpha = nullptr;
     SDL_GPUGraphicsPipeline* bloom_down = nullptr;
     SDL_GPUGraphicsPipeline* bloom_up = nullptr;
     SDL_GPUGraphicsPipeline* tonemap = nullptr;
@@ -258,7 +260,7 @@ struct Renderer::Impl {
                 if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
                 p = nullptr;
             }
-        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe, &hud_wire_pipe}) {
+        for (auto** p : {&glow, &sprite_add, &sprite_alpha, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe, &hud_wire_pipe}) {
             if (*p) SDL_ReleaseGPUGraphicsPipeline(d, *p);
             *p = nullptr;
         }
@@ -345,6 +347,8 @@ struct Renderer::Impl {
                                   : make_background_pipeline(static_cast<Blend>(b));
             }
         glow = make_pipeline("glow.vert", 1, "glow.frag", 1, 1, hdr_fmt, Blend::Additive, false, true, false, samples);
+        sprite_add = make_pipeline("sprite.vert", 1, "sprite.frag", 1, 1, hdr_fmt, Blend::Additive, false, true, false, samples);
+        sprite_alpha = make_pipeline("sprite.vert", 1, "sprite.frag", 1, 1, hdr_fmt, Blend::Alpha, false, true, false, samples);
         bloom_down = make_pipeline("fullscreen.vert", 0, "bloom_down.frag", 1, 1, hdr_fmt, Blend::Opaque, false, false, false,
                                    SDL_GPU_SAMPLECOUNT_1);
         bloom_up = make_pipeline("fullscreen.vert", 0, "bloom_up.frag", 1, 1, hdr_fmt, Blend::Additive, false, false, false,
@@ -776,6 +780,59 @@ struct Renderer::Impl {
     };
     std::vector<GlowInstance> glows;
 
+    // Particle sprites from effects, with the effect texture libraries they draw from.
+    struct SpriteInstance {
+        DVec3 pos;
+        float size, rotation;
+        float color[4];
+        SDL_GPUTexture* tex;
+        bool additive;
+    };
+    std::vector<SpriteInstance> sprites;
+    std::vector<std::string> fx_lib_paths;
+    std::unique_ptr<MaterialLibrary> fx_lib;
+    std::unordered_map<std::string, SDL_GPUTexture*> builtin_fx;
+
+    // The beam textures (star, ball, wide, thin) are drawn by the game itself, not stored in
+    // a texture library, so we draw our own; any other missing effect texture gets a soft dot
+    // rather than a hard white square.
+    SDL_GPUTexture* builtin_fx_texture(const std::string& name) {
+        auto key = to_lower(name);
+        if (auto it = builtin_fx.find(key); it != builtin_fx.end()) return it->second;
+        constexpr int N = 64;
+        Image img;
+        img.width = img.height = N;
+        img.has_alpha = true;
+        img.rgba.resize(N * N * 4);
+        for (int y = 0; y < N; ++y)
+            for (int x = 0; x < N; ++x) {
+                float u = (x + 0.5f) / N * 2 - 1, v = (y + 0.5f) / N * 2 - 1;
+                float r = std::sqrt(u * u + v * v), a;
+                if (key == "star") {
+                    float core = std::max(0.f, 1 - r);
+                    float rays = std::max(std::max(0.f, 1 - std::abs(u) * 12) * std::max(0.f, 1 - std::abs(v)),
+                                          std::max(0.f, 1 - std::abs(v) * 12) * std::max(0.f, 1 - std::abs(u)));
+                    a = std::min(1.f, core * core * core + rays * 0.8f);
+                } else if (key == "wide" || key == "thin") {
+                    // Across the beam (u): bright core fading to the edges; along it (v): even.
+                    float w = key == "wide" ? 1.f : 0.45f;
+                    float c = std::max(0.f, 1 - std::abs(u) / w);
+                    a = c * c;
+                } else {
+                    float c = std::max(0.f, 1 - r);
+                    a = c * c;
+                }
+                auto b = static_cast<std::uint8_t>(std::clamp(a, 0.f, 1.f) * 255.f + 0.5f);
+                auto* px = &img.rgba[(y * N + x) * 4];
+                px[0] = px[1] = px[2] = b;
+                px[3] = b;
+            }
+        auto* tex = gpu.texture(img, false);
+        owned_textures.push_back(tex);
+        builtin_fx[key] = tex;
+        return tex;
+    }
+
     struct HudModel {
         GpuModel* model;
         float px, py, ppu;
@@ -1084,6 +1141,37 @@ struct Renderer::Impl {
             }
             glows.clear();
         }
+        // Effect particles: farthest first so alpha-blended smoke layers correctly.
+        if (!sprites.empty()) {
+            std::sort(sprites.begin(), sprites.end(), [&](const SpriteInstance& a, const SpriteInstance& b) {
+                return (a.pos - cam.pos).length() > (b.pos - cam.pos).length();
+            });
+            SDL_GPUGraphicsPipeline* bound = nullptr;
+            for (auto& sp : sprites) {
+                SDL_GPUGraphicsPipeline* want = sp.additive ? sprite_add : sprite_alpha;
+                if (want != bound) {
+                    SDL_BindGPUGraphicsPipeline(pass, want);
+                    bound = want;
+                }
+                DVec3 rel = sp.pos - cam.pos;
+                struct { Mat4 vp; float center[4], r[4], u[4], rot[4]; } gu{};
+                gu.vp = view_proj;
+                gu.center[0] = static_cast<float>(rel.x);
+                gu.center[1] = static_cast<float>(rel.y);
+                gu.center[2] = static_cast<float>(rel.z);
+                gu.center[3] = sp.size;
+                gu.r[0] = right.x; gu.r[1] = right.y; gu.r[2] = right.z;
+                gu.u[0] = up.x; gu.u[1] = up.y; gu.u[2] = up.z;
+                gu.rot[0] = std::cos(sp.rotation);
+                gu.rot[1] = std::sin(sp.rotation);
+                SDL_PushGPUVertexUniformData(cmd, 0, &gu, sizeof gu);
+                SDL_PushGPUFragmentUniformData(cmd, 0, sp.color, sizeof sp.color);
+                SDL_GPUTextureSamplerBinding b{sp.tex, gpu.clamp_sampler()};
+                SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
+                SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
+            }
+            sprites.clear();
+        }
         SDL_EndGPURenderPass(pass);
 
         // ---- bloom
@@ -1221,6 +1309,27 @@ void Renderer::add_mesh_library(const std::string& path) {
 
 void Renderer::draw_glow(DVec3 pos, float size, Color3 color, float intensity) {
     impl_->glows.push_back({pos, size, color, intensity});
+}
+
+void Renderer::add_effect_textures(const std::string& txm_path) {
+    std::string key = to_lower(txm_path);
+    auto& paths = impl_->fx_lib_paths;
+    if (std::find(paths.begin(), paths.end(), key) != paths.end()) return;
+    paths.push_back(key);
+    if (!impl_->fx_lib) impl_->fx_lib = std::make_unique<MaterialLibrary>();
+    try {
+        impl_->fx_lib->add_from(
+            impl_->vfs.load_with_fallback(key, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }));
+    } catch (const std::exception&) {
+    }
+}
+
+void Renderer::draw_sprite(DVec3 pos, float size, float rotation, Color3 color, float alpha, const std::string& texture,
+                           bool additive) {
+    if (!impl_->fx_lib || alpha <= 0 || size <= 0) return;
+    SDL_GPUTexture* tex = impl_->texture(*impl_->fx_lib, texture, true, false, nullptr);
+    if (tex == impl_->white) tex = impl_->builtin_fx_texture(texture);
+    impl_->sprites.push_back({pos, size, rotation, {color.r, color.g, color.b, std::min(alpha, 1.f)}, tex, additive});
 }
 
 void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudColor tint) {

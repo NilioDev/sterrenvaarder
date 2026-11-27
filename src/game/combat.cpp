@@ -52,6 +52,8 @@ void CombatWorld::fire(std::vector<Gun>& guns, int owner, DVec3 ship_pos, const 
         p.hull_damage = g.munition->hull_damage;
         p.energy_damage = g.munition->energy_damage;
         p.owner = owner;
+        p.gun = g.arch;
+        p.munition = g.munition;
         projectiles_.push_back(p);
     }
 }

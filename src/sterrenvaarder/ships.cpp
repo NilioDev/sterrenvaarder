@@ -41,7 +41,7 @@ void each_section(const Vfs& vfs, const std::vector<std::string>& files, F f) {
 }  // namespace
 
 void DataFiles::read_freelancer_ini(std::string_view text) {
-    std::vector<std::string> s, e, l, g, m;
+    std::vector<std::string> s, e, l, g, m, fx, ex;
     for (auto& sec : parse_text_ini(text)) {
         if (!iequals(sec.name, "Data")) continue;
         for (auto& entry : sec.entries) {
@@ -52,6 +52,8 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
             else if (iequals(entry.key, "loadouts")) l.push_back(v);
             else if (iequals(entry.key, "goods")) g.push_back(v);
             else if (iequals(entry.key, "markets")) m.push_back(v);
+            else if (iequals(entry.key, "effects")) fx.push_back(v);
+            else if (iequals(entry.key, "explosions")) ex.push_back(v);
         }
     }
     if (!s.empty()) ships = s;
@@ -59,6 +61,8 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
     if (!l.empty()) loadouts = l;
     if (!g.empty()) goods = g;
     if (!m.empty()) markets = m;
+    if (!fx.empty()) effects = fx;
+    if (!ex.empty()) explosions = ex;
 }
 
 ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
@@ -87,6 +91,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         a.camera_vertical_turn_up_angle = num(sec, "camera_vertical_turn_up_angle", a.camera_vertical_turn_up_angle);
         a.camera_vertical_turn_down_angle = num(sec, "camera_vertical_turn_down_angle", a.camera_vertical_turn_down_angle);
         a.hit_pts = num(sec, "hit_pts", a.hit_pts);
+        a.explosion_arch = str(sec, "explosion_arch");
         a.hold_size = num(sec, "hold_size", a.hold_size);
         a.nanobot_limit = static_cast<int>(num(sec, "nanobot_limit", 0));
         a.shield_battery_limit = static_cast<int>(num(sec, "shield_battery_limit", 0));
@@ -106,6 +111,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             g.refire_delay = num(sec, "refire_delay", g.refire_delay);
             g.muzzle_velocity = num(sec, "muzzle_velocity", g.muzzle_velocity);
             g.power_usage = num(sec, "power_usage", g.power_usage);
+            g.flash_effect = str(sec, "flash_particle_name");
             guns_[to_lower(g.nickname)] = std::move(g);
             return;
         }
@@ -117,6 +123,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             m.energy_damage = num(sec, "energy_damage", 0);
             m.lifetime = num(sec, "lifetime", m.lifetime);
             m.const_effect = str(sec, "const_effect");
+            m.hit_effect = str(sec, "munition_hit_effect");
             munitions_[to_lower(m.nickname)] = std::move(m);
             return;
         }
@@ -139,6 +146,8 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         e.linear_drag = num(sec, "linear_drag", e.linear_drag);
         e.reverse_fraction = num(sec, "reverse_fraction", e.reverse_fraction);
         e.cruise_charge_time = num(sec, "cruise_charge_time", e.cruise_charge_time);
+        e.flame_effect = str(sec, "flame_effect");
+        e.trail_effect = str(sec, "trail_effect");
         engines_[to_lower(e.nickname)] = std::move(e);
     });
     each_section(vfs, files.loadouts, [&](const IniSection& sec) {

@@ -37,9 +37,11 @@
 #include "game/flight.hpp"
 #include "game/hud.hpp"
 #include "game/navigation.hpp"
+#include "game/particles.hpp"
 #include "game/trade.hpp"
 #include "render/renderer.hpp"
 #include "sterrenvaarder/economy.hpp"
+#include "sterrenvaarder/effects.hpp"
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -190,6 +192,31 @@ std::vector<game::Gun> guns_for(const ShipDatabase& db, const Vfs& vfs, const Sh
     return guns;
 }
 
+// An effect fixed to a point of a ship (engine flames at the HpEngine hardpoints).
+struct AttachedFx {
+    Vec3 offset;  // model space
+    game::EffectInstance fx;
+};
+
+// The engine's flame effect at each engine hardpoint of the ship's model.
+std::vector<AttachedFx> engine_fx_for(const EffectDb& fxdb, const Vfs& vfs, const ShipArchetype& arch,
+                                      const EngineArchetype* engine, std::uint32_t seed, std::vector<std::string>& textures) {
+    std::vector<AttachedFx> out;
+    if (!engine || engine->flame_effect.empty()) return out;
+    ResolvedEffect fx = fxdb.resolve(engine->flame_effect);
+    if (!fx) return out;
+    for (auto& t : fx.vis->textures) textures.push_back(t);
+    std::vector<Hardpoint> hps;
+    try {
+        hps = Model::load(vfs.load_with_fallback(arch.model, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); }))
+                  .hardpoints_in_model_space();
+    } catch (const std::exception&) {
+    }
+    for (auto& h : hps)
+        if (to_lower(h.name).starts_with("hpengine")) out.push_back({h.position, game::EffectInstance(fx, seed++)});
+    return out;
+}
+
 // A computer-controlled ship: same flight model and weapons as the player.
 struct NpcShip {
     std::string name;
@@ -202,6 +229,7 @@ struct NpcShip {
     Renderer::ModelHandle mesh;
     float burst = 0;  // > 0 firing, < 0 pausing (seconds left)
     std::optional<game::FighterAi> ai;  // from the original pilot data, when found
+    std::vector<AttachedFx> engine_fx;
 };
 
 struct Explosion {
@@ -396,6 +424,93 @@ struct FlightSession {
     const PetalDb* petal = nullptr;
     const ShipDatabase* shipdb = nullptr;
     const PilotDb* pilots = nullptr;
+    const EffectDb* fxdb = nullptr;
+
+    // Effects from the original data: engine flames, muzzle flashes, impacts.
+    std::vector<AttachedFx> engine_fx;
+    struct LooseFx {
+        DVec3 pos, vel;
+        Quat orient;
+        game::EffectInstance fx;
+        float age = 0;
+    };
+    std::vector<LooseFx> loose_fx;
+    std::vector<std::string> pending_textures;  // effect texture libraries the renderer still needs
+    std::uint32_t fx_seed = 1;
+    std::vector<game::Sprite> sprite_buf;
+
+    // Starts a one-off effect (flash, impact) at a point.
+    void spawn_fx(const std::string& name, DVec3 pos, DVec3 vel, const Quat& orient) {
+        if (!fxdb || name.empty()) return;
+        ResolvedEffect fx = fxdb->resolve(name);
+        if (!fx) return;
+        for (auto& t : fx.vis->textures) pending_textures.push_back(t);
+        if (loose_fx.size() > 400) return;  // keep heavy fights bounded
+        loose_fx.push_back({pos, vel, orient, game::EffectInstance(fx, fx_seed++)});
+    }
+
+    // Fires the guns and starts their muzzle flashes.
+    void fire_guns(std::vector<game::Gun>& g, int owner, const game::ShipState& s, Vec3 aim) {
+        std::size_t before = world.projectiles().size();
+        world.fire(g, owner, s.pos, s.orient, s.vel, aim);
+        auto& ps = world.projectiles();
+        for (std::size_t i = before; i < ps.size(); ++i)
+            if (ps[i].gun) spawn_fx(ps[i].gun->flash_effect, ps[i].pos, s.vel, Quat::look(aim));
+    }
+
+    static void update_engine_fx(std::vector<AttachedFx>& fx, const game::ShipState& s, const game::FlightInput& in,
+                                 double dt, bool alive) {
+        float spark = s.cruising ? 1.f : std::clamp(in.throttle, 0.f, 1.f);
+        for (auto& e : fx) e.fx.update(dt, s.pos + game::to_d(s.orient.rotate(e.offset)), s.orient, s.vel, spark, alive);
+    }
+
+    void update_effects(double dt) {
+        update_engine_fx(engine_fx, ship, input, dt, body.alive());
+        for (auto& n : npcs) update_engine_fx(n.engine_fx, n.ship, n.input, dt, n.body.alive());
+        for (auto& f : loose_fx) {
+            f.age += static_cast<float>(dt);
+            f.pos = f.pos + f.vel * dt;
+            f.fx.update(dt, f.pos, f.orient, f.vel, 0, true);
+        }
+        std::erase_if(loose_fx, [](const LooseFx& f) { return f.fx.finished() || f.age > 8.f; });
+    }
+
+    void draw_effects(Renderer& r) {
+        for (auto& t : pending_textures) r.add_effect_textures(t);
+        pending_textures.clear();
+        sprite_buf.clear();
+        for (auto& e : engine_fx) e.fx.sprites(sprite_buf);
+        for (auto& n : npcs)
+            for (auto& e : n.engine_fx) e.fx.sprites(sprite_buf);
+        for (auto& f : loose_fx) f.fx.sprites(sprite_buf);
+        for (auto& s : sprite_buf)
+            if (s.texture) r.draw_sprite(s.pos, s.size, s.rotation, s.color, s.alpha, *s.texture, s.additive);
+    }
+
+    // A bolt drawn the way its munition's beam entry describes: a bright head and a
+    // fading tail along its flight path.
+    bool draw_beam(Renderer& r, const game::Projectile& p) {
+        if (!fxdb || !p.munition) return false;
+        const BeamSpear* b = fxdb->beam(p.munition->const_effect);
+        if (!b || b->head_texture.empty()) return false;
+        double speed = p.vel.length();
+        if (speed <= 0) return false;
+        DVec3 back = p.vel * (-1.0 / speed);
+        Color3 head{b->core_color.r * b->head_brightness, b->core_color.g * b->head_brightness, b->core_color.b * b->head_brightness};
+        r.draw_sprite(p.pos, b->head_width, 0, head, 1, b->head_texture, true);
+        r.draw_sprite(p.pos, b->head_width * 1.8f, 0, b->outer_color, 0.6f, b->head_texture, true);
+        const int steps = 8;
+        const std::string& tex = b->trail_texture.empty() ? b->head_texture : b->trail_texture;
+        for (int i = 1; i <= steps; ++i) {
+            float f = static_cast<float>(i) / steps;
+            Color3 c{b->outer_color.r + (b->tail_color.r - b->outer_color.r) * f,
+                     b->outer_color.g + (b->tail_color.g - b->outer_color.g) * f,
+                     b->outer_color.b + (b->tail_color.b - b->outer_color.b) * f};
+            r.draw_sprite(p.pos + back * (b->tail_length * f), b->core_width * (1.f - 0.6f * f), 0, c,
+                          b->trail_brightness * (1.f - f), tex, true);
+        }
+        return true;
+    }
     // The room that goes with the open dealer tab (the base's own room names).
     std::string room_for_tab() const {
         switch (trade_tab) {
@@ -786,6 +901,7 @@ struct FlightSession {
             if (nlo) n.body.set_shield(db.shield_of(*nlo));
             n.guns = nguns;
             n.mesh = mesh;
+            if (fxdb) n.engine_fx = engine_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, fx_seed += 16, pending_textures);
             if (pilot) {
                 n.ai.emplace(*pilot, static_cast<std::uint32_t>(i + 1));
                 float rx, uy;
@@ -821,7 +937,7 @@ struct FlightSession {
         float hull = n.body.max_hull > 0 ? n.body.hull / n.body.max_hull : 1.f;
         auto out = n.ai->update(self, tgt, hull, true, w, dt);
         n.input = out.input;
-        if (out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) world.fire(n.guns, n.body.id, n.ship.pos, n.ship.orient, n.ship.vel, out.aim_dir);
+        if (out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) fire_guns(n.guns, n.body.id, n.ship, out.aim_dir);
     }
 
     // Pilots hold fire while a wingman is in the line of fire, also beyond the target,
@@ -863,7 +979,7 @@ struct FlightSession {
             float b = std::cos(static_cast<float>(sim_time) * 5.1f + n.body.id * 2.3f) * 0.03f;
             Vec3 r = n.ship.orient.right(), u = n.ship.orient.up();
             Vec3 d = render::normalize(Vec3{dir.x + r.x * a + u.x * b, dir.y + r.y * a + u.y * b, dir.z + r.z * a + u.z * b});
-            world.fire(n.guns, n.body.id, n.ship.pos, n.ship.orient, n.ship.vel, d);
+            fire_guns(n.guns, n.body.id, n.ship, d);
         }
     }
 
@@ -878,7 +994,7 @@ struct FlightSession {
             else if (n.burst < 0 && n.burst + dt >= 0) n.burst = 1.0f;
         }
         world.update_guns(guns, dt);
-        if (firing && body.alive()) world.fire(guns, body.id, ship.pos, ship.orient, ship.vel, aim_dir);
+        if (firing && body.alive()) fire_guns(guns, body.id, ship, aim_dir);
         for (auto& n : npcs) {
             if (!n.body.alive()) continue;
             world.update_guns(n.guns, dt);
@@ -893,7 +1009,10 @@ struct FlightSession {
         std::vector<game::Combatant*> targets{&body};
         for (auto& n : npcs) targets.push_back(&n.body);
         world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
-            flashes.push_back({p.pos, 0, t.shield > 0});
+            if (p.munition && fxdb && fxdb->vis(p.munition->hit_effect))
+                spawn_fx(p.munition->hit_effect, p.pos, {}, Quat{});
+            else
+                flashes.push_back({p.pos, 0, t.shield > 0});
         });
         for (auto& n : npcs)
             if (!n.body.alive() && n.mesh) {
@@ -904,6 +1023,7 @@ struct FlightSession {
         std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
         for (auto& f : flashes) f.age += dt;
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
+        update_effects(dt_d);
     }
 
     void draw_combat(Renderer& r) {
@@ -911,6 +1031,7 @@ struct FlightSession {
             if (n.body.alive() && n.mesh)
                 r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
         for (auto& p : world.projectiles()) {
+            if (draw_beam(r, p)) continue;
             Color3 c = p.owner == 0 ? Color3{0.4f, 0.8f, 1.f} : Color3{1.f, 0.35f, 0.2f};
             // A short streak: a few glows along the last few metres of travel.
             DVec3 back = p.vel * (-1.0 / std::max(1.0, p.vel.length()));
@@ -923,6 +1044,7 @@ struct FlightSession {
             r.draw_glow(e.pos, e.size * (0.3f + t * 1.4f), {1.f, 0.55f, 0.2f}, 8.f * (1.f - t) * (1.f - t));
             r.draw_glow(e.pos, e.size * 0.4f * (1.f + t), {1.f, 0.9f, 0.7f}, 12.f * std::max(0.f, 1.f - t * 3.f));
         }
+        draw_effects(r);
     }
 
     // Original interface models come from the player's own data, loaded on first use.
@@ -1060,6 +1182,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
         fs.mesh = r.load_model(arch->model, arch->material_libraries);
     }
     fs.model = game::FlightModel(game::FlightParams::from(*arch, db.engine_of(lo), db.cruise_speed()));
+    if (fs.fxdb) fs.engine_fx = engine_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), fs.fx_seed += 16, fs.pending_textures);
     fs.player.ship = arch->nickname;
     fs.player.hold_size = arch->hold_size;
     fs.npcs.clear();
@@ -1291,6 +1414,7 @@ int run(const Args& args) {
         RenderSettings settings = args.settings;
 
         std::unique_ptr<ShipDatabase> ships;
+        std::unique_ptr<EffectDb> fx_db;
         std::unique_ptr<Economy> econ;
         std::unique_ptr<FlightSession> fs;
         if (!args.free) {
@@ -1304,6 +1428,9 @@ int run(const Args& args) {
             fs->petal = &petal;
             fs->shipdb = ships.get();
             fs->pilots = &pilots;
+            fx_db = std::make_unique<EffectDb>(vfs, files.effects);
+            fs->fxdb = fx_db.get();
+            renderer.add_effect_textures("fx/beam.txm");
             auto start = read_new_character(vfs);
             fs->player.credits = start ? start->money : 2000;
             const auto start_rep = initial_rep(exe_dir, factions, start);
