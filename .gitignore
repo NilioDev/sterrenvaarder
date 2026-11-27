@@ -1,0 +1,13 @@
+build/
+out/
+*.glb
+# Never commit original game files
+DATA/
+*.cmp
+*.3db
+*.mat
+*.txm
+*.utf
+*.thn
+*.ale
+*.sur

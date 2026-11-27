@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: MPL-2.0
+// sv-dump: print any Freelancer INI (binary or text) as text, or a UTF file as a tree.
+//   sv-dump <file>            file on disk
+//   sv-dump --data <DATA> <game path>
+#include <cstdio>
+#include <iostream>
+#include <string>
+
+#include "sterrenvaarder/ini.hpp"
+#include "sterrenvaarder/utf.hpp"
+#include "sterrenvaarder/vfs.hpp"
+
+using namespace sterrenvaarder;
+
+static void print_tree(const UtfNode& n, int depth) {
+    std::cout << std::string(depth * 2, ' ') << n.name;
+    if (n.leaf) std::cout << "  [" << n.data.size() << " B]\n";
+    else {
+        std::cout << "/\n";
+        for (auto& c : n.children) print_tree(c, depth + 1);
+    }
+}
+
+int main(int argc, char** argv) {
+    try {
+        std::vector<std::uint8_t> data;
+        if (argc == 4 && std::string(argv[1]) == "--data") {
+            Vfs vfs;
+            vfs.mount(argv[2], "base");
+            data = vfs.read(argv[3]);
+        } else if (argc == 2) {
+            data = read_file(argv[1]);
+        } else {
+            std::fprintf(stderr, "usage: sv-dump <file> | sv-dump --data <DATA dir> <game path>\n");
+            return 2;
+        }
+        if (UtfFile::is_utf(data)) print_tree(UtfFile::parse(std::move(data))->root(), 0);
+        else std::cout << to_text(parse_ini(data));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
