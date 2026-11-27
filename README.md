@@ -71,6 +71,12 @@ on 21:9 and 32:9 the gauges stay in front of you. On 4:3, 5:4 and 16:10 the canv
 the whole screen and the HUD scales down to fit. Text uses a built-in stroke font, so no
 font files are needed.
 
+The layout is adjustable: canvas width (16:9, 16:10 or full width), overall size, and
+anchor, offset, size and visibility per panel. See
+[docs/hud.ini.example](docs/hud.ini.example). The file is read from
+`sterrenvaarder/hud.ini` in the data layers (so a mod can ship one), then from
+`--hud-config <file>`.
+
 ```sh
 ./build/sterrenvaarder --data /path/to/DATA --width 3440 --height 1440 \
     --screenshot fly.png --sim 4 --cursor 0.25,-0.05   # scripted flight, then a screenshot

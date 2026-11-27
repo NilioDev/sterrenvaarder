@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstdio>
 
+#include "sterrenvaarder/bytes.hpp"
+#include "sterrenvaarder/ini.hpp"
+
 namespace sterrenvaarder::game {
 
 using render::HudBatch;
@@ -48,7 +51,7 @@ void panel(HudBatch& h, float x, float y, float w, float ph, float s) {
 
 }  // namespace
 
-HudLayout HudLayout::make(float w, float h, float max_aspect) {
+HudLayout HudLayout::make(float w, float h, float max_aspect, float user_scale) {
     HudLayout l;
     l.screen_w = w;
     l.screen_h = h;
@@ -59,11 +62,67 @@ HudLayout HudLayout::make(float w, float h, float max_aspect) {
     l.canvas_w = max_aspect > 0 ? std::min(w, h * max_aspect) : w;
     l.canvas_x = (w - l.canvas_w) * 0.5f;
     l.canvas_y = 0;
-    l.scale = std::min(h / 1080.f, l.canvas_w / 1440.f);
+    l.scale = std::min(h / 1080.f, l.canvas_w / 1440.f) * std::clamp(user_scale, 0.25f, 4.f);
     return l;
 }
 
-void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam, const DVec3& player_pos, const HudState& st) {
+void HudLayout::place(const HudPanelConfig& p, float w, float h, float& x, float& y) const {
+    using A = HudPanelConfig::Anchor;
+    float ox = p.offset_x * scale, oy = p.offset_y * scale;
+    int col = 0, row = 0;  // 0 = start, 1 = middle, 2 = end
+    switch (p.anchor) {
+        case A::TopLeft: col = 0; row = 0; break;
+        case A::Top: col = 1; row = 0; break;
+        case A::TopRight: col = 2; row = 0; break;
+        case A::Left: col = 0; row = 1; break;
+        case A::Center: col = 1; row = 1; break;
+        case A::Right: col = 2; row = 1; break;
+        case A::BottomLeft: col = 0; row = 2; break;
+        case A::Bottom: col = 1; row = 2; break;
+        case A::BottomRight: col = 2; row = 2; break;
+    }
+    x = col == 0 ? canvas_x + ox : col == 1 ? canvas_x + (canvas_w - w) * 0.5f + ox : canvas_x + canvas_w - w - ox;
+    y = row == 0 ? canvas_y + oy : row == 1 ? canvas_y + (canvas_h - h) * 0.5f + oy : canvas_y + canvas_h - h - oy;
+}
+
+std::vector<std::string> HudConfig::apply_ini(std::string_view text) {
+    using A = HudPanelConfig::Anchor;
+    std::vector<std::string> warnings;
+    auto anchor = [&](const std::string& v, A fallback) {
+        static const std::pair<const char*, A> names[] = {
+            {"top_left", A::TopLeft}, {"top", A::Top},         {"top_right", A::TopRight},
+            {"left", A::Left},        {"center", A::Center},   {"right", A::Right},
+            {"bottom_left", A::BottomLeft}, {"bottom", A::Bottom}, {"bottom_right", A::BottomRight}};
+        for (auto& [n, a] : names)
+            if (iequals(v, n)) return a;
+        warnings.push_back("unknown anchor " + v);
+        return fallback;
+    };
+    for (auto& sec : parse_text_ini(text)) {
+        if (iequals(sec.name, "Canvas")) {
+            if (auto e = sec.find("max_aspect"); e && !e->values.empty()) max_aspect = std::max(0.f, e->values[0].as_float());
+            if (auto e = sec.find("scale"); e && !e->values.empty()) scale = e->values[0].as_float();
+        } else if (iequals(sec.name, "Panel")) {
+            auto n = sec.find("name");
+            if (!n || n->values.empty()) continue;
+            std::string name = n->values[0].as_string();
+            HudPanelConfig* p = iequals(name, "ship") ? &ship : iequals(name, "target") ? &target
+                              : iequals(name, "system") ? &system : nullptr;
+            if (!p) { warnings.push_back("unknown panel " + name); continue; }
+            if (auto e = sec.find("anchor"); e && !e->values.empty()) p->anchor = anchor(e->values[0].as_string(), p->anchor);
+            if (auto e = sec.find("offset"); e && e->values.size() >= 2) {
+                p->offset_x = e->values[0].as_float();
+                p->offset_y = e->values[1].as_float();
+            }
+            if (auto e = sec.find("scale"); e && !e->values.empty()) p->scale = std::clamp(e->values[0].as_float(), 0.25f, 4.f);
+            if (auto e = sec.find("visible"); e && !e->values.empty()) p->visible = e->values[0].as_bool();
+        }
+    }
+    return warnings;
+}
+
+void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, const render::Camera& cam, const DVec3& player_pos,
+                      const HudState& st) {
     const float s = L.scale;
     const float cx = L.screen_w * 0.5f, cy = L.screen_h * 0.5f;  // optical centre = screen centre
     const float lw = 1.5f * s;
@@ -96,7 +155,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
             if (onscreen) {
                 double z = std::max(1.0, (c.pos - cam.pos).length());
                 float rpx = static_cast<float>(c.radius / (z * std::tan(cam.fov_y * 0.5)) * L.screen_h * 0.5);
-                float b = std::clamp(rpx, 18 * s, L.canvas_h * 0.4f), t = std::max(8 * s, b * 0.35f);
+                float b = std::clamp(rpx, 18 * s, L.canvas_h * 0.22f), t = std::max(8 * s, b * 0.35f);
                 for (int i = 0; i < 4; ++i) {
                     float sx = (i & 1) ? 1.f : -1.f, sy = (i & 2) ? 1.f : -1.f;
                     float x0 = px + sx * b, y0 = py + sy * b;
@@ -130,12 +189,16 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
 
     // The space below the reticle belongs to the ship, so the gauges sit in the two
     // lower corners of the canvas: own ship on the left, target and contacts right.
-    const float pw = 340 * s, ph = 190 * s, margin = 40 * s;
-    const float py0 = L.canvas_y + L.canvas_h - ph - margin;
     char buf[64];
 
-    // ---- bottom left: own ship
-    float px0 = L.canvas_x + margin;
+    // ---- own ship (default: bottom left)
+    if (cfg.ship.visible) {
+    const float s0 = s;
+    {
+    const float s = s0 * cfg.ship.scale;
+    const float pw = 340 * s, ph = 190 * s;
+    float px0, py0;
+    L.place(cfg.ship, pw, ph, px0, py0);
     panel(h, px0, py0, pw, ph, s);
     h.text(px0 + 16 * s, py0 + 14 * s, 10 * s, "SHIP", kLine);
     std::snprintf(buf, sizeof buf, "%03d", static_cast<int>(std::round(st.speed)));
@@ -162,14 +225,22 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
     bar(h, bx, py0 + 120 * s, bw, bh, st.shield, kShield, s);
     h.text(px0 + 16 * s, py0 + 148 * s, 10 * s, "HULL", kHull);
     bar(h, bx, py0 + 150 * s, bw, bh, st.hull, kHull, s);
+    }
+    }
 
-    // ---- bottom right: target and nearest contacts
-    float qx = L.canvas_x + L.canvas_w - pw - margin;
+    // ---- target and nearest contacts (default: bottom right)
+    if (cfg.target.visible) {
+    const float s0 = s;
+    {
+    const float s = s0 * cfg.target.scale;
+    const float pw = 340 * s, ph = 190 * s;
+    float qx, py0;
+    L.place(cfg.target, pw, ph, qx, py0);
     panel(h, qx, py0, pw, ph, s);
     h.text(qx + 16 * s, py0 + 14 * s, 10 * s, "TARGET", kLine);
     for (auto& c : st.contacts) {
         if (!c.selected) continue;
-        h.text(qx + 16 * s, py0 + 36 * s, 12 * s, c.name.size() > 22 ? c.name.substr(0, 22) : c.name, kTarget);
+        h.text(qx + 16 * s, py0 + 36 * s, 11 * s, c.name.size() > 26 ? c.name.substr(0, 26) : c.name, kTarget);
         h.text(qx + pw - 16 * s, py0 + 14 * s, 10 * s, fmt_distance((c.pos - player_pos).length()), kTarget, TextAlign::Right);
         break;
     }
@@ -184,9 +255,16 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const render::Camera& cam
         h.text(qx + pw - 16 * s, row, 8.5f * s, fmt_distance((c.pos - player_pos).length()), col, TextAlign::Right);
         row += 17 * s;
     }
+    }
+    }
 
     // ---- top centre: system name
-    if (!st.system_name.empty()) h.text(L.cx(), L.canvas_y + 30 * s, 12 * s, st.system_name, kLine, TextAlign::Center);
+    if (cfg.system.visible && !st.system_name.empty()) {
+        float ts = 12 * s * cfg.system.scale;
+        float w = HudBatch::text_width(ts, st.system_name), x, y;
+        L.place(cfg.system, w, ts, x, y);
+        h.text(x, y, ts, st.system_name, kLine);
+    }
 }
 
 }  // namespace sterrenvaarder::game

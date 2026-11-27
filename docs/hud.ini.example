@@ -1,0 +1,25 @@
+; Sterrenvaarder HUD layout. Copy to <your mod or data folder>/sterrenvaarder/hud.ini,
+; or pass it with --hud-config. Every key is optional; missing keys keep the default.
+; Offsets are in 1080p units and scale with the screen, so one file fits every resolution.
+
+[Canvas]
+max_aspect = 1.7778   ; widest HUD area: 1.7778 = 16:9, 1.6 = 16:10, 0 = full screen width
+scale = 1.0           ; overall HUD size
+
+[Panel]
+name = ship           ; speed, throttle, shield and hull
+anchor = bottom_left  ; top_left, top, top_right, left, center, right,
+                      ; bottom_left, bottom, bottom_right
+offset = 40, 40
+scale = 1.0
+visible = true
+
+[Panel]
+name = target         ; selected target and nearest contacts
+anchor = bottom_right
+offset = 40, 40
+
+[Panel]
+name = system         ; current system name
+anchor = top
+offset = 0, 30
