@@ -28,7 +28,7 @@ add_library(sterrenvaarder_data
 target_include_directories(sterrenvaarder_data PUBLIC src)
 
 # Game logic without graphics (flight model); unit-tested headless.
-add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp)
+add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp)
 target_include_directories(sterrenvaarder_game PUBLIC src)
 target_link_libraries(sterrenvaarder_game PUBLIC sterrenvaarder_data)
 

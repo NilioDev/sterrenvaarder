@@ -122,6 +122,16 @@ std::optional<StarSystem> Universe::load_system(std::string_view nickname) const
             o.rotate_deg = ini_vec3(sec.find("rotate"));
             o.spin = ini_vec3(sec.find("spin"));
             o.atmosphere_range = num(sec, "atmosphere_range");
+            o.ids_name = static_cast<int>(num(sec, "ids_name"));
+            o.base = str(sec, "base");
+            o.dock_with = str(sec, "dock_with");
+            o.next_ring = str(sec, "next_ring");
+            o.prev_ring = str(sec, "prev_ring");
+            if (auto g = sec.find("goto"); g && g->values.size() >= 2) {
+                o.goto_system = g->values[0].as_string();
+                o.goto_object = g->values[1].as_string();
+                if (g->values.size() > 2) o.goto_tunnel = g->values[2].as_string();
+            }
             sys.objects.push_back(std::move(o));
         }
     }

@@ -21,6 +21,7 @@ using namespace sterrenvaarder;
 static int failures = 0;
 #include "game/combat.hpp"
 #include "game/flight.hpp"
+#include "game/navigation.hpp"
 
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
 
@@ -209,8 +210,37 @@ void test_combat() {
     CHECK(w.projectiles().empty());
 }
 
+void test_lanes() {
+    using namespace sterrenvaarder::game;
+    StarSystem sys;
+    auto ring = [&](const char* n, float z, const char* next, const char* prev) {
+        SystemObject o;
+        o.nickname = n;
+        o.pos = {0, 0, z};
+        o.next_ring = next;
+        o.prev_ring = prev;
+        sys.objects.push_back(o);
+    };
+    ring("r1", 0, "r2", "");
+    ring("r2", -7000, "r3", "r1");
+    ring("r3", -14000, "", "r2");
+    auto t = LaneTrip::start(sys, sys.objects[0], 2000);
+    CHECK(t && t->rings().size() == 3 && t->direction().z < -0.99f);
+    int steps = 0;
+    while (t->update(0.1) && steps < 1000) ++steps;
+    CHECK(steps == 69 && std::fabs(t->position().z + 14000) < 1e-6);  // 14 km at 2 km/s
+    auto back = LaneTrip::start(sys, sys.objects[2], 2000);  // far end runs the other way
+    CHECK(back && back->rings().size() == 3 && back->direction().z > 0.99f);
+    SystemObject gate;
+    gate.pos = {100, 0, 0};
+    gate.rotate_deg = {0, 180, 0};
+    auto sp = exit_point(gate, 400);
+    CHECK(std::fabs(sp.pos.z - 400) < 0.01 && std::fabs(sp.pos.x - 100) < 0.01);
+}
+
 int main() {
     test_flight();
+    test_lanes();
     test_combat();
     test_hash();
     test_text_ini();

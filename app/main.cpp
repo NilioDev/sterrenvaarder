@@ -19,6 +19,7 @@
 #include <iterator>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/hud.hpp"
+#include "game/navigation.hpp"
 #include "render/renderer.hpp"
 #include "sterrenvaarder/ships.hpp"
 #include "sterrenvaarder/png.hpp"
@@ -57,7 +59,8 @@ struct Args {
     float fov = 0;
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
-    bool fire = false;  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
+    bool fire = false;
+    std::string dock;  // screenshot runs: autopilot to this object first  // horizontal FOV in degrees at 4:3; 0 = cameras.ini (original)
     double sim = 0;
     float throttle = 1;
     float cursor_x = 0, cursor_y = 0;
@@ -92,6 +95,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--npcs") a.npcs = std::stoi(next());
         else if (k == "--npc-ship") a.npc_ship = next();
         else if (k == "--fire") a.fire = true;
+        else if (k == "--dock") a.dock = next();
         else if (k == "--sim") a.sim = std::stod(next());
         else if (k == "--throttle") a.throttle = std::stof(next());
         else if (k == "--cursor") std::sscanf(next().c_str(), "%f,%f", &a.cursor_x, &a.cursor_y);
@@ -186,6 +190,100 @@ struct FlightSession {
     std::vector<Flash> flashes;
     bool firing = false;
     Vec3 aim_dir{0, 0, -1};
+
+    // Navigation: autopilot approach, trade lanes, docking and jumps.
+    enum class Nav { Free, Approach, Lane, Docked };
+    Nav nav = Nav::Free;
+    std::string nav_target;            // object nickname
+    std::optional<game::LaneTrip> lane;
+    std::string pending_jump_system, pending_jump_object;  // handled by the main loop
+    const Universe* universe = nullptr;
+
+    float approach_distance(const SystemObject& o) const {
+        if (o.is_tradelane()) return 120.f;
+        if (o.is_jump()) return 250.f;
+        const SolarArchetype* a = universe ? universe->solar(o.archetype) : nullptr;
+        return (a && a->solar_radius > 0 ? a->solar_radius : 200.f) + 250.f;
+    }
+
+    // F3 on the selected target: lanes, gates and bases. Pressing it again cancels.
+    void dock_request(const StarSystem& sys) {
+        if (nav == Nav::Docked) {  // launch
+            if (auto* o = game::find_object(sys, nav_target)) {
+                float d = approach_distance(*o) + 100.f;
+                auto sp = game::exit_point(*o, d);
+                ship.pos = sp.pos;
+                ship.orient = sp.orient;
+                ship.vel = game::to_d(sp.orient.forward()) * 40.0;
+                cam_orient = ship.orient;
+            }
+            nav = Nav::Free;
+            input.throttle = 0.5f;
+            return;
+        }
+        if (nav != Nav::Free) { nav = Nav::Free; lane.reset(); return; }
+        if (target < 0 || target >= static_cast<int>(contacts.size())) return;
+        const SystemObject* o = game::find_object(sys, contacts[target].name);
+        if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
+        nav_target = o->nickname;
+        nav = Nav::Approach;
+    }
+
+    std::string nav_status() const {
+        switch (nav) {
+            case Nav::Approach: return "AUTOPILOT: " + nav_target;
+            case Nav::Lane: return "TRADE LANE";
+            case Nav::Docked: return "DOCKED: " + nav_target + "  (F3 = LAUNCH)";
+            default: return {};
+        }
+    }
+
+    // Returns true while navigation owns the controls.
+    bool update_nav(const StarSystem& sys, double dt) {
+        if (nav == Nav::Free) return false;
+        if (nav == Nav::Docked) { ship.vel = {}; return true; }
+        if (nav == Nav::Lane) {
+            if (!lane || !lane->update(dt)) {
+                // Leave the lane at the last ring, moving at normal flight speed.
+                ship.vel = game::to_d(ship.orient.forward()) * 80.0;
+                lane.reset();
+                nav = Nav::Free;
+                input.throttle = 1.f;
+                return false;
+            }
+            ship.pos = lane->position();
+            ship.orient = Quat::look(lane->direction());
+            ship.vel = game::to_d(lane->direction()) * lane->speed();
+            return true;
+        }
+        // Approach: fly the ship towards the target with the normal flight model.
+        const SystemObject* o = game::find_object(sys, nav_target);
+        if (!o) { nav = Nav::Free; return false; }
+        DVec3 tp{o->pos.x, o->pos.y, o->pos.z};
+        DVec3 to = tp - ship.pos;
+        double dist = to.length();
+        if (dist < approach_distance(*o)) {
+            if (o->is_tradelane()) {
+                lane = game::LaneTrip::start(sys, *o);
+                nav = lane ? Nav::Lane : Nav::Free;
+            } else if (o->is_jump()) {
+                pending_jump_system = o->goto_system;
+                pending_jump_object = o->goto_object;
+                nav = Nav::Free;
+            } else {
+                nav = Nav::Docked;
+                ship.vel = {};
+            }
+            input.cruise = false;
+            return true;
+        }
+        Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+        Vec3 local = ship.orient.conjugate().rotate(dir);
+        input.steer = {std::clamp(local.y * 3.f, -1.f, 1.f), std::clamp(-local.x * 3.f, -1.f, 1.f), 0};
+        input.throttle = 1.f;
+        input.cruise = dist > 3000 && -local.z > 0.97f;
+        return false;  // the flight model still runs, with these inputs
+    }
 
     void setup_combat(const ShipDatabase& db, const Vfs& vfs, const Loadout* lo, Renderer& r, const Args& args) {
         body.id = 0;
@@ -400,12 +498,40 @@ struct FlightSession {
         h.cursor_x = cursor_x;
         h.cursor_y = cursor_y;
         h.system_name = sys.nickname;
+        h.status = nav_status();
         h.hull = body.max_hull > 0 ? body.hull / body.max_hull : 1;
         h.shield = body.max_shield > 0 ? body.shield / body.max_shield : 0;
         h.contacts = contacts;
         return h;
     }
 };
+
+// Completes a jump the navigation asked for: load the target system and appear in
+// front of the destination gate or hole.
+void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
+    if (fs.pending_jump_system.empty()) return;
+    std::string sys = fs.pending_jump_system, obj = fs.pending_jump_object;
+    fs.pending_jump_system.clear();
+    fs.pending_jump_object.clear();
+    try {
+        renderer.load_system(sys);
+    } catch (const std::exception& e) {
+        SDL_Log("jump to %s failed: %s", sys.c_str(), e.what());
+        return;
+    }
+    fs.npcs.clear();
+    if (auto* o = game::find_object(renderer.system(), obj)) {
+        auto sp = game::exit_point(*o, 600.f);
+        fs.ship.pos = sp.pos;
+        fs.ship.orient = sp.orient;
+        fs.ship.vel = game::to_d(sp.orient.forward()) * 60.0;
+        fs.cam_orient = sp.orient;
+    }
+    fs.target = -1;
+    fs.update_contacts(renderer.system());
+    fs.update_camera(cam, 1.0);
+    SDL_Log("jumped to %s (%s)", sys.c_str(), obj.c_str());
+}
 
 void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, Uint32 w, Uint32 h,
                   const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, const game::HudConfig& hud_cfg,
@@ -477,6 +603,7 @@ int run(const Args& args) {
             if (args.fov > 0) fovx = std::clamp(args.fov, 40.f, 120.f);
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
             fs->spawn(renderer.system(), args);
+            fs->universe = &universe;
             fs->setup_combat(*ships, vfs, ships->loadout_for_ship(args.ship), renderer, args);
             fs->update_contacts(renderer.system());
             fs->next_target();
@@ -511,13 +638,24 @@ int run(const Args& args) {
                 fs->input.throttle = args.throttle;
                 fs->input.steer = game::mouse_steer(args.cursor_x, args.cursor_y);
                 fs->firing = args.fire;
+                if (!args.dock.empty()) {
+                    for (std::size_t i = 0; i < fs->contacts.size(); ++i) fs->contacts[i].selected = false;
+                    fs->contacts.push_back({args.dock, {}, 0, true});
+                    fs->target = static_cast<int>(fs->contacts.size() - 1);
+                    fs->dock_request(renderer.system());
+                    SDL_Log("autopilot to %s: %s", args.dock.c_str(), fs->nav_status().c_str());
+                }
                 for (double t = 0; t < args.sim; t += 1.0 / 60) {
-                    fs->model.update(fs->ship, fs->input, 1.0 / 60);
+                    bool nav_owns = fs->update_nav(renderer.system(), 1.0 / 60);
+                    if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
+                    handle_jump(*fs, renderer, cam);
                     fs->update_camera(cam, 1.0 / 60);
                     fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
                     fs->update_combat(1.0 / 60);
                 }
                 fs->update_contacts(renderer.system());
+                SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
+                        renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
             }
             renderer.set_output_format(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
             auto* out = gpu.render_target(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, args.width, args.height);
@@ -552,6 +690,7 @@ int run(const Args& args) {
                     else if (fs && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                         if (e.key.key == SDLK_SPACE) fs->mouse_flight = !fs->mouse_flight;
                         else if (e.key.key == SDLK_T) fs->next_target();
+                        else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
                         else if (e.key.key == SDLK_Z) { fs->input.throttle = 0; fs->input.cruise = false; }
                         else if (e.key.key == SDLK_W && (e.key.mod & SDL_KMOD_SHIFT)) fs->input.cruise = !fs->input.cruise;
                         else if (e.key.key == SDLK_S) fs->input.cruise = false;
@@ -588,7 +727,9 @@ int run(const Args& args) {
                     float half = wh > 0 ? wh * 0.5f : 1.f;
                     in.steer = fs->mouse_flight ? game::mouse_steer((mx - ww * 0.5f) / half, (my - wh * 0.5f) / half) : Vec3{};
                     in.steer.z = roll;
-                    fs->model.update(fs->ship, in, dt);
+                    bool nav_owns = fs->update_nav(renderer.system(), dt);
+                    if (!nav_owns) fs->model.update(fs->ship, in, dt);
+                    handle_jump(*fs, renderer, cam);
                     fs->update_camera(cam, dt);
                     fs->firing = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
                     fs->aim_dir = aim_through(cam, mx, my, static_cast<float>(ww), static_cast<float>(wh));

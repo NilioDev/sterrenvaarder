@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "sterrenvaarder/bytes.hpp"
 #include "sterrenvaarder/ini.hpp"
@@ -176,9 +177,11 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
         // Speed and throttle in the two number boxes either side.
         float ts = 0.014f * p;
         std::snprintf(buf, sizeof buf, "%d", static_cast<int>(std::round(st.speed)));
-        h.text(ox - 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.cruising ? kCruise : kLine, TextAlign::Center);
+        float sts = std::strlen(buf) > 3 ? ts * 0.6f : ts;  // lane and cruise speeds fit the box
+        h.text(ox - 0.145f * p, oy + 0.004f * p - sts * 0.5f, sts, buf, st.cruising ? kCruise : kLine, TextAlign::Center);
         std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::round(std::fabs(st.throttle) * 100)));
-        h.text(ox + 0.147f * p, oy + 0.004f * p - ts * 0.5f, ts, buf, st.throttle < 0 ? kHull : kLine, TextAlign::Center);
+        float tts = std::strlen(buf) > 3 ? ts * 0.75f : ts;
+        h.text(ox + 0.147f * p, oy + 0.004f * p - tts * 0.5f, tts, buf, st.throttle < 0 ? kHull : kLine, TextAlign::Center);
         if (st.cruising || st.cruise_charge > 0) {
             float a0 = -1.5707963f, cr = 0.012f * p;
             float cx = ox, cy = oy + 0.045f * p;
@@ -217,6 +220,8 @@ void build_classic_overlay(HudBatch& h, const HudLayout& L, const HudConfig& cfg
             break;
         }
     }
+    if (!st.status.empty())
+        h.text(L.cx(), L.canvas_y + L.canvas_h * 0.28f, 14 * L.scale, st.status, kCruise, TextAlign::Center);
     if (cfg.system.visible && !st.system_name.empty()) {
         float ts = 12 * L.scale * cfg.system.scale;
         float tw = HudBatch::text_width(ts, st.system_name);
@@ -391,6 +396,8 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     }
 
     // ---- top centre: system name
+    if (cfg.style == HudStyle::Modern && !st.status.empty())
+        h.text(L.cx(), L.canvas_y + L.canvas_h * 0.28f, 14 * s, st.status, kCruise, TextAlign::Center);
     if (cfg.style == HudStyle::Modern && cfg.system.visible && !st.system_name.empty()) {
         float ts = 12 * s * cfg.system.scale;
         float w = HudBatch::text_width(ts, st.system_name), x, y;
