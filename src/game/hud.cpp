@@ -407,10 +407,7 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     }
 }
 
-namespace {
-
-// "$1,234,567", like the original's money display.
-std::string fmt_money(std::int64_t v) {
+std::string format_money(std::int64_t v) {
     std::string digits = std::to_string(v < 0 ? -v : v), out;
     for (std::size_t i = 0; i < digits.size(); ++i) {
         if (i && (digits.size() - i) % 3 == 0) out += ',';
@@ -418,8 +415,6 @@ std::string fmt_money(std::int64_t v) {
     }
     return (v < 0 ? "-$" : "$") + out;
 }
-
-}  // namespace
 
 void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
     float s = L.scale;
@@ -430,37 +425,53 @@ void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
     h.text(x + pad, y + pad, 18 * s, b.title, kTarget);
     h.text(x + w - pad, y + pad, 12 * s, b.system, kDim, TextAlign::Right);
     char buf[96];
-    h.text(x + pad, y + pad + 34 * s, 12 * s, "CREDITS  " + fmt_money(b.credits), kLine);
+    h.text(x + pad, y + pad + 34 * s, 12 * s, "CREDITS  " + format_money(b.credits), kLine);
     std::snprintf(buf, sizeof buf, "CARGO  %d / %d", static_cast<int>(std::lround(b.hold_used)), static_cast<int>(std::lround(b.hold_size)));
     h.text(x + w - pad, y + pad + 34 * s, 12 * s, buf, kLine, TextAlign::Right);
     bar(h, x + pad, y + pad + 56 * s, w - 2 * pad, 4 * s, b.hold_size > 0 ? b.hold_used / b.hold_size : 0, kHull, s);
 
-    float ty = y + pad + 82 * s;
-    float c_price = x + w * 0.62f, c_owned = x + w * 0.76f, c_buy = x + w - pad;
-    h.text(x + pad + 14 * s, ty, 10 * s, "COMMODITY", kDim);
-    h.text(c_price, ty, 10 * s, "PRICE", kDim, TextAlign::Right);
-    h.text(c_owned, ty, 10 * s, "IN HOLD", kDim, TextAlign::Right);
-    h.text(c_buy, ty, 10 * s, "CAN BUY", kDim, TextAlign::Right);
+    // Tabs
+    float tx = x + pad, tyy = y + pad + 74 * s;
+    for (std::size_t i = 0; i < b.tabs.size(); ++i) {
+        std::snprintf(buf, sizeof buf, "%zu  %s", i + 1, b.tabs[i].c_str());
+        bool on = static_cast<int>(i) == b.tab;
+        float tw = HudBatch::text_width(11 * s, buf);
+        if (on) h.rect(tx - 8 * s, tyy - 6 * s, tw + 16 * s, 23 * s, kLine.with_alpha(0.16f));
+        h.text(tx, tyy, 11 * s, buf, on ? kTarget : kDim);
+        tx += tw + 34 * s;
+    }
+
+    float ty = tyy + 36 * s;
+    float c_price = x + w * 0.60f, c3 = x + w * 0.78f, c4 = x + w - pad;
+    h.text(x + pad + 14 * s, ty, 10 * s, b.columns[0], kDim);
+    h.text(c_price, ty, 10 * s, b.columns[1], kDim, TextAlign::Right);
+    h.text(c3, ty, 10 * s, b.columns[2], kDim, TextAlign::Right);
+    h.text(c4, ty, 10 * s, b.columns[3], kDim, TextAlign::Right);
     ty += 24 * s;
     const float row_h = 22 * s;
-    const int visible = static_cast<int>((y + ph - 70 * s - ty) / row_h);
+    const int visible = std::max(1, static_cast<int>((y + ph - 70 * s - ty) / row_h));
     int first = std::clamp(b.selected - visible / 2, 0, std::max(0, static_cast<int>(b.rows.size()) - visible));
     for (int i = first; i < static_cast<int>(b.rows.size()) && i < first + visible; ++i) {
         auto& r = b.rows[i];
+        if (r.heading) {
+            h.text(x + pad, ty + 2 * s, 10 * s, r.name, kDim);
+            h.line(x + pad + HudBatch::text_width(10 * s, r.name) + 10 * s, ty + 7 * s, x + w - pad, ty + 7 * s, 1.f * s, kDim);
+            ty += row_h;
+            continue;
+        }
         bool sel = i == b.selected;
-        HudColor col = sel ? kTarget : (r.sold_here || r.owned ? kLine : kDim);
+        HudColor col = sel ? kTarget : (r.dim ? kDim : kLine);
         if (sel) h.rect(x + pad, ty - 5 * s, w - 2 * pad, row_h, kTarget.with_alpha(0.12f));
         std::string name = r.name.size() > 30 ? r.name.substr(0, 30) : r.name;
         h.text(x + pad + 14 * s, ty, 11 * s, name, col);
-        h.text(c_price, ty, 11 * s, fmt_money(r.price), col, TextAlign::Right);
-        std::snprintf(buf, sizeof buf, "%d", r.owned);
-        h.text(c_owned, ty, 11 * s, r.owned ? buf : "-", col, TextAlign::Right);
-        std::snprintf(buf, sizeof buf, "%d", r.can_buy);
-        h.text(c_buy, ty, 11 * s, r.sold_here ? buf : "SELL ONLY", col, TextAlign::Right);
+        h.text(c_price, ty, 11 * s, r.price, col, TextAlign::Right);
+        h.text(c3, ty, 11 * s, r.col3, col, TextAlign::Right);
+        h.text(c4, ty, 11 * s, r.col4, col, TextAlign::Right);
         ty += row_h;
     }
+    if (b.rows.empty()) h.text(x + pad + 14 * s, ty, 11 * s, "NOTHING FOR SALE HERE", kDim);
     float fy = y + ph - pad - 10 * s;
-    h.text(x + pad, fy, 10 * s, "UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH   F5 SAVE", kDim);
+    h.text(x + pad, fy, 10 * s, b.help, kDim);
     if (!b.message.empty()) h.text(x + w - pad, fy - 24 * s, 11 * s, b.message, kCruise, TextAlign::Right);
 }
 

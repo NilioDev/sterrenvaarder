@@ -33,6 +33,15 @@ struct EquipmentItem {
     std::string kind;  // INI section name: Commodity, Gun, Shield, ...
     std::uint32_t ids_name = 0, ids_info = 0;
     float volume = 0;
+    std::string hp_class;  // hardpoint class it mounts on (hp_gun_special_1, hp_thruster, ...)
+};
+
+struct ShipInfo {
+    std::string nickname;
+    std::uint32_t ids_name = 0;
+    float hold_size = 0;
+    // Hardpoint classes and the hardpoints that accept them (shiparch hp_type lines).
+    std::vector<std::pair<std::string, std::vector<std::string>>> hp_types;
 };
 
 // One MarketGood line: good, level required, reputation required, min stock, max stock,
@@ -73,6 +82,9 @@ public:
     // Hull good of a ship archetype (for its trade-in value), if any.
     const Good* hull_of_ship(std::string_view ship) const;
     std::uint32_t ship_name_id(std::string_view ship) const;
+    const ShipInfo* ship(std::string_view nickname) const;
+    // Hardpoints of a ship that accept an equipment item, in data order.
+    std::vector<std::string> hardpoints_for(std::string_view ship, std::string_view item) const;
 
     std::size_t good_count() const { return goods_.size(); }
     std::size_t market_count() const { return markets_.size(); }
@@ -83,7 +95,7 @@ private:
     std::unordered_map<std::string, BaseInfo> bases_;
     std::unordered_map<std::string, std::vector<MarketEntry>> markets_;
     std::unordered_map<std::string, std::string> hull_by_ship_;
-    std::unordered_map<std::string, std::uint32_t> ship_names_;
+    std::unordered_map<std::string, ShipInfo> ships_;
 };
 
 // Start of a new game from Characters/NewCharacter.ini ([Faction] + [Package]).

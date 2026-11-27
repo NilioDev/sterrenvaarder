@@ -107,23 +107,28 @@ struct HudModelDraw {
 // exactly its original size; on wider screens the pieces sit on the centred canvas.
 std::vector<HudModelDraw> classic_hud_models(const HudLayout& layout, const HudConfig& config, float win_fovx_deg = 54.432f);
 
-// Docked at a base: the commodity trader (a stand-in until the original base rooms and
-// their interface come in). Drawn centred on the HUD canvas.
+// Docked at a base: commodity trader, equipment dealer and ship dealer as tabs (a
+// stand-in until the original base rooms and their interface come in). Drawn centred
+// on the HUD canvas.
 struct BaseScreenRow {
     std::string name;
-    std::int64_t price = 0;
-    int owned = 0;
-    bool sold_here = false;  // false: the base only buys it
-    int can_buy = 0;         // most units affordable and fitting in the hold
+    std::string price, col3, col4;  // already formatted
+    bool dim = false;               // not available (shown for information)
+    bool heading = false;           // a section title, not selectable
 };
 struct BaseScreen {
     std::string title, system;
     std::int64_t credits = 0;
     float hold_used = 0, hold_size = 0;
+    std::vector<std::string> tabs;
+    int tab = 0;
+    std::string columns[4];  // headings: name, price, column 3, column 4
     std::vector<BaseScreenRow> rows;
     int selected = 0;
     std::string message;  // last trade result
+    std::string help;
 };
+std::string format_money(std::int64_t v);  // "$1,234"
 void build_base_screen(render::HudBatch& out, const HudLayout& layout, const BaseScreen& screen);
 
 void build_flight_hud(render::HudBatch& out, const HudLayout& layout, const HudConfig& config,

@@ -347,12 +347,74 @@ static void test_trade() {
     fs::remove_all(root);
 }
 
+static void test_dealers() {
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_dealer_test";
+    fs::remove_all(root);
+    auto put = [&](const char* path, const char* text) {
+        fs::create_directories((root / path).parent_path());
+        std::ofstream(root / path) << text;
+    };
+    put("ships/shiparch.ini",
+        "[Ship]\nnickname = s_ship\nids_name = 5\nhold_size = 3\n"
+        "hp_type = hp_gun_special_1, HpWeapon01, HpWeapon02\nhp_type = hp_thruster, HpThruster01\n"
+        "[Ship]\nnickname = s_ship2\nids_name = 6\nhold_size = 10\nhp_type = hp_gun_special_1, HpWeapon01\n");
+    put("equipment/weapon_equip.ini", "[Gun]\nnickname = gun1\nids_name = 7\nhp_gun_type = hp_gun_special_1\n");
+    put("equipment/misc_equip.ini", "[Thruster]\nnickname = thr1\n[Power]\nnickname = pow1\n");
+    put("equipment/goods.ini",
+        "[Good]\nnickname = gun1\nequipment = gun1\ncategory = equipment\nprice = 500\n"
+        "[Good]\nnickname = thr1\nequipment = thr1\ncategory = equipment\nprice = 300\n"
+        "[Good]\nnickname = hull1\ncategory = shiphull\nship = s_ship\nprice = 1000\n"
+        "[Good]\nnickname = hull2\ncategory = shiphull\nship = s_ship2\nprice = 4000\n"
+        "[Good]\nnickname = pkg2\ncategory = ship\nhull = hull2\naddon = pow1, internal, 1\naddon = gun1, HpWeapon01, 1\n");
+    put("equipment/market_misc.ini",
+        "[BaseGood]\nbase = b1\nMarketGood = gun1, 0, -1, 10, 10, 0, 1\nMarketGood = thr1, 5, -1, 10, 10, 0, 1\n"
+        "MarketGood = pkg2, 0, -1, 1, 1, 0, 1.5\n");
+    Vfs vfs;
+    vfs.mount(root, "base");
+    Economy econ(vfs);
+    CHECK(econ.hardpoints_for("s_ship", "gun1").size() == 2 && econ.hardpoints_for("s_ship", "thr1").size() == 1);
+    CHECK(econ.hardpoints_for("s_ship", "pow1").empty() && econ.ship("S_SHIP2")->hold_size == 10);
+
+    game::PlayerState p;
+    p.base = "b1";
+    p.system = "Li01";
+    p.ship = "s_ship";
+    p.hold_size = 3;
+    p.credits = 1200;
+    CHECK(game::buy_equipment(econ, p, "gun1") == game::TradeResult::Ok);
+    CHECK(game::buy_equipment(econ, p, "gun1") == game::TradeResult::Ok);
+    CHECK(p.equipment.size() == 2 && p.equipment[1].hardpoint == "HpWeapon02" && p.credits == 200);
+    p.credits = 5000;
+    CHECK(game::buy_equipment(econ, p, "gun1") == game::TradeResult::NoHardpoint);
+    CHECK(game::buy_equipment(econ, p, "thr1") == game::TradeResult::LevelTooLow);
+    p.rank = 5;
+    CHECK(game::buy_equipment(econ, p, "thr1") == game::TradeResult::Ok && p.credits == 4700);
+    CHECK(game::sell_equipment(econ, p, 0) == game::TradeResult::Ok && p.credits == 5200 && p.equipment.size() == 2);
+    CHECK(game::free_hardpoint(econ, p, "gun1") == "HpWeapon01");
+
+    // Trade-in: hull 1000 + gun 500 + thruster 300 = 1800; new ship 4000 * 1.5 = 6000.
+    CHECK(game::trade_in_value(econ, p) == 1800 && game::ship_price(econ, p, "pkg2") == 6000);
+    p.credits = 4199;
+    CHECK(game::buy_ship(econ, p, "pkg2") == game::TradeResult::NoMoney);
+    p.credits = 4200;
+    p.cargo["x"] = 1;
+    CHECK(game::buy_ship(econ, p, "pkg2") == game::TradeResult::Ok);
+    CHECK(p.credits == 0 && p.ship == "s_ship2" && p.hold_size == 10 && p.equipment.size() == 2);
+    CHECK(p.equipment[0].hardpoint.empty() && p.equipment[1].item == "gun1");
+
+    auto back = game::read_save(game::write_save(p));
+    CHECK(back && back->equipment.size() == 2 && back->equipment[1].hardpoint == "HpWeapon01" && back->rank == 5);
+    fs::remove_all(root);
+}
+
 int main() {
     test_flight();
     test_lanes();
     test_combat();
     test_resources();
     test_trade();
+    test_dealers();
     test_hash();
     test_text_ini();
     test_bini();
