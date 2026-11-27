@@ -9,6 +9,7 @@
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/texture.hpp"
+#include "sterrenvaarder/ale.hpp"
 #include "sterrenvaarder/thn.hpp"
 #include "sterrenvaarder/utf.hpp"
 #include "sterrenvaarder/vfs.hpp"
@@ -36,6 +37,13 @@ int main(int argc, char** argv) {
             if (path.ends_with(".thn")) {
                 kind = "thn";
                 ThnScript::parse(data);
+            } else if (path.ends_with(".ale")) {
+                kind = "ale";
+                auto lib = AleLibrary::parse(data);
+                for (auto& e : lib.effects())
+                    for (auto& r : e.refs)
+                        if (r.node_crc != kAleRoot && !lib.node(r.node_crc))
+                            throw FormatError("effect " + e.name + " names a missing node");
             } else if (is_bini(data) || path.ends_with(".ini")) {
                 kind = is_bini(data) ? "bini" : "text-ini";
                 parse_ini(data);
