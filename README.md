@@ -121,7 +121,8 @@ Docked, the dealer screen sits in front of the base's own room: the base file na
 read as data and never run) give the set model, its lights and the camera. Rooms are lit
 as the original lit them: the scene's ambient, each light's attenuation, and the
 material's emissive colour adding to the light on the texture, clamped to full brightness.
-The dealer screen itself is still our own until the original base interface is in.
+At the ship dealer the ships for sale stand on the room's own pads (`[ForSaleShipPlacement]`),
+the selected one on the pad the room camera looks at. The dealer screen itself is still our own until the original base interface is in.
 
 ## Tools
 

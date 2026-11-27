@@ -69,6 +69,7 @@ struct RoomInfo {
     std::string set_script;            // hardpoint script: the set, cameras, markers
     std::vector<std::string> scenes;   // ambient scripts (lights, props, traffic)
     std::string camera;                // camera entity to view the room through
+    std::vector<std::string> ship_placements;  // [ForSaleShipPlacement] markers (ship dealer)
     std::vector<RoomHotspot> hotspots;
 };
 

@@ -497,7 +497,8 @@ static void test_thn() {
     std::ofstream(root / "universe/x_base.ini") << "[BaseInfo]\nstart_room = Deck\n[Room]\nnickname = Deck\nfile = universe\\deck.ini\n"
                                                    "[Room]\nnickname = Gone\nfile = universe\\missing.ini\n";
     std::ofstream(root / "universe/deck.ini") << "[Room_Info]\nset_script = s\\deck.thn\nscene = all, ambient, s\\amb.thn\n"
-                                                 "[Camera]\nname = Camera_0\n[Hotspot]\nname = IDS_HOTSPOT_BAR\nbehavior = ExitDoor\nroom_switch = Bar\n";
+                                                 "[Camera]\nname = Camera_0\n[Hotspot]\nname = IDS_HOTSPOT_BAR\nbehavior = ExitDoor\nroom_switch = Bar\n"
+                                                 "[ForSaleShipPlacement]\nname = X/Pad/01\n[ForSaleShipPlacement]\nname = X/Pad/02\n";
     Vfs vfs;
     vfs.mount(root, "base");
     auto file = base_file_of(vfs, "x_base");
@@ -506,6 +507,7 @@ static void test_thn() {
     auto deck = rooms ? rooms->room("deck") : nullptr;
     CHECK(deck && deck->camera == "Camera_0" && deck->scenes.size() == 1 && deck->hotspots.size() == 1 &&
           deck->hotspots[0].room_switch == "Bar");
+    CHECK(deck && deck->ship_placements.size() == 2 && deck->ship_placements[1] == "X/Pad/02");
     fs::remove_all(root);
 }
 

@@ -109,6 +109,8 @@ std::optional<BaseRooms> BaseRooms::load(const Vfs& vfs, std::string_view base_f
                     if (s->values.size() >= 3) r.scenes.push_back(s->values[2].as_string());
             } else if (iequals(rs.name, "Camera")) {
                 r.camera = str(rs, "name");
+            } else if (iequals(rs.name, "ForSaleShipPlacement")) {
+                if (auto n = str(rs, "name"); !n.empty()) r.ship_placements.push_back(n);
             } else if (iequals(rs.name, "Hotspot")) {
                 r.hotspots.push_back({str(rs, "name"), str(rs, "behavior"), str(rs, "room_switch")});
             }
