@@ -84,6 +84,9 @@ public:
     // A sprite lying in the plane spanned by the unit vectors u and v instead of facing the camera.
     void draw_flat_sprite(DVec3 pos, float size, Vec3 u, Vec3 v, Color3 color, float alpha, const std::string& texture,
                           bool additive, float frame = 0);
+    // A shield bubble: an ellipsoid with the given axes (orientation times radius) around a
+    // ship, glowing at its rim and brightest around hit_dir (in the ellipsoid's own frame).
+    void draw_shield(DVec3 center, Vec3 ax0, Vec3 ax1, Vec3 ax2, Vec3 hit_dir, Color3 color, float strength);
     // A textured band from one point to another, facing the camera; half-width, colour and
     // alpha blend smoothly from the first end to the second.
     void draw_streak(DVec3 from, DVec3 to, float width_from, float width_to, Color3 color_from, float alpha_from,
