@@ -62,6 +62,10 @@ using the ship's mass, drag, torque and inertia from `shiparch.ini` and the engi
 its loadout. A light fighter tops out at ~80 m/s; cruise runs at 300 m/s (or the data's
 `CRUISING_SPEED`).
 
+Field of view: the chase camera's `fovx` from `cameras.ini` (70°, defined for 4:3) by
+default. The vertical angle is kept and wider screens see more to the sides (Hor+), so
+4:3 looks exactly like the original. `--fov <degrees at 4:3>` changes it.
+
 Mouse = steer (Space toggles mouse flight), W/S = throttle, Shift+W = cruise, A/D =
 strafe, Q/E = roll, Z = stop engines, T = next target, F11 = fullscreen.
 

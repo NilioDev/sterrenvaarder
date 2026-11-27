@@ -81,6 +81,7 @@ struct GpuLod {
 struct GpuPart {
     Mat4 local;
     std::vector<GpuLod> lods;
+    std::vector<DrawRange> wires;  // line lists (VMeshWire), drawn only in the HUD pass
 };
 
 struct GpuModel {
@@ -256,7 +257,7 @@ struct Renderer::Impl {
                 if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
                 p = nullptr;
             }
-        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe}) {
+        for (auto** p : {&glow, &bloom_down, &bloom_up, &tonemap, &upscale, &sharpen, &blit, &hud_pipe, &hud_mesh_pipe, &hud_wire_pipe}) {
             if (*p) SDL_ReleaseGPUGraphicsPipeline(d, *p);
             *p = nullptr;
         }
@@ -282,7 +283,8 @@ struct Renderer::Impl {
     SDL_GPUGraphicsPipeline* make_pipeline(const char* vs_name, std::uint32_t vs_ubos, const char* fs_name,
                                            std::uint32_t fs_samplers, std::uint32_t fs_ubos, SDL_GPUTextureFormat fmt,
                                            Blend blend, bool mesh_input, bool depth_test, bool depth_write,
-                                           SDL_GPUSampleCount sc) {
+                                           SDL_GPUSampleCount sc,
+                                           SDL_GPUPrimitiveType prim = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST) {
         auto* d = gpu.device();
         auto* vs = gpu.shader(vs_name, 0, vs_ubos);
         auto* fs = gpu.shader(fs_name, fs_samplers, fs_ubos);
@@ -305,7 +307,7 @@ struct Renderer::Impl {
             pi.vertex_input_state.vertex_attributes = attrs;
             pi.vertex_input_state.num_vertex_attributes = 5;
         }
-        pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        pi.primitive_type = prim;
         pi.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
         pi.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
         pi.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
@@ -355,6 +357,8 @@ struct Renderer::Impl {
         hud_pipe = make_hud_pipeline();
         hud_mesh_pipe = make_pipeline("mesh.vert", 1, "mesh.frag", 4, 1, output_format, Blend::Alpha, true, false, false,
                                       SDL_GPU_SAMPLECOUNT_1);
+        hud_wire_pipe = make_pipeline("mesh.vert", 1, "mesh.frag", 4, 1, output_format, Blend::Alpha, true, false, false,
+                                      SDL_GPU_SAMPLECOUNT_1, SDL_GPU_PRIMITIVETYPE_LINELIST);
     }
 
     SDL_GPUGraphicsPipeline* make_background_pipeline(Blend b) {
@@ -599,6 +603,32 @@ struct Renderer::Impl {
                     }
                     gp.lods.push_back(std::move(gl));
                 }
+                if (part.wire) {
+                    const auto& w = *part.wire;
+                    if (const VMeshData* vm = find_mesh(w.mesh_id)) {
+                        DrawRange dr;
+                        dr.vertex_offset = static_cast<std::int32_t>(verts.size());
+                        dr.first_index = static_cast<std::uint32_t>(indices.size());
+                        dr.material = material(0);
+                        for (std::size_t v = w.vertex_offset; v < std::size_t(w.vertex_offset) + w.vertex_count && v < vm->positions.size(); ++v) {
+                            Vertex vx{};
+                            vx.pos[0] = vm->positions[v].x;
+                            vx.pos[1] = vm->positions[v].y;
+                            vx.pos[2] = vm->positions[v].z;
+                            vx.normal[2] = 1;
+                            vx.color = 0xFFFFFFFFu;
+                            verts.push_back(vx);
+                        }
+                        std::uint16_t limit = w.vertex_count;
+                        for (std::size_t k = 0; k + 1 < w.indices.size(); k += 2)
+                            if (w.indices[k] < limit && w.indices[k + 1] < limit) {
+                                indices.push_back(w.indices[k]);
+                                indices.push_back(w.indices[k + 1]);
+                            }
+                        dr.index_count = static_cast<std::uint32_t>(indices.size()) - dr.first_index;
+                        if (dr.index_count) gp.wires.push_back(dr);
+                    }
+                }
                 gm->parts.push_back(std::move(gp));
             }
         }
@@ -744,6 +774,7 @@ struct Renderer::Impl {
     };
     std::vector<HudModel> hud_models;
     SDL_GPUGraphicsPipeline* hud_mesh_pipe = nullptr;
+    SDL_GPUGraphicsPipeline* hud_wire_pipe = nullptr;
 
     // HUD overlay: one growable vertex buffer, uploaded before the render passes.
     SDL_GPUGraphicsPipeline* hud_pipe = nullptr;
@@ -1078,6 +1109,31 @@ struct Renderer::Impl {
                             SDL_DrawGPUIndexedPrimitives(hp, dr.index_count, 1, dr.first_index, dr.vertex_offset, 0);
                         }
                     }
+                }
+                // Line geometry (reticles): same transforms, line-list pipeline.
+                SDL_BindGPUGraphicsPipeline(hp, hud_wire_pipe);
+                for (auto& hm : hud_models) {
+                    Mat4 ortho;
+                    ortho.at(0, 0) = hm.ppu * 2.f / out_w;
+                    ortho.at(1, 1) = hm.ppu * 2.f / out_h;
+                    ortho.at(2, 2) = 0;
+                    ortho.at(0, 3) = hm.px * 2.f / out_w - 1.f;
+                    ortho.at(1, 3) = 1.f - hm.py * 2.f / out_h;
+                    ortho.at(2, 3) = 0.5f;
+                    for (auto& part : hm.model->parts)
+                        for (auto& dr : part.wires) {
+                            VertexUniforms vu{ortho, part.local, part.local.normal_matrix()};
+                            SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof vu);
+                            GpuMaterial m = hm.model->materials[dr.material];
+                            m.unlit = true;
+                            m.dc = {m.dc.x * hm.tint.r, m.dc.y * hm.tint.g, m.dc.z * hm.tint.b};
+                            m.opacity *= hm.tint.a;
+                            bind_material(cmd, hp, m, hb, s);
+                            SDL_GPUBufferBinding mvb{hm.model->vb, 0}, mib{hm.model->ib, 0};
+                            SDL_BindGPUVertexBuffers(hp, 0, &mvb, 1);
+                            SDL_BindGPUIndexBuffer(hp, &mib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+                            SDL_DrawGPUIndexedPrimitives(hp, dr.index_count, 1, dr.first_index, dr.vertex_offset, 0);
+                        }
                 }
                 hud_models.clear();
             }

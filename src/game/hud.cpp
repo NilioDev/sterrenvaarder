@@ -239,6 +239,8 @@ std::vector<HudModelDraw> classic_hud_models(const HudLayout& L, const HudConfig
         out.push_back({"interface/hud/hud_guagewindow.cmp", ox, oy, p});
         out.push_back({"interface/hud/hud_numberboxes.cmp", ox, oy, p});
     }
+    // Centre reticle (line model), always at the optical centre of the screen.
+    out.push_back({"interface/hud/hud_reticle.3db", L.screen_w * 0.5f, L.screen_h * 0.5f, ppu, kLine});
     return out;
 }
 
@@ -248,9 +250,9 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
     const float cx = L.screen_w * 0.5f, cy = L.screen_h * 0.5f;  // optical centre = screen centre
     const float lw = 1.5f * s;
 
-    // ---- centre reticle
-    h.circle(cx, cy, 14 * s, lw, kDim);
-    for (int i = 0; i < 4; ++i) {
+    // ---- centre reticle (the classic style uses the original reticle model)
+    if (cfg.style == HudStyle::Modern) h.circle(cx, cy, 14 * s, lw, kDim);
+    for (int i = 0; cfg.style == HudStyle::Modern && i < 4; ++i) {
         float a = i * 1.5707963f;
         float dx = std::cos(a), dy = std::sin(a);
         h.line(cx + dx * 20 * s, cy + dy * 20 * s, cx + dx * 30 * s, cy + dy * 30 * s, lw, kLine);

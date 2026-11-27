@@ -63,9 +63,19 @@ struct Lod {
     float range_end = 0;  // switch distance; 0 = unlimited
 };
 
+// Line geometry (VMeshWire/VWireData): pairs of vertex indices into a VMeshData,
+// used by interface models such as the targeting reticle.
+struct WireMesh {
+    std::uint32_t mesh_id = 0;
+    std::uint16_t vertex_offset = 0, vertex_count = 0;
+    std::vector<std::uint16_t> indices;  // line list, relative to vertex_offset
+    static std::optional<WireMesh> parse(Bytes data);
+};
+
 struct ModelPart {
     std::string name;  // object name ("Root", "Li_Engine01", ...)
     std::vector<Lod> lods;
+    std::optional<WireMesh> wire;
     std::vector<std::string> hardpoints;
 };
 
