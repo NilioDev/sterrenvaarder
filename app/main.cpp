@@ -76,6 +76,7 @@ struct Args {
     float fov = 0;
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
+    bool cruise = false;    // screenshot runs: hold cruise (it charges first)
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
@@ -145,6 +146,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--dock") a.dock = next();
         else if (k == "--sim") a.sim = std::stod(next());
         else if (k == "--throttle") a.throttle = std::stof(next());
+        else if (k == "--cruise") a.cruise = true;
         else if (k == "--cursor") std::sscanf(next().c_str(), "%f,%f", &a.cursor_x, &a.cursor_y);
         else throw std::runtime_error("unknown option " + k);
     }
@@ -240,6 +242,23 @@ std::vector<AttachedFx> engine_fx_for(const EffectDb& fxdb, const Vfs& vfs, cons
     return out;
 }
 
+// The engine's cruise trail (charge glow, cruise fire, contrail) at each engine hardpoint;
+// the player's own ship uses trail_effect_player when the engine has one.
+std::vector<AttachedFx> trail_fx_for(const EffectDb& fxdb, const Vfs& vfs, const ShipArchetype& arch,
+                                     const EngineArchetype* engine, bool player, std::uint32_t seed,
+                                     std::vector<std::string>& textures) {
+    std::vector<AttachedFx> out;
+    if (!engine) return out;
+    const std::string& name = player && !engine->trail_effect_player.empty() ? engine->trail_effect_player : engine->trail_effect;
+    if (name.empty()) return out;
+    ResolvedEffect fx = fxdb.resolve(name);
+    if (!fx) return out;
+    for (auto& t : fx.vis->textures) textures.push_back(t);
+    for (auto& h : model_hardpoints(vfs, arch))
+        if (to_lower(h.name).starts_with("hpengine")) out.push_back({h.position, game::EffectInstance(fx, seed++)});
+    return out;
+}
+
 // Damage fuses: as the hull drops past each fuse's hit points, its effects (sparks, fire,
 // smoke) start at one of the hardpoints it names and stay with the ship.
 struct DamageFx {
@@ -261,7 +280,7 @@ struct NpcShip {
     Renderer::ModelHandle mesh;
     float burst = 0;  // > 0 firing, < 0 pausing (seconds left)
     std::optional<game::FighterAi> ai;  // from the original pilot data, when found
-    std::vector<AttachedFx> engine_fx;
+    std::vector<AttachedFx> engine_fx, trail_fx;
     DamageFx damage;
 };
 
@@ -460,7 +479,7 @@ struct FlightSession {
     const EffectDb* fxdb = nullptr;
 
     // Effects from the original data: engine flames, muzzle flashes, impacts.
-    std::vector<AttachedFx> engine_fx;
+    std::vector<AttachedFx> engine_fx, trail_fx;
     DamageFx damage;
     int shield_hits = 0;  // shield hit effects played (reported by screenshot runs)
     // Shield bubbles flashing after a hit: which ship (combatant id), where (direction in
@@ -524,6 +543,15 @@ struct FlightSession {
         for (auto& e : d.fx) e.fx.update(dt, s.pos + game::to_d(s.orient.rotate(e.offset)), s.orient, s.vel, 0, b.alive());
     }
 
+    // The cruise trail runs while cruise charges (spark = charge so far) and while cruising.
+    static void update_trail_fx(std::vector<AttachedFx>& fx, const game::ShipState& s, const game::FlightParams& p,
+                                double dt, bool alive) {
+        float charge = p.cruise_charge_time > 0 ? std::clamp(s.cruise_charge / p.cruise_charge_time, 0.f, 1.f) : 0.f;
+        float spark = s.cruising ? 1.f : charge;
+        bool on = alive && (s.cruising || s.cruise_charge > 0);
+        for (auto& e : fx) e.fx.update(dt, s.pos + game::to_d(s.orient.rotate(e.offset)), s.orient, s.vel, spark, on);
+    }
+
     static void update_engine_fx(std::vector<AttachedFx>& fx, const game::ShipState& s, const game::FlightInput& in,
                                  double dt, bool alive) {
         float spark = s.cruising ? 1.f : std::clamp(in.throttle, 0.f, 1.f);
@@ -533,6 +561,8 @@ struct FlightSession {
     void update_effects(double dt) {
         update_engine_fx(engine_fx, ship, input, dt, body.alive());
         for (auto& n : npcs) update_engine_fx(n.engine_fx, n.ship, n.input, dt, n.body.alive());
+        update_trail_fx(trail_fx, ship, model.params(), dt, body.alive());
+        for (auto& n : npcs) update_trail_fx(n.trail_fx, n.ship, n.model.params(), dt, n.body.alive());
         update_damage(damage, arch, body, ship, dt);
         for (auto& n : npcs) update_damage(n.damage, n.arch, n.body, n.ship, dt);
         for (auto& f : loose_fx) {
@@ -551,6 +581,9 @@ struct FlightSession {
         for (auto& n : npcs)
             for (auto& e : n.engine_fx) e.fx.sprites(sprite_buf);
         for (auto& e : damage.fx) e.fx.sprites(sprite_buf);
+        for (auto& e : trail_fx) e.fx.sprites(sprite_buf);
+        for (auto& n : npcs)
+            for (auto& e : n.trail_fx) e.fx.sprites(sprite_buf);
         for (auto& n : npcs)
             for (auto& e : n.damage.fx) e.fx.sprites(sprite_buf);
         for (auto& f : loose_fx) f.fx.sprites(sprite_buf);
@@ -973,7 +1006,10 @@ struct FlightSession {
             if (nlo) n.body.set_shield(db.shield_of(*nlo));
             n.guns = nguns;
             n.mesh = mesh;
-            if (fxdb) n.engine_fx = engine_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, fx_seed += 16, pending_textures);
+            if (fxdb) {
+                n.engine_fx = engine_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, fx_seed += 16, pending_textures);
+                n.trail_fx = trail_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, false, fx_seed += 16, pending_textures);
+            }
             n.damage.hardpoints = model_hardpoints(vfs, *na);
             auto nsh = shield_shape_for(n.damage.hardpoints);
             n.damage.shield_center = nsh.center;
@@ -1308,7 +1344,10 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
         fs.mesh = r.load_model(arch->model, arch->material_libraries);
     }
     fs.model = game::FlightModel(game::FlightParams::from(*arch, db.engine_of(lo), db.cruise_speed()));
-    if (fs.fxdb) fs.engine_fx = engine_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), fs.fx_seed += 16, fs.pending_textures);
+    if (fs.fxdb) {
+        fs.engine_fx = engine_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), fs.fx_seed += 16, fs.pending_textures);
+        fs.trail_fx = trail_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), true, fs.fx_seed += 16, fs.pending_textures);
+    }
     fs.damage = {};
     fs.damage.hardpoints = model_hardpoints(vfs, *arch);
     auto psh = shield_shape_for(fs.damage.hardpoints);
@@ -1635,6 +1674,7 @@ int run(const Args& args) {
             if (fs) {
                 // Scripted flight so screenshots show the ship in motion.
                 fs->input.throttle = args.throttle;
+                fs->input.cruise = args.cruise;
                 fs->input.steer = game::mouse_steer(args.cursor_x, args.cursor_y);
                 fs->firing = args.fire;
                 if (!args.dock.empty()) {

@@ -49,6 +49,7 @@ struct EngineArchetype {
     float reverse_fraction = 0.2f;
     float cruise_charge_time = 5;
     std::string flame_effect, trail_effect;  // visual effects at the ship's engine hardpoints
+    std::string trail_effect_player;         // the trail as the player sees it on their own ship
 };
 
 struct MunitionArchetype {
