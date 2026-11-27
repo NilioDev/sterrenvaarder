@@ -75,6 +75,8 @@ struct HudContact {
     DVec3 pos;
     float radius = 0;   // for bracket size
     bool selected = false;
+    bool hostile = false;
+    float hull = -1, shield = -1;  // 0..1 for ships, < 0 for objects without them
 };
 
 struct HudState {

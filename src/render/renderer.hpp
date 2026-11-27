@@ -64,6 +64,9 @@ public:
     void add_mesh_library(const std::string& path);
     // Queues one instance for the next render() call. lod_ranges as in the archetype.
     void draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges);
+    // A camera-facing additive glow for the next render() call (weapon bolts, flashes,
+    // explosions). Size is the half-width in metres; intensity scales HDR brightness.
+    void draw_glow(DVec3 pos, float size, Color3 color, float intensity);
     // Draws a model as a flat HUD element for the next render() call (e.g. the original
     // interface models from the user's own data). The model's local x/y units are mapped
     // to pixels around (px, py), y up. Drawn unlit, before the vector HUD.
