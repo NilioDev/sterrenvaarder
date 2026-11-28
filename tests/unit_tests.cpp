@@ -30,6 +30,7 @@ static int failures = 0;
 #include "game/mission.hpp"
 #include "game/population.hpp"
 #include "game/skin.hpp"
+#include "game/thn_player.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -828,6 +829,55 @@ static void test_mbases() {
     CHECK(g->room == "bar" && bases[1].npcs.empty());
 }
 
+static void test_thn_player() {
+    // A self-written scene: a box slides 10 m along x over 2 s while turning 90 degrees about
+    // y, and the view cuts from camera A to camera B at 1 s, which narrows its view.
+    ThnScript s;
+    s.duration = 3;
+    ThnEntity box;
+    box.name = "Box";
+    s.entities.push_back(box);
+    ThnEntity cam_b;
+    cam_b.name = "CamB";
+    cam_b.type = "CAMERA";
+    cam_b.fovh = 60;
+    s.entities.push_back(cam_b);
+    const float h = std::sqrt(0.5f);
+    ThnMove mv;
+    mv.time = 0;
+    mv.duration = 2;
+    mv.target = "box";
+    mv.has_pos = mv.has_orient = true;
+    mv.pos = {10, 0, 0};
+    mv.q = {h, 0, h, 0};  // w, x, y, z
+    s.moves.push_back(mv);
+    s.cuts.push_back({0, "CamA"});
+    s.cuts.push_back({1, "CamB"});
+    ThnCameraProp zoom;
+    zoom.time = 1;
+    zoom.duration = 1;
+    zoom.target = "CamB";
+    zoom.fovh = 30;
+    s.camera_props.push_back(zoom);
+
+    game::ThnPlayer p(s);
+    CHECK(p.duration() == 3);
+    p.seek(0.5f);
+    CHECK(p.camera() == "CamA");
+    CHECK(std::abs(p.state("BOX")->pos.x - 2.5f) < 1e-4f);
+    p.seek(1.f);
+    CHECK(p.camera() == "CamB");
+    auto* b = p.state("box");
+    CHECK(std::abs(b->pos.x - 5) < 1e-4f);
+    // Halfway through the turn: 45 degrees, so x turns towards -z.
+    CHECK(std::abs(b->orient[0] - h) < 1e-3f && std::abs(b->orient[6] + h) < 1e-3f);
+    p.seek(1.5f);
+    CHECK(std::abs(p.state("CamB")->fovh - 45) < 1e-3f);
+    p.seek(2.5f);
+    CHECK(std::abs(p.state("box")->pos.x - 10) < 1e-4f && std::abs(p.state("box")->orient[2] - 1) < 1e-3f);
+    CHECK(std::abs(p.state("CamB")->fovh - 30) < 1e-3f && !p.done(2.5f) && p.done(3));
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -1040,6 +1090,7 @@ int main() {
     test_dfm_strips();
     test_skinning();
     test_mbases();
+    test_thn_player();
     test_anm_frames();
     test_costumes();
     test_fonts();

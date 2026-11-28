@@ -3,6 +3,7 @@
 // Scene scripts (.thn) and base rooms: entities with their placement, cameras and lights,
 // the PetalDB name -> model table, and the room layout of each base.
 #include <optional>
+#include <array>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -48,11 +49,36 @@ struct ThnMotion {
     bool loop = false;          // event_flags LOOP
 };
 
+// A START_SPATIAL_PROP_ANIM event: an entity moves and/or turns to a new place over time.
+struct ThnMove {
+    float time = 0, duration = 0;
+    std::string target;
+    bool has_pos = false, has_orient = false;
+    Vec3 pos;
+    std::array<float, 4> q{1, 0, 0, 0};  // q_orient as stored: w, x, y, z
+};
+
+// SET_CAMERA: from `time` on, the scene is seen through `camera`.
+struct ThnCameraCut {
+    float time = 0;
+    std::string camera;
+};
+
+// START_CAMERA_PROP_ANIM: a camera's field of view changes over time.
+struct ThnCameraProp {
+    float time = 0, duration = 0;
+    std::string target;
+    float fovh = 0;  // 0: unchanged
+};
+
 struct ThnScript {
     double duration = 0;
     std::vector<ThnEntity> entities;
     LuaValue events;  // raw: {time, EVENT_TYPE, targets..., params}
     std::vector<ThnMotion> motions;  // the START_MOTION events, in order
+    std::vector<ThnMove> moves;
+    std::vector<ThnCameraCut> cuts;
+    std::vector<ThnCameraProp> camera_props;
     const ThnEntity* entity(std::string_view name) const;
     static ThnScript parse(Bytes data);  // throws FormatError
 };

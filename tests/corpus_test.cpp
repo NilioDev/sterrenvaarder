@@ -12,6 +12,7 @@
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/mbases.hpp"
 #include "game/skin.hpp"
+#include "game/thn_player.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include <algorithm>
@@ -41,6 +42,7 @@ int main(int argc, char** argv) {
     };
     std::size_t msn_triggers = 0, msn_dangling = 0;
     std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
+    std::size_t thn_moves = 0, thn_cuts = 0, thn_bad_cuts = 0, thn_bad_moves = 0;
     std::size_t dfm_posed = 0, dfm_pose_off = 0;  // bones the joints reach, and those that land elsewhere than stored
     float dfm_pose_worst = 0;
     double anm_seconds = 0;
@@ -80,7 +82,14 @@ int main(int argc, char** argv) {
                 }
             } else if (path.ends_with(".thn")) {
                 kind = "thn";
-                ThnScript::parse(data);
+                // Scenes: play each one through; cameras it cuts to should be its own.
+                auto scene = ThnScript::parse(data);
+                game::ThnPlayer player(scene);
+                for (float f : {0.f, 0.5f, 1.f}) player.seek(player.duration() * f);
+                thn_moves += scene.moves.size();
+                thn_cuts += scene.cuts.size();
+                for (auto& c : scene.cuts) thn_bad_cuts += !scene.entity(c.camera);
+                for (auto& m : scene.moves) thn_bad_moves += !scene.entity(m.target);
             } else if (path.ends_with(".ale")) {
                 kind = "ale";
                 auto lib = AleLibrary::parse(data);
@@ -298,6 +307,8 @@ int main(int argc, char** argv) {
     std::printf("models %zu, parts %zu, meshes %zu, triangles (all LODs) %zu, textures decoded %zu\n", models, parts,
                 meshes, triangles, textures);
     std::printf("character meshes: %zu triangles, %zu bones, %zu bones without a part\n", dfm_tris, dfm_bones, dfm_bad_bones);
+    std::printf("scenes: %zu moves (%zu name no entity), %zu camera cuts (%zu to no camera)\n", thn_moves, thn_bad_moves,
+                thn_cuts, thn_bad_cuts);
     std::printf("character bind pose: %zu of %zu bones off (worst %.4f)\n", dfm_pose_off, dfm_posed, dfm_pose_worst);
     std::printf("animations: %zu scripts, %.0f seconds\n", anm_scripts, anm_seconds);
     std::printf("mission triggers %zu, actions naming a missing trigger %zu\n", msn_triggers, msn_dangling);
