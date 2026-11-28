@@ -43,6 +43,7 @@ static int failures = 0;
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/audio.hpp"
+#include "sterrenvaarder/sounds.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/pilots.hpp"
@@ -993,6 +994,18 @@ static void test_mixer() {
     CHECK(rest[0] == 32767);
 }
 
+static void test_sound_db() {
+    // Self-written sound list and system music.
+    SoundDb db;
+    db.add(parse_text_ini("[Sound]\nnickname = tune_a\nfile = audio\\music\\a.wav\nattenuation = -6\ntype = music\nstreamer = true\n"
+                          "[Sound]\nnickname = Tune_B\nfile = audio\\music\\b.wav\n[Other]\nnickname = not_a_sound\n"));
+    CHECK(db.size() == 2 && db.find("TUNE_A") && db.find("tune_b") && !db.find("not_a_sound"));
+    const SoundDef* a = db.find("tune_a");
+    CHECK(a->streamer && a->type == "music" && std::abs(a->gain() - 0.501f) < 0.01f && db.find("tune_b")->gain() == 1);
+    auto m = parse_system_music(parse_text_ini("[SystemInfo]\nname = x\n[Music]\nspace = tune_a\ndanger = tune_b\nbattle = tune_c\n"));
+    CHECK(m.space == "tune_a" && m.danger == "tune_b" && m.battle == "tune_c");
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -1208,6 +1221,7 @@ int main() {
     test_thn_player();
     test_wav();
     test_mixer();
+    test_sound_db();
     test_anm_frames();
     test_costumes();
     test_fonts();

@@ -39,6 +39,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/characters.cpp
   src/sterrenvaarder/mbases.cpp
   src/sterrenvaarder/audio.cpp
+  src/sterrenvaarder/sounds.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )
