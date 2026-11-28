@@ -544,12 +544,14 @@ struct RoomView {
         cam.fov_y = v.fov_y;
         cam.near_plane = v.near_plane;
     }  // instance names for the renderer
-    bool active() const { return !models.empty(); }
+    bool viewed = false;  // the room has its camera (a planetscape may show no models of its own)
+    bool active() const { return viewed || !models.empty(); }
 
     void clear() {
         rooms.reset();
         base.clear();
         current.clear();
+        viewed = false;
         models.clear();
         pads.clear();
         ships.clear();
@@ -637,6 +639,7 @@ struct RoomView {
         SDL_Log("room %s/%s: %zu models, %zu lights, camera %s", base.c_str(), current.c_str(), models.size(),
                 lighting.lights.size(), have_cam ? info->camera.c_str() : "(none)");
         if (!have_cam) models.clear();  // nothing sensible to show
+        viewed = have_cam;
         for (auto& want : info->ship_placements)
             for (auto& m : markers)
                 if (iequals(m.name, want)) { pads.push_back(m); break; }
@@ -1878,7 +1881,7 @@ struct FlightSession {
             int best_rank = 4;
             for (auto& n : npcs)
                 if (n.body.alive() && n.hostile)
-                    if (double d = (n.body.pos - ship.pos).length(); d < 10000) {
+                    if (double d = (n.body.pos - ship.pos).length(); d < 25000) {
                         int r = rank(n);
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
                         // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
@@ -2005,12 +2008,23 @@ struct FlightSession {
             }
         // No waypoint, but the mission waits for the player in a system next door
         // (SystemEnter = system): head for the jump gate (or hole) that goes there.
-        if (mission && mission->runner && !(mission->waypoint && iequals(mission->waypoint->system, sys.nickname)))
-            for (auto& c : mission->runner->waiting_on("SystemEnter")) {
-                if (c.args.empty() || iequals(c.arg(0), sys.nickname)) continue;
+        // The same for a waypoint in another system, a few jumps away if need be.
+        std::vector<std::string> goals;
+        if (mission && mission->runner && !(mission->waypoint && iequals(mission->waypoint->system, sys.nickname))) {
+            for (auto& c : mission->runner->waiting_on("SystemEnter"))
+                if (!c.args.empty() && !iequals(c.arg(0), "ANY")) goals.push_back(c.arg(0));
+            // A waypoint in another system (NNPath to a base there): go there.
+            // (Not when it is the gate the player just came through: the objective moves on soon.)
+            if (mission->waypoint && !mission->waypoint->system.empty() && !leads_here(*mission->waypoint, sys.nickname))
+                goals.push_back(mission->waypoint->system);
+        }
+        for (auto& goal : goals) {
+                if (iequals(goal, sys.nickname)) continue;
+                std::string hop = next_system_toward(sys.nickname, goal);
+                if (hop.empty()) continue;
                 const SystemObject* gate = nullptr;
                 for (auto& o : sys.objects)
-                    if (o.is_jump() && iequals(o.goto_system, c.arg(0)) &&
+                    if (o.is_jump() && iequals(o.goto_system, hop) &&
                         (!gate || (DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() < (DVec3{gate->pos.x, gate->pos.y, gate->pos.z} - ship.pos).length()))
                         gate = &o;
                 if (!gate) continue;
@@ -2075,8 +2089,8 @@ struct FlightSession {
                             const SystemObject& o = *op;
                             const std::string& b = !o.dock_with.empty() ? o.dock_with : o.base;
                             if (b.empty() || !(iequals(b, c.arg(0)) || iequals(b, c.arg(1)))) continue;
-                            if ((DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() > 6000) continue;
-                            if (!best || (best->dock_with.empty() && !o.dock_with.empty())) best = &o;
+                            if ((DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() > (ring_like(o) ? 20000 : 6000)) continue;  // a planet's ring may lie farther out
+                            if (!best || (!ring_like(*best) && ring_like(o))) best = &o;
                         }
                         if (!best) continue;
                         contacts.push_back({best->nickname, {}, 0, true});
@@ -2157,7 +2171,25 @@ struct FlightSession {
         double dist = to.length();
         if (dist < approach_distance(*o)) {
             if (o->is_tradelane()) {
-                lane = game::LaneTrip::start(sys, *o);
+                // Which way: the lane goes on in the direction the player flies through the
+                // ring (towards the ring beyond it, seen from where the player comes from).
+                std::string way;
+                if (!o->next_ring.empty() && !o->prev_ring.empty())
+                    if (auto* nx = object_named(sys, o->next_ring)) {
+                        DVec3 rp{o->pos.x, o->pos.y, o->pos.z};
+                        DVec3 along = DVec3{nx->pos.x, nx->pos.y, nx->pos.z} - rp, in = rp - ship.pos;
+                        bool forward = along.x * in.x + along.y * in.y + along.z * in.z >= 0;
+                        // The last ring that way (a trip stops at the ring it is given).
+                        const SystemObject* end = o;
+                        for (int guard = 0; guard < 256; ++guard) {
+                            const std::string& nn = forward ? end->next_ring : end->prev_ring;
+                            const SystemObject* nxt = nn.empty() ? nullptr : object_named(sys, nn);
+                            if (!nxt) break;
+                            end = nxt;
+                        }
+                        if (end != o) way = end->nickname;
+                    }
+                lane = game::LaneTrip::start(sys, *o, 2000.f, way);
                 nav = lane ? Nav::Lane : Nav::Free;
                 // TLEntered = ship, ring entered, the ring after it
                 if (lane && mission && mission->runner)
@@ -2311,6 +2343,10 @@ struct FlightSession {
 
     // Gunboats, cruisers, transports and the like do not dogfight: they hold their course
     // and their turrets fire at what comes in range.
+    // A docking ring (or a fixture docked "with" a base) rather than the planet or base itself.
+    static bool ring_like(const SystemObject& o) {
+        return !o.dock_with.empty() || game::dock_kind(o.archetype) == game::DockKind::Ring;
+    }
     static bool is_big_ship(const NpcShip& n) {
         if (!n.arch) return false;
         const std::string& t = n.arch->type;
@@ -3561,6 +3597,49 @@ struct FlightSession {
                     if (!o.base.empty() && econ->base(o.base)) return Relocation{o.base, "", ""};
         return std::nullopt;
     }
+    // The next system on the shortest way through jump gates and holes (empty: no way).
+    mutable std::unordered_map<std::string, std::vector<std::string>> jump_links;
+    const std::vector<std::string>& links_of(const std::string& system) const {
+        auto key = to_lower(system);
+        if (auto it = jump_links.find(key); it != jump_links.end()) return it->second;
+        auto& v = jump_links[key];
+        if (universe)
+            if (auto ss = universe->load_system(system))
+                for (auto& o : ss->objects)
+                    if (o.is_jump() && std::find_if(v.begin(), v.end(), [&](const std::string& x) { return iequals(x, o.goto_system); }) == v.end())
+                        v.push_back(o.goto_system);
+        return v;
+    }
+    // Whether a waypoint's object is a gate or hole into `here` (one the player has just used).
+    mutable std::unordered_map<std::string, std::string> gate_goes;  // "system/object" -> its goto system
+    template <class W> bool leads_here(const W& wp, const std::string& here) const {
+        if (wp.object.empty()) return false;
+        std::string key = to_lower(wp.system + "/" + wp.object);
+        auto it = gate_goes.find(key);
+        if (it == gate_goes.end()) {
+            std::string to;
+            if (universe)
+                if (auto ss = universe->load_system(wp.system))
+                    if (auto* o = game::find_object(*ss, wp.object)) to = o->goto_system;
+            it = gate_goes.emplace(key, to).first;
+        }
+        return iequals(it->second, here);
+    }
+    std::string next_system_toward(const std::string& from, const std::string& to) const {
+        if (iequals(from, to)) return {};
+        std::unordered_map<std::string, std::string> first;  // system -> first hop
+        std::vector<std::string> queue{from};
+        first[to_lower(from)] = "";
+        for (std::size_t i = 0; i < queue.size() && queue.size() < 200; ++i)
+            for (auto& n : links_of(queue[i])) {
+                auto k = to_lower(n);
+                if (first.count(k)) continue;
+                first[k] = i == 0 ? n : first[to_lower(queue[i])];
+                if (iequals(n, to)) return first[k];
+                queue.push_back(n);
+            }
+        return {};
+    }
     std::string base_system(std::string_view base) const {
         auto* b = econ ? econ->base(base) : nullptr;
         return b ? b->system : std::string();
@@ -3589,6 +3668,23 @@ struct FlightSession {
                 ms.obj.pos = {d.position[0], d.position[1], d.position[2]};
                 ms.obj.rotate_deg = game::euler_degrees(ms.orient);
                 ms.system = d.system;
+                // Some solars name a system that doesn't fit their spot (one meant for the
+                // system the player is in, written down as another): when the spot lies among
+                // this system's objects and not among the named one's, it is placed here.
+                if (!d.system.empty() && universe && rend && !iequals(d.system, rend->system().nickname)) {
+                    auto nearest = [&](const StarSystem& sy) {
+                        double best = 1e18;
+                        for (auto& o : sy.objects) best = std::min(best, (DVec3{o.pos.x, o.pos.y, o.pos.z} - ms.pos).length());
+                        return best;
+                    };
+                    double here = nearest(rend->system());
+                    auto named = universe->load_system(d.system);
+                    double there = named ? nearest(*named) : 1e18;
+                    if (here < 10000 && there > 2 * here) {
+                        SDL_Log("mission: solar %s is placed in %s, not %s", d.nickname.c_str(), rend->system().nickname.c_str(), d.system.c_str());
+                        ms.system = rend->system().nickname;
+                    }
+                }
                 ms.faction = d.faction;
                 ms.names = {d.nickname};
                 for (auto& l : d.labels) ms.names.push_back(l);
@@ -4585,9 +4681,20 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
                 if (iequals(o.arg(0), g)) return true;
         return iequals(o.name, "FollowPlayer") || (iequals(o.name, "Follow") && iequals(o.arg(0), "Player"));
     };
+    // Ships the mission waits to see arrive there with the player (NPCSystemEnter = system,
+    // ship...) come along too, as a wingman would.
+    auto awaited = [&](const NpcShip& n) {
+        if (!fs.mission || !fs.mission->runner) return false;
+        for (auto& c : fs.mission->runner->waiting_on("NPCSystemEnter"))
+            if (iequals(c.arg(0), sys))
+                for (std::size_t i = 1; i < c.args.size(); ++i)
+                    for (auto& nm : n.names)
+                        if (iequals(nm, c.arg(i))) return true;
+        return false;
+    };
     std::vector<NpcShip> escort;
     for (auto& n : fs.npcs)
-        if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && follows_player(n) && (n.ship.pos - fs.ship.pos).length() < 10000)
+        if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && (follows_player(n) || awaited(n)) && (n.ship.pos - fs.ship.pos).length() < 10000)
             escort.push_back(std::move(n));
         else if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && SDL_getenv("SV_TRACE_TRIGGERS"))
             SDL_Log("stays behind: %s (%s, %.0f m)", n.mission_name.c_str(), n.order_step < n.orders.size() ? n.orders[n.order_step].name.c_str() : "no orders",

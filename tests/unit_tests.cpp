@@ -582,6 +582,21 @@ static void test_thn() {
     auto cam = thn.entity("cam");
     CHECK(cam && cam->type == "CAMERA" && cam->fovh == 40 && cam->pos.x == 1 && cam->pos.y == -2 && cam->pos.z == 3);
 
+    // Some compiled scripts hold the type as a number (3: a camera).
+    auto numbered = lua_chunk(k, {TABLE, 1,
+                                  TABLE, 4,
+                                  K, 1, K, 2,
+                                  K, 3, NUM, 3,
+                                  K, 6, TABLE, 1, K, 7, NUM, 40, MAP, 0,
+                                  K, 8, TABLE, 1, K, 9, TABLE, 3, NUM, 1, NEG, 2, NUM, 3, LIST, 0, 3, MAP, 0,
+                                  MAP, 3,
+                                  LIST, 0, 1,
+                                  SETG, 0,
+                                  NUM, 5, SETG, 5,
+                                  END});
+    auto thn2 = ThnScript::parse(numbered);
+    CHECK(thn2.entity("cam") && thn2.entity("cam")->type == "CAMERA");
+
     // Anything beyond table building is refused instead of run.
     bool threw = false;
     try { LuaChunk::parse(lua_chunk({}, {0x40, END})); } catch (const FormatError&) { threw = true; }
