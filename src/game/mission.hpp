@@ -22,7 +22,7 @@ namespace sterrenvaarder::game {
 struct MissionEvent {
     enum class Type {
         CommComplete,   // a = line
-        Destroyed,      // a = ship nickname
+        Destroyed,      // a = ship nickname, b = who made the kill (empty: not known)
         SpaceExit,      // player docked or jumped out
         BaseExit,       // a = base
         SystemExit,     // a = system
@@ -59,6 +59,8 @@ public:
     // Where the live ships of a label are (empty when none, or not known).
     virtual std::vector<DVec3> positions_of(std::string_view /*label*/) const { return {}; }
     virtual bool in_tradelane(std::string_view /*ship*/) const { return false; }
+    // The direction an object faces (a ring's axis); nothing when not known.
+    virtual std::optional<DVec3> axis(std::string_view /*object*/) const { return {}; }
 };
 
 class MissionRunner {
@@ -105,11 +107,13 @@ private:
         mutable double closest = -1;  // DistShip ... TICK_AWAY: the nearest it has seen (-1: none yet)
         mutable double held_since = -1;   // DistShip ..., seconds: clock since it has held (-1: not)
         mutable double apart_since = -1;  // TetherBroke: clock when the two drifted apart (-1: together)
+        mutable std::optional<DVec3> last_pos;  // DistCircle: where the ship was at the last check
         bool armed = true;         // repeatable: its conditions went false since it last fired
     };
     bool holds(const MsnTrigger& t, const MsnCommand& c, const State& s, const MissionWorld& w) const;
     void activate(std::string_view trigger);
     int destroyed_count(std::string_view name_or_label) const;
+    int destroyed_count(std::string_view name_or_label, std::string_view killer) const;
     int label_size(std::string_view label) const;
 
     const MissionScript& script_;

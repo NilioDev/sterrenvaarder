@@ -1227,7 +1227,7 @@ static void test_mission_start() {
     CHECK(pings == 2);
     // Moving away from a point (TICK_AWAY) and asking for a maneuver.
     MissionScript ts = parse_mission(parse_text_ini(
-        "[Trigger]\nnickname = t_away\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 50, TICK_AWAY\nAct_Ping = x\n"
+        "[Trigger]\nnickname = t_away\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 0.25, TICK_AWAY\nAct_Ping = x\n"
         "[Trigger]\nnickname = t_dock\nInitState = ACTIVE\nCnd_PlayerManeuver = Dock, ring_1\nAct_Ping = x\n"));
     struct MovingWorld : game::MissionWorld {
         double player_x = 2000;
@@ -1246,10 +1246,16 @@ static void test_mission_start() {
     tr.update(0.1f, mw, act);
     mw.player_x = 1900;  // outside, but closing in
     tr.update(0.1f, mw, act);
-    mw.player_x = 1940;  // turned back, not yet a tick farther than the nearest
+    mw.player_x = 1940;  // turned back: not closing in, but not yet for 0.25 s
+    tr.update(0.1f, mw, act);
+    tr.update(0.1f, mw, act);
+    mw.player_x = 1850;  // closing in again starts the count over
+    tr.update(0.1f, mw, act);
+    mw.player_x = 1960;
+    tr.update(0.1f, mw, act);
     tr.update(0.1f, mw, act);
     CHECK(pings == 0);
-    mw.player_x = 1960;
+    tr.update(0.1f, mw, act);
     tr.update(0.1f, mw, act);
     CHECK(pings == 1);
     tr.event({game::MissionEvent::Type::PlayerManeuver, "Dock", "ring_2", ""});
@@ -1258,6 +1264,47 @@ static void test_mission_start() {
     tr.event({game::MissionEvent::Type::PlayerManeuver, "dock", "RING_1", ""});
     tr.update(0.1f, mw, act);
     CHECK(pings == 2);
+    // DistCircle: crossing the ring's plane within its opening, not just being near it.
+    MissionScript cs = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_ring\nInitState = ACTIVE\nCnd_DistCircle = Player, ring_1\nAct_Ping = x\n"));
+    struct RingWorld : MovingWorld {
+        double player_y = 0;
+        std::optional<game::DVec3> position(std::string_view o) const override {
+            if (o == "Player") return game::DVec3{player_x, player_y, 0};
+            return game::DVec3{0, 0, 0};
+        }
+        std::optional<game::DVec3> axis(std::string_view) const override { return game::DVec3{1, 0, 0}; }
+    } rw;
+    game::MissionRunner cr(cs);
+    pings = 0;
+    cr.start();
+    rw.player_x = -100;  // lined up behind it
+    cr.update(0.1f, rw, act);
+    rw.player_x = -20;
+    cr.update(0.1f, rw, act);
+    CHECK(pings == 0);
+    rw.player_y = 400;  // past its plane, but beside the ring
+    rw.player_x = 30;
+    cr.update(0.1f, rw, act);
+    CHECK(pings == 0);
+    rw.player_y = 0;
+    rw.player_x = -30;
+    cr.update(0.1f, rw, act);
+    rw.player_x = 30;  // through it
+    cr.update(0.1f, rw, act);
+    CHECK(pings == 1);
+    // Destroyed = ship, count, how, killer: only kills by that one count.
+    MissionScript ks = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_kill\nInitState = ACTIVE\nCnd_Destroyed = plat_1, 1, ALL_IGNORE_LANDING, Player\nAct_Ping = x\n"));
+    game::MissionRunner kr(ks);
+    pings = 0;
+    kr.start();
+    kr.event({game::MissionEvent::Type::Destroyed, "plat_1", "bandit_1", ""});
+    kr.update(0.1f, rw, act);
+    CHECK(pings == 0);
+    kr.event({game::MissionEvent::Type::Destroyed, "PLAT_1", "player", ""});
+    kr.update(0.1f, rw, act);
+    CHECK(pings == 1);
     // A trigger of the system just left still sees the player leave it.
     MissionScript xs = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_exit\nsystem = Sys02\nInitState = ACTIVE\nCnd_SystemExit = Sys02\nAct_Ping = x\n"));
