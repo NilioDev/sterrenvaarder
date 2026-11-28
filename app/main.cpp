@@ -51,6 +51,8 @@
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
 #include "game/mixer.hpp"
+#include "sterrenvaarder/audio.hpp"
+#include "sterrenvaarder/sounds.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/dfm.hpp"
@@ -825,6 +827,13 @@ struct FlightSession {
     RoomView room;
     CharacterData chars;
     game::Mixer* mixer = nullptr;  // sound output (music, voices, effects)
+    // Music: the system's space track, looping, switched when the system changes.
+    struct Music {
+        bool loaded = false;
+        SoundDb db;
+        std::string system;
+        game::Mixer::Handle handle = 0;
+    } music;
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
     const ShipDatabase* shipdb = nullptr;
@@ -1620,6 +1629,7 @@ struct FlightSession {
         update_effects(dt_d);
         update_mission(dt);
         update_traffic(dt);
+        update_music();
     }
 
     // ---- navigation map (M)
@@ -1743,6 +1753,37 @@ struct FlightSession {
         std::snprintf(buf[1], sizeof buf[1], "%.0f", p.y);
         std::snprintf(buf[2], sizeof buf[2], "%.0f", p.z);
         n.orders.push_back(order("GotoVec", {"goto_cruise", buf[0], buf[1], buf[2], "300"}));
+    }
+    void update_music() {
+        if (!mixer || !vfs || !universe || !rend) return;
+        auto& m = music;
+        const std::string& sys = rend->system().nickname;
+        if (sys == m.system) return;
+        m.system = sys;
+        mixer->stop(m.handle);
+        m.handle = 0;
+        if (!m.loaded) {
+            m.loaded = true;
+            try {
+                if (vfs->exists("audio/music.ini")) m.db.add(parse_ini(vfs->read("audio/music.ini")));
+            } catch (const std::exception& e) {
+                SDL_Log("music list: %s", e.what());
+            }
+        }
+        std::string file = universe->system_file(sys);
+        if (file.empty() || !vfs->exists(file)) return;
+        try {
+            SystemMusic sm = parse_system_music(parse_ini(vfs->read(file)));
+            const SoundDef* d = sm.space.empty() ? nullptr : m.db.find(sm.space);
+            if (!d) return;
+            std::string path = CharacterData::normal_path(d->file);
+            if (!vfs->exists(path)) return;
+            auto snd = std::make_shared<Sound>(decode_wav(vfs->read(path)));
+            m.handle = mixer->play(snd, d->gain(), true);
+            SDL_Log("music: %.0f s track for this system", snd->seconds());
+        } catch (const std::exception& e) {
+            SDL_Log("music: %s", e.what());
+        }
     }
     void update_traffic(float dt) {
         if (!vfs || !universe || !rend || !db) return;
@@ -2796,7 +2837,8 @@ int run(const Args& args) {
     // Sound: one stereo 16-bit stream that pulls from the mixer. Screenshot runs stay silent.
     game::Mixer mixer(44100);
     SDL_AudioStream* audio = nullptr;
-    if (!offscreen && !args.no_sound && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+    // (a screenshot run opens one only when SDL_AUDIO_DRIVER asks, e.g. "dummy" for tests)
+    if ((!offscreen || SDL_getenv("SDL_AUDIO_DRIVER")) && !args.no_sound && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         SDL_AudioSpec spec{SDL_AUDIO_S16, 2, mixer.rate()};
         audio = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,

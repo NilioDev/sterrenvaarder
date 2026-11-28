@@ -12,6 +12,8 @@
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/audio.hpp"
+#include "sterrenvaarder/sounds.hpp"
+#include "sterrenvaarder/universe.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
 #include "sterrenvaarder/anm.hpp"
@@ -291,6 +293,32 @@ int main(int argc, char** argv) {
                 std::printf("fixed characters idle: %zu posed, %zu without idle; feet %.2f below root on average, root height %.2f, worst gap %.2f\n",
                             posed, no_idle, -feet_sum / posed, root_sum / posed, gap_worst);
         }
+    }
+    // Music: each system's tracks should name a sound whose file is in the data (counts only).
+    if (vfs.exists("universe/universe.ini") && vfs.exists("audio/music.ini")) {
+        SoundDb sounds;
+        sounds.add(parse_ini(vfs.read("audio/music.ini")));
+        Universe uni(vfs);
+        std::size_t systems = 0, with_music = 0, refs = 0, unknown = 0, missing_file = 0;
+        for (auto& name : uni.system_names()) {
+            std::string file = uni.system_file(name);
+            if (file.empty() || !vfs.exists(file)) continue;
+            ++systems;
+            SystemMusic m = parse_system_music(parse_ini(vfs.read(file)));
+            if (m.space.empty() && m.danger.empty() && m.battle.empty()) continue;
+            ++with_music;
+            for (auto* nick : {&m.space, &m.danger, &m.battle}) {
+                if (nick->empty()) continue;
+                ++refs;
+                const SoundDef* d = sounds.find(*nick);
+                if (!d) { ++unknown; continue; }
+                std::string path = to_lower(d->file);
+                std::replace(path.begin(), path.end(), '\\', '/');
+                if (!vfs.exists(path)) ++missing_file;
+            }
+        }
+        std::printf("music: %zu sounds, %zu of %zu systems have music, %zu tracks named (%zu unknown, %zu without file)\n",
+                    sounds.size(), with_music, systems, refs, unknown, missing_file);
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {
