@@ -64,7 +64,12 @@ std::vector<std::uint32_t> DfmMesh::triangles(const Group& g) const {
     return out;
 }
 
-bool DfmModel::is_dfm(const UtfNode& root) { return root.child("MultiLevel") != nullptr; }
+// Rigid .3db models can have a MultiLevel node too (holding Level0, Level1, ...); a
+// deformable one holds Mesh0, Mesh1, ...
+bool DfmModel::is_dfm(const UtfNode& root) {
+    const UtfNode* ml = root.child("MultiLevel");
+    return ml && ml->child("Mesh0") != nullptr;
+}
 
 DfmModel DfmModel::load(const UtfNode& root) {
     DfmModel d;

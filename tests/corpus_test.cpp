@@ -185,6 +185,8 @@ int main(int argc, char** argv) {
                 }
                 if (path.ends_with(".cmp") || path.ends_with(".3db")) {
                     kind = "model";
+                    // The renderer picks the character path by is_dfm: rigid models must fail it.
+                    if (DfmModel::is_dfm(f->root())) throw FormatError("rigid model taken for a deformable one");
                     Model m = Model::load(f);
                     ++models;
                     for (auto& p : m.parts) {
