@@ -39,6 +39,7 @@ static int failures = 0;
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/anm.hpp"
+#include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -708,6 +709,20 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_costumes() {
+    CharacterParts cp;
+    cp.add_body_parts(parse_text_ini(
+        "[Animations]\nanim = anims\\a.anm\n[Skeleton]\nsex = male\n[Body]\nnickname = body_a\nmesh = b\\body_a.dfm\n"
+        "[Skeleton]\nsex = female\n[Head]\nnickname = head_b\nmesh = h\\head_b.dfm\n"
+        "[Accessory]\nnickname = hat\nmesh = p\\hat.3db\nhardpoint = hp_hat\nbody_hardpoint = hp_head\n"));
+    cp.add_costumes(parse_text_ini("[Costume]\nnickname = look_a\nhead = head_b\nbody = body_a\nlefthand = l\nrighthand = r\naccessory = hat\n"));
+    CHECK(cp.part_count() == 3 && cp.animation_files().size() == 1);
+    CHECK(cp.part("BODY_A") && cp.part("body_a")->sex == "male" && cp.part("head_b")->sex == "female");
+    CHECK(cp.part("hat")->kind == BodyPart::Kind::Accessory && cp.part("hat")->body_hardpoint == "hp_head");
+    auto* c = cp.costume("look_a");
+    CHECK(c && c->body == "body_a" && c->left_hand == "l" && c->accessories.size() == 1);
+}
+
 static void test_anm_frames() {
     // Frame sizes per channel type: time, position, rotation (full or packed).
     CHECK(AnmChannel::frame_size(0x80, true) == 10);
@@ -946,6 +961,7 @@ int main() {
     test_population();
     test_dfm_strips();
     test_anm_frames();
+    test_costumes();
     test_fonts();
     test_postfx();
     test_thn();

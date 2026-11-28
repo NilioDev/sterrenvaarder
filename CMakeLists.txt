@@ -36,6 +36,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/population.cpp
   src/sterrenvaarder/dfm.cpp
   src/sterrenvaarder/anm.cpp
+  src/sterrenvaarder/characters.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )

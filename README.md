@@ -198,6 +198,8 @@ Character bodies, heads and hands are deformable models (`.dfm`), and `DfmModel`
 
 Animations (`.anm`) are read by `AnmLibrary`. Each script has joint maps (parent and child bone) and object maps, and each map has a keyframed channel of times, positions and rotations. Rotations are stored as full quaternions (0x04) or packed into three shorts (0x40 / 0x80). The corpus test reads all 2,794 scripts in the data.
 
+`CharacterParts` reads `characters/bodyparts.ini` and `characters/costumes.ini`. Bodyparts gives the mesh of each body, head, hand and accessory; a `[Skeleton]` section sets the sex of the parts after it, and accessories also name the hardpoints they attach to. A costume puts a head, body, two hands and its accessories together. The corpus test checks that every part a costume names exists and has its mesh in the data.
+
 The renderer draws a character mesh in its bind pose for now. Animation and the scenes come next. The corpus test reads all character meshes in the data and checks their strips and skin.
 
 ## Navigation map

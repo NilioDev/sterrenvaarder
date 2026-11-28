@@ -11,6 +11,7 @@
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/anm.hpp"
+#include "sterrenvaarder/characters.hpp"
 #include <algorithm>
 #include "game/mission.hpp"
 #include "sterrenvaarder/model.hpp"
@@ -149,6 +150,27 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             report(kind, path, e.what());
         }
+    }
+    // Costumes: every part they name should exist, with its mesh in the data.
+    if (vfs.exists("characters/bodyparts.ini") && vfs.exists("characters/costumes.ini")) {
+        CharacterParts cp;
+        cp.add_body_parts(parse_ini(vfs.read("characters/bodyparts.ini")));
+        IniFile costumes = parse_ini(vfs.read("characters/costumes.ini"));
+        cp.add_costumes(costumes);
+        std::size_t missing_part = 0, missing_mesh = 0, refs = 0;
+        for (auto& sec : costumes) {
+            for (auto& e : sec.entries) {
+                if (iequals(e.key, "nickname") || e.values.empty()) continue;
+                ++refs;
+                auto* p = cp.part(e.values[0].as_string());
+                if (!p) { ++missing_part; continue; }
+                std::string mesh = to_lower(p->mesh);
+                std::replace(mesh.begin(), mesh.end(), '\\', '/');
+                if (!vfs.exists(mesh)) ++missing_mesh;
+            }
+        }
+        std::printf("costumes: %zu, parts %zu, %zu part references, %zu name a missing part, %zu a missing mesh\n",
+                    cp.costume_count(), cp.part_count(), refs, missing_part, missing_mesh);
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {
