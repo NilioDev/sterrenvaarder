@@ -45,6 +45,7 @@ static int failures = 0;
 #include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/sounds.hpp"
+#include "sterrenvaarder/voices.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/pilots.hpp"
@@ -1056,6 +1057,23 @@ static void test_sound_db() {
     CHECK(a->gain_at(1e6f) == 1);  // no range: heard everywhere
 }
 
+static void test_voices() {
+    // Self-written voice list: a voice, its lines, and a later section extending it.
+    VoiceDb db;
+    db.add(parse_text_ini("[Voice]\nnickname = Pilot_A\nscript = sc_talk_a\nscript = sc_talk_b\n"
+                          "[Sound]\nmsg = Line_One\nattenuation = -3\nduration = 1.5\nPriority = 2\n[Sound]\nmsg = line_two\n"
+                          "[Voice]\nextend = pilot_a\n[Sound]\nmsg = line_three\n"));
+    const Voice* v = db.voice("PILOT_A");
+    CHECK(db.size() == 1 && v && v->scripts.size() == 2 && v->lines.size() == 3);
+    CHECK(v && v->lines.count("line_one") && v->lines.at("line_one").attenuation == -3 && v->lines.at("line_one").duration == 1.5f &&
+          v->lines.at("line_one").priority == 2);
+    // Node names: "0x" and eight upper-case hex digits of the nickname hash.
+    std::string n = voice_node_name("line_one");
+    char want[16];
+    std::snprintf(want, sizeof want, "0x%08X", static_cast<unsigned>(fl_create_id("line_one")));
+    CHECK(n == want && n.size() == 10);
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -1272,6 +1290,7 @@ int main() {
     test_wav();
     test_mixer();
     test_sound_db();
+    test_voices();
     test_music_mood();
     test_anm_frames();
     test_costumes();

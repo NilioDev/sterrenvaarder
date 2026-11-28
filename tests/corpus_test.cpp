@@ -13,6 +13,7 @@
 #include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/sounds.hpp"
+#include "sterrenvaarder/voices.hpp"
 #include "sterrenvaarder/universe.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
@@ -383,6 +384,27 @@ int main(int argc, char** argv) {
         std::printf("equipment sound: %zu sounds named (%zu unresolved)\n", equip_refs, equip_bad);
         std::printf("room sound: %zu rooms, %zu with music, %zu with ambience (%zu unresolved)\n", rooms, with_music, with_ambient,
                     unresolved);
+    }
+    // Voices: every listed line should be found in its voice's .utf files and decode.
+    {
+        VoiceDb voices;
+        for (auto& f : vfs.list(".ini"))
+            if (auto low = to_lower(f); low.rfind("audio/voices_", 0) == 0) voices.add(parse_ini(vfs.read(f)));
+        std::size_t lines = 0, found = 0, decoded = 0;
+        double seconds = 0;
+        for (auto& [name, v] : voices.all())
+            for (auto& [msg, l] : v.lines) {
+                ++lines;
+                auto wave = voices.line_wave(vfs, name, msg);
+                if (!wave) continue;
+                ++found;
+                try {
+                    seconds += decode_wav(*wave).seconds();
+                    ++decoded;
+                } catch (const std::exception&) {}
+            }
+        std::printf("voices: %zu voices, %zu lines, %zu found, %zu decode (%.0f minutes)\n", voices.size(), lines, found, decoded,
+                    seconds / 60);
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {
