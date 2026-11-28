@@ -1376,6 +1376,10 @@ struct FlightSession {
             if (!x.voice.empty() && !base.empty() && (iequals(x.base, base) || iequals(x.dock_with, base))) return x.voice;
         return {};
     }
+    std::vector<std::string> marked;  // MarkObj: mission ships, labels or objects marked on the HUD
+    bool is_marked(const std::string& a, const std::string& b = {}) const {
+        return std::any_of(marked.begin(), marked.end(), [&](const std::string& m) { return iequals(m, a) || (!b.empty() && iequals(m, b)); });
+    }
     // Mission limits on docking and trade lanes (PlayerCanDock, PlayerCanTradelane, LockDock).
     struct DockRules {
         bool can_dock = true, can_lane = true;
@@ -2204,6 +2208,7 @@ struct FlightSession {
         m->name = name;
         mission = std::move(m);
         dock_rules = {};
+        marked.clear();
         music.mission = {};
         mission->runner.emplace(mission->script);
         mission->runner->start();
@@ -2673,6 +2678,20 @@ struct FlightSession {
             } else if (iequals(a.name, "SetRep")) {
                 // SetRep = player, faction, value (-1..1).
                 if (iequals(a.arg(0), "Player") && a.args.size() > 2) player.rep[to_lower(a.arg(1))] = std::clamp(a.num(2), -1.f, 1.f);
+            } else if (iequals(a.name, "PobjIdle")) {
+                // PobjIdle = ship: drops its orders; it waits where it is.
+                for_mission_ships(a.arg(0), [&](NpcShip& n) {
+                    n.orders.clear();
+                    n.order_step = 0;
+                    n.order_time = 0;
+                });
+            } else if (iequals(a.name, "RevertCam")) {
+                // Gives the camera back after a scripted view; the flight camera never leaves.
+            } else if (iequals(a.name, "MarkObj")) {
+                // MarkObj = ship, label or object, 1 | 0.
+                std::string who = a.arg(0);
+                std::erase_if(marked, [&](const std::string& x) { return iequals(x, who); });
+                if (a.num(1) != 0) marked.push_back(who);
             } else if (iequals(a.name, "PlaySoundEffect")) {
                 play_here(a.arg(0));
             } else if (iequals(a.name, "PlayMusic")) {
@@ -2843,6 +2862,7 @@ struct FlightSession {
             }
             c.pos = {o.pos.x, o.pos.y, o.pos.z};
             c.radius = 200;
+            c.marked = is_marked(o.nickname);
             contacts.push_back(std::move(c));
         }
         for (auto& m : msn_solars) {
@@ -2850,6 +2870,7 @@ struct FlightSession {
             c.name = m.name;
             c.pos = m.pos;
             c.radius = m.arch ? std::max(50.f, m.arch->solar_radius) : 100.f;
+            c.marked = is_marked(m.nickname);
             contacts.push_back(std::move(c));
         }
         for (auto& n : npcs) {
@@ -2859,6 +2880,12 @@ struct FlightSession {
             c.pos = n.ship.pos;
             c.radius = 12;
             c.hostile = n.hostile;
+            if (!n.mission_name.empty()) {
+                c.marked = is_marked(n.mission_name);
+                if (!c.marked && mission)
+                    if (auto* d = mission->script.ship(n.mission_name))
+                        for (auto& l : d->labels) c.marked = c.marked || is_marked(l);
+            }
             c.hull = n.body.hull / std::max(1.f, n.body.max_hull);
             c.shield = n.body.max_shield > 0 ? n.body.shield / n.body.max_shield : 0;
             contacts.push_back(std::move(c));

@@ -357,6 +357,15 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
                     h.line(tx + ax * k, ty + ay * k, tx - nx * k, ty - ny * k, 2.5f * s, kTarget);
                 }
             }
+        } else if (c.marked && front) {
+            // A mission marker: a diamond with the name and distance, at any range.
+            HudColor mc = attitude_color(c, kTarget).with_alpha(0.9f);
+            float m = 9 * s;
+            h.line(px, py - m, px + m, py, 1.8f * s, mc);
+            h.line(px + m, py, px, py + m, 1.8f * s, mc);
+            h.line(px, py + m, px - m, py, 1.8f * s, mc);
+            h.line(px - m, py, px, py - m, 1.8f * s, mc);
+            h.text(px, py + m + 6 * s, 11 * s, c.display() + "  " + fmt_distance(dist), mc, TextAlign::Center);
         } else if (front && dist < 60000) {
             float m = 4 * s;
             h.rect_outline(px - m, py - m, 2 * m, 2 * m, 1.2f * s, kDim);

@@ -77,6 +77,7 @@ struct HudContact {
     DVec3 pos;
     float radius = 0;   // for bracket size
     bool selected = false;
+    bool marked = false;    // a mission marks it (MarkObj): shown with its name at any distance
     bool hostile = false;   // red
     bool friendly = false;  // green
     std::string faction;    // owner's name, shown in the target box
