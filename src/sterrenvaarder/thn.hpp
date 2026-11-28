@@ -128,6 +128,7 @@ struct RoomInfo {
     std::string camera;                // camera entity to view the room through
     std::vector<std::string> ship_placements;  // [ForSaleShipPlacement] markers (ship dealer)
     std::vector<RoomHotspot> hotspots;
+    std::string music, ambient;  // [Room_Sound] sound nicknames (music may be empty: keep what plays)
 };
 
 struct BaseRooms {

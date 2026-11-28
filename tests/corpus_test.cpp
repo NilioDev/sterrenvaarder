@@ -320,6 +320,38 @@ int main(int argc, char** argv) {
         std::printf("music: %zu sounds, %zu of %zu systems have music, %zu tracks named (%zu unknown, %zu without file)\n",
                     sounds.size(), with_music, systems, refs, unknown, missing_file);
     }
+    // Base rooms: [Room_Sound] music and ambience should name sounds with a file (counts only).
+    if (vfs.exists("universe/universe.ini") && vfs.exists("audio/music.ini")) {
+        SoundDb sounds;
+        for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini"})
+            if (vfs.exists(f)) sounds.add(parse_ini(vfs.read(f)));
+        std::size_t rooms = 0, with_music = 0, with_ambient = 0, unresolved = 0;
+        for (auto& sec : parse_ini(vfs.read("universe/universe.ini"))) {
+            if (!iequals(sec.name, "Base")) continue;
+            auto* nick = sec.find("nickname");
+            if (!nick || !nick->at(0)) continue;
+            std::string file = base_file_of(vfs, nick->at(0)->as_string());
+            if (file.empty()) continue;
+            std::optional<BaseRooms> b;
+            try { b = BaseRooms::load(vfs, file); } catch (const std::exception&) { continue; }
+            if (!b) continue;
+            for (auto& r : b->rooms) {
+                ++rooms;
+                for (auto* n : {&r.music, &r.ambient}) {
+                    if (n->empty()) continue;
+                    ++(n == &r.music ? with_music : with_ambient);
+                    const SoundDef* d = sounds.find(*n);
+                    std::string path = d ? to_lower(d->file) : std::string();
+                    std::replace(path.begin(), path.end(), '\\', '/');
+                    if (!d || !vfs.exists(path)) {
+                        if (unresolved++ < 3) std::printf("  room sound %s: %s\n", n->c_str(), d ? "no file" : "unknown");
+                    }
+                }
+            }
+        }
+        std::printf("room sound: %zu rooms, %zu with music, %zu with ambience (%zu unresolved)\n", rooms, with_music, with_ambient,
+                    unresolved);
+    }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {
         auto read = [&](const char* p) { return vfs.exists(p) ? parse_ini(vfs.read(p)) : IniFile{}; };
