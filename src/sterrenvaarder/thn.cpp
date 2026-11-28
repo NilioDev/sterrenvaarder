@@ -37,7 +37,47 @@ ThnScript ThnScript::parse(Bytes data) {
     out.events = chunk.global("events");
     for (std::size_t i = 1; i <= out.events.size(); ++i) {
         const LuaValue& e = out.events[i];
-        if (!e.is_table() || e[2].str() != "START_MOTION") continue;
+        if (!e.is_table()) continue;
+        const std::string& kind = e[2].str();
+        auto target_of = [](const LuaValue& who) { return who.is_table() ? who[1].str() : who.str(); };
+        if (kind == "SET_CAMERA") {
+            // Targets: the monitor, then the camera.
+            const LuaValue& who = e[3];
+            ThnCameraCut c;
+            c.time = static_cast<float>(e[1].num());
+            c.camera = who.is_table() && who.size() >= 2 ? who[2].str() : target_of(who);
+            if (!c.camera.empty()) out.cuts.push_back(std::move(c));
+            continue;
+        }
+        if (kind == "START_SPATIAL_PROP_ANIM") {
+            const LuaValue& p = e[4];
+            const LuaValue& sp = p["spatialprops"];
+            ThnMove m;
+            m.time = static_cast<float>(e[1].num());
+            m.duration = static_cast<float>(p["duration"].num());
+            m.target = target_of(e[3]);
+            if (sp["pos"].size() >= 3) {
+                m.has_pos = true;
+                m.pos = vec3(sp["pos"]);
+            }
+            if (const LuaValue& q = sp["q_orient"]; q.size() >= 4) {
+                m.has_orient = true;
+                for (int k = 0; k < 4; ++k) m.q[k] = static_cast<float>(q[k + 1].num());
+            }
+            if (!m.target.empty() && (m.has_pos || m.has_orient)) out.moves.push_back(std::move(m));
+            continue;
+        }
+        if (kind == "START_CAMERA_PROP_ANIM") {
+            const LuaValue& p = e[4];
+            ThnCameraProp c;
+            c.time = static_cast<float>(e[1].num());
+            c.duration = static_cast<float>(p["duration"].num());
+            c.target = target_of(e[3]);
+            c.fovh = static_cast<float>(p["cameraprops"]["fovh"].num());
+            if (!c.target.empty()) out.camera_props.push_back(std::move(c));
+            continue;
+        }
+        if (kind != "START_MOTION") continue;
         const LuaValue& who = e[3];
         const LuaValue& p = e[4];
         ThnMotion m;
