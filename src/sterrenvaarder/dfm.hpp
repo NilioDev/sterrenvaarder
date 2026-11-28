@@ -34,6 +34,12 @@ struct DfmBone {
     std::string name;        // part name without "Part_" (e.g. "L Palm"); empty for bones without a part
     std::string node;        // its .3db node
     int index = 0;           // its position among the .3db nodes: the id the skin chains use
+    struct Hardpoint {
+        std::string name;
+        Vec3 pos;
+        Mat3 orient = kIdentity3;
+    };
+    std::vector<Hardpoint> hardpoints;  // Hardpoints/Fixed of its node, in the bone's space
     std::array<float, 12> to_root{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};  // "Bone to root" as stored (it maps root space into the bone)
 };
 

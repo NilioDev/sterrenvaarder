@@ -3,6 +3,7 @@
 // Skinning for deformable models: where each bone is (from the joints and an animation),
 // and the points of a mesh moved along with their bones.
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "sterrenvaarder/anm.hpp"
@@ -29,5 +30,15 @@ std::vector<Xform> pose_bones(const DfmModel& model, const AnmScript* anim = nul
 
 // The points of a mesh moved by their bones: sum of weight * (pose * bind^-1) * point.
 std::vector<Vec3> skin_points(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose);
+// A hardpoint of a posed model (by name, any case), in model space; false if no bone has it.
+bool find_hardpoint(const DfmModel& model, const std::vector<Xform>& pose, std::string_view name, Xform& out);
+
+// Where to put a part (a head, a hand) so that its hardpoint `name` sits on the body's
+// hardpoint of the same name: body_place * body_hp * part_hp^-1. False if either lacks it.
+bool attach_part(const DfmModel& body, const std::vector<Xform>& body_pose, const DfmModel& part,
+                 const std::vector<Xform>& part_pose, std::string_view name, Xform& out);
+
+// The normals of a mesh turned the same way (unit length).
+std::vector<Vec3> skin_normals(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose);
 
 }  // namespace sterrenvaarder::game

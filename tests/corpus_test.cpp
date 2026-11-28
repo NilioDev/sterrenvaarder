@@ -10,6 +10,7 @@
 #include "sterrenvaarder/mission.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
+#include "sterrenvaarder/mbases.hpp"
 #include "game/skin.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
@@ -186,6 +187,31 @@ int main(int argc, char** argv) {
         }
         std::printf("costumes: %zu, parts %zu, %zu part references, %zu name a missing part, %zu a missing mesh\n",
                     cp.costume_count(), cp.part_count(), refs, missing_part, missing_mesh);
+        // Base characters: the parts each one wears should exist too.
+        if (vfs.exists("missions/mbases.ini")) {
+            auto bases = parse_mbases(parse_ini(vfs.read("missions/mbases.ini")));
+            std::size_t npcs = 0, rooms = 0, fixtures = 0, npc_refs = 0, npc_missing = 0, fixture_unknown = 0;
+            for (auto& b : bases) {
+                rooms += b.rooms.size();
+                for (auto& r : b.rooms)
+                    for (auto& f : r.fixtures) {
+                        ++fixtures;
+                        if (!b.npc(f.npc)) ++fixture_unknown;
+                    }
+                for (auto& n : b.npcs) {
+                    ++npcs;
+                    std::vector<const std::string*> wear{&n.body, &n.head, &n.left_hand, &n.right_hand};
+                    for (auto& a : n.accessories) wear.push_back(&a);
+                    for (auto* w : wear) {
+                        if (w->empty()) continue;
+                        ++npc_refs;
+                        if (!cp.part(*w)) ++npc_missing;
+                    }
+                }
+            }
+            std::printf("base characters: %zu bases, %zu rooms, %zu fixed (%zu unknown), %zu characters wearing %zu parts, %zu missing\n",
+                        bases.size(), rooms, fixtures, fixture_unknown, npcs, npc_refs, npc_missing);
+        }
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {

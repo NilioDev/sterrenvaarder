@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 
+#include "game/skin.hpp"
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/sphere.hpp"
@@ -87,12 +88,22 @@ struct GpuPart {
     std::vector<DrawRange> wires;  // line lists (VMeshWire), drawn only in the HUD pass
 };
 
+// A character mesh posed each frame: its own vertex buffer, refilled from the skin.
+struct GpuSkin {
+    DfmModel dfm;
+    std::vector<Vertex> verts;               // bind pose, one per corner
+    std::vector<std::uint32_t> corner_point;  // the mesh point of each vertex
+    SDL_GPUTransferBuffer* tb = nullptr;
+    bool dirty = false;
+};
+
 struct GpuModel {
     SDL_GPUBuffer* vb = nullptr;
     SDL_GPUBuffer* ib = nullptr;
     std::vector<GpuPart> parts;
     std::vector<GpuMaterial> materials;
     std::uint32_t triangles = 0;
+    std::unique_ptr<GpuSkin> skin;  // character meshes loaded for posing
 };
 
 struct SceneObject {
@@ -261,6 +272,8 @@ struct Renderer::Impl {
         for (auto* b : buffers) SDL_ReleaseGPUBuffer(d, b);
         if (hud_vb) SDL_ReleaseGPUBuffer(d, hud_vb);
         if (hud_tb) SDL_ReleaseGPUTransferBuffer(d, hud_tb);
+        for (auto& [k, m] : models)
+            if (m->skin && m->skin->tb) SDL_ReleaseGPUTransferBuffer(d, m->skin->tb);
         for (auto* t : owned_textures) SDL_ReleaseGPUTexture(d, t);
         if (font_tex) SDL_ReleaseGPUTexture(d, font_tex);
     }
@@ -535,8 +548,10 @@ struct Renderer::Impl {
         return lib;
     }
 
-    GpuModel* load_model(const std::string& path, const std::vector<std::string>& libs, bool background) {
-        std::string key = to_lower(path) + (background ? "#bg" : "");
+    // A character instance (`instance` not empty) gets a model of its own that can be posed.
+    GpuModel* load_model(const std::string& path, const std::vector<std::string>& libs, bool background,
+                         const std::string& instance = {}) {
+        std::string key = to_lower(path) + (background ? "#bg" : "") + (instance.empty() ? "" : "#skin:" + instance);
         if (auto it = models.find(key); it != models.end()) return it->second.get();
         auto file = vfs.load_with_fallback(path, [](std::vector<std::uint8_t> b) { return UtfFile::parse(std::move(b)); });
         auto gm = std::make_unique<GpuModel>();
@@ -554,9 +569,10 @@ struct Renderer::Impl {
         if (SphereModel::is_sphere(*file)) {
             build_sphere(*gm, SphereModel::load(*file), lib, verts, indices, background);
         } else if (DfmModel::is_dfm(file->root())) {
-            // Character mesh, in its bind pose for now (the skin follows with animation).
+            // Character mesh, in its bind pose until posed (pose_character).
             DfmModel dfm = DfmModel::load(file->root());
             const DfmMesh& mesh = dfm.levels.front();
+            if (!instance.empty()) gm->skin = std::make_unique<GpuSkin>();
             GpuPart gp;
             GpuLod gl;
             gl.range_end = 1e9f;
@@ -585,6 +601,7 @@ struct Renderer::Impl {
                     }
                     vx.color = 0xFFFFFFFFu;
                     verts.push_back(vx);
+                    if (gm->skin) gm->skin->corner_point.push_back(mesh.point_index[c]);
                 }
                 for (auto i : mesh.triangles(g)) indices.push_back(static_cast<std::uint16_t>(i));
                 dr.index_count = static_cast<std::uint32_t>(indices.size()) - dr.first_index;
@@ -594,6 +611,7 @@ struct Renderer::Impl {
             }
             gp.lods.push_back(std::move(gl));
             gm->parts.push_back(std::move(gp));
+            if (gm->skin) gm->skin->dfm = std::move(dfm);
         } else {
             Model model = Model::load(file);
             MeshLibrary meshes;
@@ -699,6 +717,12 @@ struct Renderer::Impl {
         gm->ib = gpu.buffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(), static_cast<std::uint32_t>(indices.size() * 2));
         buffers.push_back(gm->vb);
         buffers.push_back(gm->ib);
+        if (gm->skin) {
+            gm->skin->verts = verts;  // after tangents: posing keeps uv and tangent space of the bind pose
+            SDL_GPUTransferBufferCreateInfo ti{SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                               static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), 0};
+            gm->skin->tb = SDL_CreateGPUTransferBuffer(gpu.device(), &ti);
+        }
         auto* raw = gm.get();
         models[key] = std::move(gm);
         return raw;
@@ -943,6 +967,47 @@ struct Renderer::Impl {
     SDL_GPUTransferBuffer* hud_tb = nullptr;
     std::uint32_t hud_capacity = 0;
 
+    void pose_character(GpuModel* m, const AnmScript* anim, float time) {
+        if (!m || !m->skin || !m->skin->tb || m->skin->dfm.levels.empty()) return;
+        auto& sk = *m->skin;
+        const DfmMesh& mesh = sk.dfm.levels.front();
+        auto pose = game::pose_bones(sk.dfm, anim, time);
+        auto pts = game::skin_points(sk.dfm, mesh, pose);
+        auto nrm = game::skin_normals(sk.dfm, mesh, pose);
+        auto* map = static_cast<Vertex*>(SDL_MapGPUTransferBuffer(gpu.device(), sk.tb, true));
+        if (!map) return;
+        for (std::size_t v = 0; v < sk.verts.size(); ++v) {
+            Vertex vx = sk.verts[v];
+            std::uint32_t p = v < sk.corner_point.size() ? sk.corner_point[v] : 0;
+            if (p < pts.size()) {
+                vx.pos[0] = pts[p].x * sk.dfm.scale;
+                vx.pos[1] = pts[p].y * sk.dfm.scale;
+                vx.pos[2] = pts[p].z * sk.dfm.scale;
+            }
+            if (p < nrm.size()) {
+                vx.normal[0] = nrm[p].x;
+                vx.normal[1] = nrm[p].y;
+                vx.normal[2] = nrm[p].z;
+            }
+            map[v] = vx;
+        }
+        SDL_UnmapGPUTransferBuffer(gpu.device(), sk.tb);
+        sk.dirty = true;
+    }
+
+    void upload_skins(SDL_GPUCommandBuffer* cmd) {
+        SDL_GPUCopyPass* cp = nullptr;
+        for (auto& [k, m] : models) {
+            if (!m->skin || !m->skin->dirty) continue;
+            if (!cp) cp = SDL_BeginGPUCopyPass(cmd);
+            SDL_GPUTransferBufferLocation src{m->skin->tb, 0};
+            SDL_GPUBufferRegion dst{m->vb, 0, static_cast<std::uint32_t>(m->skin->verts.size() * sizeof(Vertex))};
+            SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+            m->skin->dirty = false;
+        }
+        if (cp) SDL_EndGPUCopyPass(cp);
+    }
+
     std::uint32_t upload_hud(SDL_GPUCommandBuffer* cmd, const HudBatch* hud) {
         if (!hud || hud->vertices().empty()) return 0;
         auto* d = gpu.device();
@@ -1066,6 +1131,7 @@ struct Renderer::Impl {
         ensure_targets(w, h, out_w, out_h, s.msaa);
         stats = {};
         std::uint32_t hud_verts = upload_hud(cmd, hud);
+        upload_skins(cmd);
 
         const float aspect = static_cast<float>(out_w) / static_cast<float>(out_h);
         Mat4 proj = Mat4::perspective_reverse_z(cam.fov_y, aspect, std::max(0.01f, cam.near_plane));
@@ -1483,6 +1549,15 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::ui
 
 Renderer::ModelHandle Renderer::load_model(const std::string& path, const std::vector<std::string>& libs) {
     return ModelHandle{impl_->load_model(path, libs, false)};
+}
+
+Renderer::ModelHandle Renderer::load_character(const std::string& path, const std::vector<std::string>& libs,
+                                               const std::string& instance) {
+    return ModelHandle{impl_->load_model(path, libs, false, instance.empty() ? std::string("0") : instance)};
+}
+
+void Renderer::pose_character(ModelHandle m, const AnmScript* anim, float time) {
+    impl_->pose_character(static_cast<GpuModel*>(m.p), anim, time);
 }
 
 void Renderer::add_mesh_library(const std::string& path) {
