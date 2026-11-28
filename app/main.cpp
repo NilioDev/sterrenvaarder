@@ -2991,7 +2991,11 @@ struct FlightSession {
                 for (auto& n : npcs)
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
-                m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f, comm_voice(a.arg(0))});
+                // SendComm = source, target, line; EtherComm = voice, name id, target, line, ...
+                bool ether = !iequals(a.name, "SendComm");
+                if (ether && strings && a.num(1) > 0)
+                    if (auto n = strings->name(static_cast<std::uint32_t>(a.num(1)), ""); !n.empty()) who = n;
+                m.comms.push_back({who, a.arg(ether ? 3 : 2), 4.f, comm_voice(a.arg(0))});
             } else if (iequals(a.name, "Invulnerable")) {
                 // Invulnerable = ship, on [, ..., fraction]: hits stop at that share of its hull
                 // (without a share: just short of destroyed). Our reading of the values.
