@@ -1381,6 +1381,26 @@ static void test_population() {
     CHECK(game::Population(pz, archs, factions, classes, [&](std::string_view) { return &one; }).update(0.1f, game::DVec3{90000, 0, 0}).empty());
 }
 
+// A trigger bound to "ANY" system runs wherever the player is.
+static void test_mission_any_system() {
+    using namespace sterrenvaarder;
+    using namespace sterrenvaarder::game;
+    MissionScript m = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_any\nsystem = ANY\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = a\n"
+        "[Trigger]\nnickname = t_other\nsystem = Sys9\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = b\n"));
+    struct World : MissionWorld {
+        std::string system() const override { return "Sys1"; }
+        bool in_space() const override { return true; }
+        std::string base() const override { return {}; }
+        std::optional<DVec3> position(std::string_view) const override { return std::nullopt; }
+        float health(std::string_view) const override { return 1; }
+    } w;
+    MissionRunner r(m);
+    r.start();
+    r.update(0.1f, w, [](const MsnCommand&, const MsnTrigger&) {});
+    CHECK(r.fired("t_any") && !r.fired("t_other"));
+}
+
 static void test_mission() {
     using namespace sterrenvaarder;
     using namespace sterrenvaarder::game;
@@ -1534,6 +1554,7 @@ static void test_postfx() {
 
 int main() {
     test_mission();
+    test_mission_any_system();
     test_new_player_file();
     test_vibes();
     test_population();

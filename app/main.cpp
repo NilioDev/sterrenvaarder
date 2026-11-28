@@ -1766,6 +1766,41 @@ struct FlightSession {
                             autoplay_doing = "flies to " + n.name;
                             return;
                         }
+        // The mission waits for the player to come close to a ship (DistShip = inside, Player,
+        // ship, range) that is near: fly up to it.
+        if (mission && mission->runner)
+            for (auto& c : mission->runner->waiting_on("DistShip")) {
+                if (!iequals(c.arg(0), "inside")) continue;
+                std::string other = iequals(c.arg(1), "Player") ? c.arg(2) : iequals(c.arg(2), "Player") ? c.arg(1) : std::string();
+                if (other.empty()) continue;
+                for (auto& n : npcs) {
+                    if (!n.body.alive() || n.mission_name.empty() || !iequals(n.mission_name, other)) continue;
+                    DVec3 to = n.ship.pos - ship.pos;
+                    double d = to.length();
+                    if (d > 5000 || d < c.num(3) * 0.6) continue;
+                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                    input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                    input.throttle = d > 400 ? 1.f : 0.4f;
+                    input.cruise = d > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                    autoplay_doing = "flies up to " + n.name;
+                    return;
+                }
+            }
+        // ... or to a spot close by (DistVec = inside, Player, x, y, z, range), as a ship the
+        // player is meant to follow would lead them.
+        if (mission && mission->runner)
+            for (auto& c : mission->runner->waiting_on("DistVec")) {
+                if (!iequals(c.arg(0), "inside") || !iequals(c.arg(1), "Player")) continue;
+                DVec3 to = DVec3{c.num(2), c.num(3), c.num(4)} - ship.pos;
+                double d = to.length();
+                if (d > 8000) continue;
+                Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                input.throttle = 1.f;
+                input.cruise = d > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                autoplay_doing = "flies to the meeting point";
+                return;
+            }
         auto m = nav_map(sys);
         if (!m.has_waypoint) {
             input.throttle = 0;
@@ -1786,6 +1821,24 @@ struct FlightSession {
         if (dist < 400) {
             input.throttle = 0;
             input.cruise = false;
+            // At the objective, and the mission waits for the player on a base close by
+            // (BaseEnter, LocEnter = room, base): land there, as a player would.
+            bool space_work = false;  // the mission still waits for something out here
+            if (mission && mission->runner)
+                for (const char* k : {"DistShip", "DistVec", "DistVecLbL", "DistCircle", "TLEntered", "InTradelane", "PlayerManeuver", "JumpInComplete"})
+                    space_work = space_work || mission->runner->waiting_for(k);
+            if (mission && mission->runner && !space_work && !mission->maneuver_off.count("dock"))
+                for (const char* cnd : {"BaseEnter", "LocEnter"})
+                    for (auto& c : mission->runner->waiting_on(cnd))
+                        for (auto& o : sys.objects)
+                            if (!o.base.empty() && (iequals(o.base, c.arg(0)) || iequals(o.base, c.arg(1))) &&
+                                (DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() < 3000) {
+                                contacts.push_back({o.nickname, {}, 0, true});
+                                target = static_cast<int>(contacts.size() - 1);
+                                dock_request(sys);
+                                autoplay_doing = "lands at " + o.nickname;
+                                return;
+                            }
             autoplay_doing = "waits at the objective";
             return;
         }
@@ -1863,6 +1916,16 @@ struct FlightSession {
                 // TLEntered = ship, ring entered, the ring after it
                 if (lane && mission && mission->runner)
                     mission->runner->event({game::MissionEvent::Type::TLEntered, "Player", lane->ring_names()[0], lane->ring_names()[1]});
+                // Ships following the player close by take the lane with them.
+                if (lane)
+                    for (auto& f : npcs) {
+                        if (!f.body.alive() || f.lane || f.order_step >= f.orders.size() || (f.ship.pos - ship.pos).length() > 3000) continue;
+                        auto& step = f.orders[f.order_step];
+                        if (!iequals(step.name, "FollowPlayer") && !(iequals(step.name, "Follow") && iequals(step.arg(0), "Player"))) continue;
+                        f.lane = lane;
+                        if (mission && mission->runner && !f.mission_name.empty())
+                            mission->runner->event({game::MissionEvent::Type::TLEntered, f.mission_name, lane->ring_names()[0], lane->ring_names()[1]});
+                    }
             } else if (o->is_jump()) {
                 pending_jump_system = o->goto_system;
                 pending_jump_object = o->goto_object;
@@ -2784,7 +2847,14 @@ struct FlightSession {
     }
 
     // ---- story missions
-    bool offer_open() const { return mission && mission->runner && mission->runner->waiting_for("MsnResponse"); }
+    // An offer is open while the mission waits for it to be accepted (a trigger left waiting
+    // on a refusal after the player said yes does not keep it open).
+    bool offer_open() const {
+        if (!mission || !mission->runner) return false;
+        for (auto& c : mission->runner->waiting_on("MsnResponse"))
+            if (iequals(c.arg(0), "accept")) return true;
+        return false;
+    }
     // The queued cutscene for the room the player is in, if any.
     const Mission::Rtc* room_rtc() const {
         if (!mission || !docked()) return nullptr;
@@ -2942,9 +3012,14 @@ struct FlightSession {
                     m.objective = ids(1);
                     m.waypoint.reset();
                 } else if (iequals(o.type.arg(0), "navmarker") || iequals(o.type.arg(0), "rep_inst")) {
-                    m.objective = ids(3);
+                    // navmarker = system, name ids, text ids, x, y, z; rep_inst = system, ids, count,
+                    // x, y, z, object: the object (a jump gate, say) can lead to the named system,
+                    // so it is looked for here first.
+                    bool rep = iequals(o.type.arg(0), "rep_inst");
+                    m.objective = ids(rep ? 2 : 3);
                     Mission::Waypoint wp{o.type.arg(1), o.type.args.size() > 7 ? o.type.arg(7) : std::string(), ids(2),
                                          DVec3{o.type.num(4), o.type.num(5), o.type.num(6)}};
+                    if (rep && !wp.object.empty() && rend && game::find_object(rend->system(), wp.object)) wp.system = rend->system().nickname;
                     m.waypoint = wp;
                 }
             }
@@ -4117,8 +4192,19 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
         SDL_Log("jump to %s failed: %s", sys.c_str(), e.what());
         return;
     }
+    // Mission ships following the player (an escort, a wingman) jump with them; the rest of
+    // the system's ships stay behind.
+    auto follows_player = [&](const NpcShip& n) {
+        if (n.order_step >= n.orders.size()) return false;
+        const auto& o = n.orders[n.order_step];
+        return iequals(o.name, "FollowPlayer") || (iequals(o.name, "Follow") && iequals(o.arg(0), "Player"));
+    };
+    std::vector<NpcShip> escort;
+    for (auto& n : fs.npcs)
+        if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && follows_player(n) && (n.ship.pos - fs.ship.pos).length() < 10000)
+            escort.push_back(std::move(n));
     fs.npcs.clear();
-    fs.next_body_id = 1;
+    if (escort.empty()) fs.next_body_id = 1;
     fs.wrecks.clear();
     if (auto* o = game::find_object(renderer.system(), obj)) {
         auto sp = game::exit_point(*o, 600.f);
@@ -4127,6 +4213,17 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
         fs.ship.vel = game::to_d(sp.orient.forward()) * 60.0;
         fs.cam_orient = sp.orient;
     }
+    for (std::size_t i = 0; i < escort.size(); ++i) {
+        auto& n = escort[i];
+        float side = (i % 2 ? -1.f : 1.f) * 50.f * static_cast<float>(i / 2 + 1);
+        n.ship.pos = fs.ship.pos + game::to_d(fs.ship.orient.rotate({side, 0, 120.f + 60.f * static_cast<float>(i)}));
+        n.ship.orient = fs.ship.orient;
+        n.ship.vel = fs.ship.vel;
+        n.body.pos = n.ship.pos;
+        n.lane.reset();
+        fs.npcs.push_back(std::move(n));
+    }
+    if (!escort.empty()) SDL_Log("%zu mission ships jump along", escort.size());
     fs.target = -1;
     fs.update_contacts(renderer.system());
     fs.update_camera(cam, 1.0);
@@ -4615,6 +4712,7 @@ int run(const Args& args) {
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
                 SDL_Log("  scene %s, popup %s, autoplay: %s", fs->space_scene ? "on" : "off", fs->popup_open() ? "open" : "none", fs->autoplay_doing.c_str());
+                SDL_Log("  room scene %d, pending %s, offer %d, talk %zu, room %s", fs->room.scene ? 1 : 0, fs->room.pending_scene.c_str(), fs->offer_open() ? 1 : 0, fs->talk_partners().size(), fs->mission_room().c_str());
                 if (fs->mission) SDL_Log("  %zu radio calls queued%s%s", fs->mission->comms.size(), fs->mission->comms.empty() ? "" : ", first ", fs->mission->comms.empty() ? "" : fs->mission->comms.front().line.c_str());
                 if (fs->mission) {
                     auto& m = *fs->mission;
