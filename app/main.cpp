@@ -773,6 +773,11 @@ struct FlightSession {
         std::optional<game::MissionRunner> runner;
         std::string objective;  // current objective text
         struct Comm { std::string speaker, line; float left; std::string voice; bool started = false; };
+        // Nags (NagDistLeaving / NagDistTowards = name, speaker, line, x, y, z, text ids, distance):
+        // while the player is farther than the distance from the point, the speaker reminds them
+        // with the line and the text, every kNagInterval seconds, until NagOff. Our reading.
+        struct Nag { std::string name, speaker, line; DVec3 pos; std::uint32_t ids = 0; double dist = 0; float wait = 0; };
+        std::vector<Nag> nags;
         std::vector<Comm> comms;  // radio calls: one plays at a time
         std::string result;       // shown when the mission ends
         std::vector<std::string> unhandled;  // action names logged once
@@ -2571,6 +2576,8 @@ struct FlightSession {
         }
     }
 
+    static constexpr float kNagInterval = 20.f;  // seconds between reminders (our estimate)
+    int nags_given = 0;                           // reported by screenshot runs
     void update_mission(float dt) {
         if (!mission || !mission->runner) return;
         auto& m = *mission;
@@ -2585,6 +2592,26 @@ struct FlightSession {
                 m.runner->event({game::MissionEvent::Type::CommComplete, m.comms.front().line, "", ""});
                 m.comms.erase(m.comms.begin());
             }
+        }
+        // Nags: reminders while the player stays too far from where they should be.
+        for (auto& n : m.nags) {
+            if (docked() || (ship.pos - n.pos).length() <= n.dist) {
+                n.wait = kNagInterval;
+                continue;
+            }
+            n.wait -= dt;
+            if (n.wait > 0) continue;
+            n.wait = kNagInterval;
+            std::string who = n.speaker;
+            for (auto& x : npcs)
+                if (iequals(x.mission_name, who)) who = x.name;
+            if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
+            m.comms.push_back({who, n.line, 4.f, comm_voice(n.speaker)});
+            if (strings && n.ids) {
+                notice = strings->name(n.ids, "");
+                notice_time = notice.empty() ? 0.f : 5.f;
+            }
+            ++nags_given;
         }
         // Report what changed since the last frame: docking, launching, rooms, systems.
         {
@@ -2678,6 +2705,15 @@ struct FlightSession {
             } else if (iequals(a.name, "SetRep")) {
                 // SetRep = player, faction, value (-1..1).
                 if (iequals(a.arg(0), "Player") && a.args.size() > 2) player.rep[to_lower(a.arg(1))] = std::clamp(a.num(2), -1.f, 1.f);
+            } else if (iequals(a.name, "NagDistLeaving") || iequals(a.name, "NagDistTowards")) {
+                if (a.args.size() >= 8) {
+                    Mission::Nag n{a.arg(0), a.arg(1), a.arg(2), DVec3{a.num(3), a.num(4), a.num(5)},
+                                   static_cast<std::uint32_t>(a.num(6)), a.num(7), kNagInterval};
+                    std::erase_if(m.nags, [&](const Mission::Nag& x) { return iequals(x.name, n.name); });
+                    m.nags.push_back(std::move(n));
+                }
+            } else if (iequals(a.name, "NagOff")) {
+                std::erase_if(m.nags, [&](const Mission::Nag& x) { return iequals(x.name, a.arg(0)); });
             } else if (iequals(a.name, "PobjIdle")) {
                 // PobjIdle = ship: drops its orders; it waits where it is.
                 for_mission_ships(a.arg(0), [&](NpcShip& n) {
@@ -3514,7 +3550,7 @@ int run(const Args& args) {
                     for (auto& [k, v] : names) list += k + " x" + std::to_string(v) + ", ";
                     if (live || gone) SDL_Log("traffic: %d ships around, %d gone: %s", live, gone, list.c_str());
                 }
-                if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines, %d ship hums started, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->npc_hums_started, fs->ship_sound.rumble ? "on" : "off");
+                if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines (%d nags), %d ship hums started, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->nags_given, fs->npc_hums_started, fs->ship_sound.rumble ? "on" : "off");
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
