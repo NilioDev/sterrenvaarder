@@ -157,6 +157,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             m.lifetime = num(sec, "lifetime", m.lifetime);
             m.const_effect = str(sec, "const_effect");
             m.hit_effect = str(sec, "munition_hit_effect");
+            m.fire_sound = str(sec, "one_shot_sound");
             munitions_[to_lower(m.nickname)] = std::move(m);
             return;
         }
@@ -168,6 +169,8 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             sh.regeneration_rate = num(sec, "regeneration_rate", 0);
             sh.offline_rebuild_time = num(sec, "offline_rebuild_time", 0);
             sh.offline_threshold = num(sec, "offline_threshold", 0);
+            sh.collapse_sound = str(sec, "shield_collapse_sound");
+            sh.rebuilt_sound = str(sec, "shield_rebuilt_sound");
             sh.shield_type = str(sec, "shield_type");
             for (auto* e : sec.find_all("shield_hit_effects"))
                 if (e->values.size() >= 2) sh.hit_effects.emplace_back(e->values[0].as_float(), e->values[1].as_string());
@@ -187,6 +190,12 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         e.flame_effect = str(sec, "flame_effect");
         e.trail_effect = str(sec, "trail_effect");
         e.trail_effect_player = str(sec, "trail_effect_player");
+        e.rumble_sound = str(sec, "rumble_sound");
+        e.character_loop_sound = str(sec, "character_loop_sound");
+        e.cruise_start_sound = str(sec, "cruise_start_sound");
+        e.cruise_loop_sound = str(sec, "cruise_loop_sound");
+        e.cruise_stop_sound = str(sec, "cruise_stop_sound");
+        e.cruise_disrupt_sound = str(sec, "cruise_disrupt_sound");
         engines_[to_lower(e.nickname)] = std::move(e);
     });
     each_section(vfs, files.loadouts, [&](const IniSection& sec) {

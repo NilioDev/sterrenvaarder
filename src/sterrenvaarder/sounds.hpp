@@ -14,7 +14,11 @@ struct SoundDef {
     std::string nickname, file, type;
     float attenuation = 0;  // dB, 0 = full volume (values are negative)
     bool streamer = false;
+    float range_min = 0, range_max = 0;  // range = min, max: distances in metres (0: heard everywhere)
     float gain() const;     // attenuation as a linear factor
+    // How loud it is at `distance` (0..1, before gain()): full up to range_min, then falling
+    // as range_min / distance and tapering to silence at range_max. The curve is our estimate.
+    float gain_at(float distance) const;
 };
 
 class SoundDb {

@@ -1047,6 +1047,13 @@ static void test_sound_db() {
     CHECK(a->streamer && a->type == "music" && std::abs(a->gain() - 0.501f) < 0.01f && db.find("tune_b")->gain() == 1);
     auto m = parse_system_music(parse_text_ini("[SystemInfo]\nname = x\n[Music]\nspace = tune_a\ndanger = tune_b\nbattle = tune_c\n"));
     CHECK(m.space == "tune_a" && m.danger == "tune_b" && m.battle == "tune_c");
+    // Distance: full up to the near range, half at twice that (before the taper), silent at the far range.
+    db.add(parse_text_ini("[Sound]\nnickname = zap\nfile = z.wav\nrange = 100, 1100\n"));
+    const SoundDef* z = db.find("zap");
+    CHECK(z && z->range_min == 100 && z->range_max == 1100);
+    CHECK(z->gain_at(50) == 1 && z->gain_at(1100) == 0 && z->gain_at(5000) == 0);
+    CHECK(std::abs(z->gain_at(200) - 0.5f * 0.9f) < 1e-4f);
+    CHECK(a->gain_at(1e6f) == 1);  // no range: heard everywhere
 }
 
 static void test_population() {

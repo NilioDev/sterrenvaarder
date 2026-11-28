@@ -50,6 +50,9 @@ struct EngineArchetype {
     float cruise_charge_time = 5;
     std::string flame_effect, trail_effect;  // visual effects at the ship's engine hardpoints
     std::string trail_effect_player;         // the trail as the player sees it on their own ship
+    // Sound nicknames: the engine's hum, and cruise starting, running and stopping.
+    std::string rumble_sound, character_loop_sound, cruise_start_sound, cruise_loop_sound, cruise_stop_sound,
+        cruise_disrupt_sound;
 };
 
 struct MunitionArchetype {
@@ -58,6 +61,7 @@ struct MunitionArchetype {
     float lifetime = 1;
     std::string const_effect;  // the bolt's own effect
     std::string hit_effect;    // munition_hit_effect
+    std::string fire_sound;    // one_shot_sound: played as the gun fires it
 };
 
 struct GunArchetype {
@@ -81,6 +85,7 @@ struct ShieldArchetype {
     std::string shield_type;  // S_Graviton01 etc., for WeaponModDB
     // shield_hit_effects = damage, effect: the strongest entry at or below a hit's damage plays.
     std::vector<std::pair<float, std::string>> hit_effects;
+    std::string collapse_sound, rebuilt_sound;  // shield_collapse_sound, shield_rebuilt_sound
     const std::string& hit_effect(float damage) const;
 };
 
