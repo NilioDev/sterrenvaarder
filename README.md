@@ -177,6 +177,9 @@ script and lists the conditions the runner doesn't evaluate yet.
 `--mission M01a` runs a story mission in flight:
 - Without `--system`, the mission begins where its script does: the system its starting triggers are bound to, docked at the base (and in the room) they wait for. That can be aboard a ship the mission puts into space, such as a battleship with its own base. The original carries the player over from the mission before.
 - Bases on mission objects (`[MsnSolar] base =`) can be targeted and docked at like stations.
+- After a mission succeeds, the next story mission starts (M01a, M01b, M02 ... M13). The player carries over and is only moved when the next mission begins in another system. Mission objects stay in their own system, so a battleship a mission leaves behind is still there for the next one.
+- When a room cutscene ends, the script hears `RTCDone`. A cutscene with `relocate_player = room, base` moves the player there, if need be to another system.
+- `--win T` makes the running mission succeed at T seconds, to test the hand-over.
 - Mission ships spawn with the ship, loadout and pilot from their `[NPCShipArch]`. Whether they are hostile follows your reputation with their faction.
 - Radio calls and dialogs play one after another, spoken in the speaker's voice.
 - Objectives (`SetNNObj`) show their text from your game's own resources, and the outcome is shown when the mission ends.

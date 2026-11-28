@@ -34,6 +34,7 @@ struct MissionEvent {
         LocExit,        // a = room, b = base
         MsnResponse,    // a = accept / reject
         ProjHit,        // a = ship hit, b = shooter
+        RTCDone,        // a = the cutscene's file (as AddRTC named it)
     } type;
     std::string a, b, c;
 };
@@ -118,6 +119,9 @@ struct MissionStart {
     std::vector<Place> places;
 };
 MissionStart mission_start(const MissionScript& script);
+
+// True when two data paths name the same file (\\ or /, doubled or not, any case).
+bool same_data_path(std::string_view a, std::string_view b);
 
 // The story missions in the order they are played.
 const std::vector<std::string>& story_missions();

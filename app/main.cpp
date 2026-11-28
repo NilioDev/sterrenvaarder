@@ -98,6 +98,7 @@ struct Args {
     bool cruise = false;    // screenshot runs: hold cruise (it charges first)
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
     std::string mission;    // --mission M01a: run that story mission's script
+    double win = -1;        // --win T: the mission succeeds at T seconds (tests the story flow)
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     bool no_traffic = false;  // no random traffic
@@ -172,6 +173,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--npc-pilot") a.npc_pilot = next();
         else if (k == "--mission") a.mission = next();
         else if (k == "--answer") a.answer = next();
+        else if (k == "--win") a.win = std::stod(next());
         else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--no-traffic") a.no_traffic = true;
         else if (k == "--no-characters") a.no_characters = true;
@@ -799,8 +801,16 @@ struct FlightSession {
         bool was_docked = false;
         std::string last_room, last_system, last_base;
         bool seen = false;
+        int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
+        float next_in = -1;     // after success: seconds until the next story mission
     };
+    // Handled by the main loop: the next story mission to start, and a base (and room)
+    // to move the player to, in another system if need be.
+    std::string pending_next_mission;
+    struct Relocation { std::string base, room, solar; };
+    std::optional<Relocation> pending_relocation;
     std::unique_ptr<Mission> mission;
+    static constexpr float kNextMissionDelay = 6.f;  // the result stays on screen this long
     // Random traffic from the system's population zones.
     struct Traffic {
         bool loaded = false;
@@ -823,13 +833,17 @@ struct FlightSession {
         DVec3 pos;
         Quat orient;
         SystemObject obj;  // to target and dock at it like a station (its base, if any)
+        std::string system;  // empty: wherever the player is
     };
+    bool solar_here(const MissionSolar& m) const {
+        return m.system.empty() || !rend || iequals(m.system, rend->system().nickname);
+    }
     std::vector<MissionSolar> msn_solars;
     // A system object, or a solar the mission has put into space.
     const SystemObject* object_named(const StarSystem& sys, std::string_view n) const {
         if (auto* o = game::find_object(sys, n)) return o;
         for (auto& m : msn_solars)
-            if (iequals(m.obj.nickname, n)) return &m.obj;
+            if (solar_here(m) && iequals(m.obj.nickname, n)) return &m.obj;
         return nullptr;
     }
     const ShipDatabase* db = nullptr;
@@ -1375,7 +1389,7 @@ struct FlightSession {
                 if (iequals(o.dock_with, base)) { best = &o; break; }
         if (!best)
             for (auto& m : msn_solars)
-                if (iequals(m.obj.base, base)) { best = &m.obj; break; }
+                if (solar_here(m) && iequals(m.obj.base, base)) { best = &m.obj; break; }
         if (!best) return false;
         auto sp = game::exit_point(*best, approach_distance(*best) + 100.f);
         ship.pos = sp.pos;
@@ -2291,6 +2305,8 @@ struct FlightSession {
             Mission::Rtc rtc{a.arg(0), {}, iequals(a.arg(1), "repeatable")};
             std::string path = to_lower(a.arg(0));
             std::replace(path.begin(), path.end(), '\\', '/');
+            path.erase(std::unique(path.begin(), path.end(), [](char x, char y) { return x == '/' && y == '/'; }), path.end());
+            if (!path.empty() && path[0] == '/') path.erase(0, 1);
             try {
                 if (vfs && vfs->exists(path)) rtc.def = parse_rtc(parse_ini(vfs->read(path)));
             } catch (const std::exception& e) {
@@ -2421,6 +2437,48 @@ struct FlightSession {
         m.runner->ship_spawned(def->nickname);
     }
 
+    // The [MsnSolar] (of this or an earlier mission) that carries a base, if any.
+    std::string solar_with_base(const Mission& m, std::string_view base) const {
+        for (auto& s : msn_solars)
+            if (iequals(s.obj.base, base)) return s.nickname;
+        for (auto& d : m.script.solars)
+            if (iequals(d.base, base)) return d.nickname;
+        return {};
+    }
+
+    // Where a mission begins (see game::mission_start): a base with a station in the
+    // system, or aboard an object the mission puts into space; else the system's first base.
+    std::optional<Relocation> mission_place(const Mission& m) const {
+        if (!universe || !econ) return std::nullopt;
+        auto where = game::mission_start(m.script);
+        auto station = [&](const std::string& sys, const std::string& base) {
+            auto ss = universe->load_system(sys);
+            return ss && std::any_of(ss->objects.begin(), ss->objects.end(),
+                                     [&](const SystemObject& o) { return iequals(o.base, base); });
+        };
+        for (auto& pl : where.places) {
+            auto* eb = econ->base(pl.base);
+            if (!eb || (!where.system.empty() && !iequals(eb->system, where.system))) continue;
+            std::string solar;
+            for (auto& d : m.script.solars)
+                if (iequals(d.base, pl.base) && (d.system.empty() || iequals(d.system, eb->system))) solar = d.nickname;
+            for (auto& ms : msn_solars)  // one an earlier mission left in space
+                if (solar.empty() && iequals(ms.obj.base, pl.base) && (ms.system.empty() || iequals(ms.system, eb->system)))
+                    solar = ms.nickname;
+            if (solar.empty() && !station(eb->system, eb->nickname)) continue;
+            return Relocation{eb->nickname, pl.room, solar};
+        }
+        if (!where.system.empty())
+            if (auto ss = universe->load_system(where.system))
+                for (auto& o : ss->objects)
+                    if (!o.base.empty() && econ->base(o.base)) return Relocation{o.base, "", ""};
+        return std::nullopt;
+    }
+    std::string base_system(std::string_view base) const {
+        auto* b = econ ? econ->base(base) : nullptr;
+        return b ? b->system : std::string();
+    }
+
     // SpawnSolar: puts a [MsnSolar] into space (once; it stays until the mission ends).
     void spawn_solar(const Mission& m, std::string_view nickname) {
         for (auto& s : msn_solars)
@@ -2443,6 +2501,7 @@ struct FlightSession {
                 ms.obj.ids_name = d.string_id;
                 ms.obj.pos = {d.position[0], d.position[1], d.position[2]};
                 ms.obj.rotate_deg = game::euler_degrees(ms.orient);
+                ms.system = d.system;
                 msn_solars.push_back(std::move(ms));
             }
     }
@@ -2453,7 +2512,7 @@ struct FlightSession {
         for (auto& n : npcs)
             if (n.body.alive() && (iequals(n.mission_name, o) || iequals(n.name, o))) return n.ship.pos;
         for (auto& m : msn_solars)
-            if (iequals(m.nickname, o)) return m.pos;
+            if (solar_here(m) && iequals(m.nickname, o)) return m.pos;
         if (rend)
             if (auto* so = game::find_object(rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
         return std::nullopt;
@@ -2638,6 +2697,21 @@ struct FlightSession {
     void update_mission(float dt) {
         if (!mission || !mission->runner) return;
         auto& m = *mission;
+        // A cutscene that has ended: report it, and move the player where it says.
+        if (m.playing_rtc >= 0 && !room.scene && room.pending_scene.empty()) {
+            auto& r = m.rtcs[static_cast<std::size_t>(m.playing_rtc)];
+            m.playing_rtc = -1;
+            m.runner->event({game::MissionEvent::Type::RTCDone, r.path, "", ""});
+            if (!r.def.relocate_player.empty()) {
+                if (r.def.relocate_base.empty() || iequals(r.def.relocate_base, player.base)) {
+                    base_room = r.def.relocate_player;
+                    at_dealer = false;
+                } else {
+                    pending_relocation = Relocation{r.def.relocate_base, r.def.relocate_player, solar_with_base(m, r.def.relocate_base)};
+                }
+            }
+        }
+        if (m.next_in > 0 && (m.next_in -= dt) <= 0) pending_next_mission = game::next_story_mission(m.name);
         // Radio calls play one after another; each reports when it is done.
         if (!m.comms.empty()) {
             if (!m.comms.front().started) {
@@ -2699,12 +2773,16 @@ struct FlightSession {
             m.last_room = room;
             m.last_system = sys;
             // Cutscenes queued for this room play on entry: the room's view plays the scene.
-            for (auto& r : m.rtcs)
-                if (!r.played && docked() && iequals(r.def.base, player.base) && iequals(r.def.room, room) && !r.def.is_offer()) {
+            for (std::size_t i = 0; i < m.rtcs.size(); ++i) {
+                auto& r = m.rtcs[i];
+                if (!r.played && m.playing_rtc < 0 && docked() && iequals(r.def.base, player.base) && iequals(r.def.room, room) &&
+                    !r.def.is_offer()) {
                     SDL_Log("mission: cutscene in %s", room.c_str());
                     this->room.pending_scene = r.def.action;
                     r.played = true;
+                    m.playing_rtc = static_cast<int>(i);
                 }
+            }
             if (docked()) m.last_base = player.base;
         }
         MissionView view(*this, rend ? rend->system().nickname : std::string());
@@ -2842,6 +2920,7 @@ struct FlightSession {
                 if (strings && a.num(1) > 0)
                     if (auto t = strings->string(static_cast<std::uint32_t>(a.num(1)))) m.result += ": " + *t;
                 SDL_Log("mission: %s", m.result.c_str());
+                if (won && !game::next_story_mission(m.name).empty()) m.next_in = kNextMissionDelay;
             } else if (std::find(m.unhandled.begin(), m.unhandled.end(), a.name) == m.unhandled.end()) {
                 m.unhandled.push_back(a.name);
             }
@@ -2852,7 +2931,7 @@ struct FlightSession {
         for (auto& w : wrecks)
             if (w.age < w.life) r.draw_model_part(w.mesh, w.part, w.pos, w.orient.matrix(), *w.lod_ranges);
         for (auto& m : msn_solars)
-            if (m.mesh) r.draw_model(m.mesh, m.pos, m.orient.matrix(), m.arch->lod_ranges);
+            if (m.mesh && solar_here(m)) r.draw_model(m.mesh, m.pos, m.orient.matrix(), m.arch->lod_ranges);
         for (auto& n : npcs)
             if (n.body.alive() && n.mesh && !n.cloaked)
                 r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
@@ -2947,6 +3026,7 @@ struct FlightSession {
             contacts.push_back(std::move(c));
         }
         for (auto& m : msn_solars) {
+            if (!solar_here(m)) continue;
             game::HudContact c;
             c.name = m.nickname;
             c.label = m.name;
@@ -3240,6 +3320,48 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
     SDL_Log("jumped to %s (%s)", sys.c_str(), obj.c_str());
 }
 
+// Story flow the session asked for: start the next mission after a success, and move
+// the player to a base (in another system if need be) when a cutscene or a mission says so.
+void handle_story(FlightSession& fs, Renderer& renderer, Camera& cam) {
+    if (!fs.pending_next_mission.empty()) {
+        std::string next = fs.pending_next_mission;
+        fs.pending_next_mission.clear();
+        if (fs.vfs && fs.start_mission(*fs.vfs, next)) {
+            // The player carries over; only a mission that begins in another system moves them.
+            auto where = game::mission_start(fs.mission->script);
+            if (!where.system.empty() && !iequals(where.system, renderer.system().nickname))
+                if (auto pl = fs.mission_place(*fs.mission)) fs.pending_relocation = pl;
+        }
+    }
+    if (!fs.pending_relocation) return;
+    auto r = *fs.pending_relocation;
+    fs.pending_relocation.reset();
+    std::string sys = fs.base_system(r.base);
+    if (sys.empty()) return;
+    if (!iequals(sys, renderer.system().nickname)) {
+        try {
+            renderer.load_system(sys);
+        } catch (const std::exception& e) {
+            SDL_Log("move to %s failed: %s", sys.c_str(), e.what());
+            return;
+        }
+        fs.npcs.clear();
+        fs.next_body_id = 1;
+        fs.wrecks.clear();
+    }
+    if (!r.solar.empty() && fs.mission) fs.spawn_solar(*fs.mission, r.solar);
+    if (!fs.dock_at_base(renderer.system(), r.base)) {
+        SDL_Log("cannot move the player to %s", r.base.c_str());
+        return;
+    }
+    fs.player.system = sys;
+    if (!r.room.empty()) fs.base_room = r.room;
+    fs.target = -1;
+    fs.update_contacts(renderer.system());
+    fs.update_camera(cam, 1.0);
+    SDL_Log("moved to %s in %s%s%s", r.base.c_str(), sys.c_str(), r.room.empty() ? "" : ", ", r.room.c_str());
+}
+
 void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, Uint32 w, Uint32 h,
                   const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, const game::HudConfig& hud_cfg,
                   float cursor_x, float cursor_y, HudBatch& hud) {
@@ -3439,37 +3561,13 @@ int run(const Args& args) {
                 // --mission on its own: begin where the mission does (the original carries
                 // the player over from the mission before).
                 if (fs->mission && !args.system_given) {
-                    auto where = game::mission_start(fs->mission->script);
-                    // A base with a station in this system, or one aboard a ship the
-                    // mission puts into space ([MsnSolar] base); else the system's first base.
-                    auto station = [&](const std::string& sys, const std::string& base) {
-                        auto ss = universe.load_system(sys);
-                        return ss && std::any_of(ss->objects.begin(), ss->objects.end(),
-                                                 [&](const SystemObject& o) { return iequals(o.base, base); });
-                    };
-                    auto& script = fs->mission->script;
-                    for (auto& pl : where.places) {
-                        auto* eb = econ->base(pl.base);
-                        if (!eb || (!where.system.empty() && !iequals(eb->system, where.system))) continue;
-                        auto solar = std::find_if(script.solars.begin(), script.solars.end(), [&](const MsnSolarDef& d) {
-                            return iequals(d.base, pl.base) && (d.system.empty() || iequals(d.system, eb->system));
-                        });
-                        if (solar == script.solars.end() && !station(eb->system, eb->nickname)) continue;
-                        msn_base = eb->nickname;
-                        msn_room = pl.room;
-                        if (solar != script.solars.end()) msn_solar = solar->nickname;
-                        p.system = eb->system;
-                        break;
+                    if (auto pl = fs->mission_place(*fs->mission)) {
+                        msn_base = pl->base;
+                        msn_room = pl->room;
+                        msn_solar = pl->solar;
+                        p.system = fs->base_system(pl->base);
                     }
-                    if (msn_base.empty() && !where.system.empty())
-                        if (auto ss = universe.load_system(where.system))
-                            for (auto& o : ss->objects)
-                                if (!o.base.empty() && econ->base(o.base)) {
-                                    msn_base = o.base;
-                                    p.system = where.system;
-                                    break;
-                                }
-                    // Aboard a mission ship: put it into space first, then dock there.
+                    // Aboard a mission object: put it into space first, then dock there.
                     p.base = msn_solar.empty() && !msn_base.empty() ? msn_base : msn_solar.empty() ? p.base : "";
                     SDL_Log("mission %s starts in %s%s%s%s%s", fs->mission->name.c_str(), p.system.c_str(),
                             msn_base.empty() ? "" : " at ", msn_base.c_str(), msn_room.empty() ? "" : ", ", msn_room.c_str());
@@ -3586,6 +3684,11 @@ int run(const Args& args) {
                     bool nav_owns = fs->update_nav(renderer.system(), 1.0 / 60);
                     if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
                     handle_jump(*fs, renderer, cam);
+                    handle_story(*fs, renderer, cam);
+                    if (args.win >= 0 && t < args.win && t + 1.0 / 60 >= args.win && fs->mission) {
+                        SDL_Log("--win: %s succeeds", fs->mission->name.c_str());
+                        fs->mission->next_in = 0.01f;
+                    }
                     fs->update_camera(cam, 1.0 / 60);
                     fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
                     if (args.npc_die >= 0 && t < args.npc_die && t + 1.0 / 60 >= args.npc_die)
@@ -3749,6 +3852,7 @@ int run(const Args& args) {
                     bool nav_owns = fs->update_nav(renderer.system(), dt);
                     if (!nav_owns) fs->model.update(fs->ship, in, dt);
                     handle_jump(*fs, renderer, cam);
+                    handle_story(*fs, renderer, cam);
                     fs->update_camera(cam, dt);
                     fs->firing = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
                     fs->aim_dir = aim_through(cam, mx, my, static_cast<float>(ww), static_cast<float>(wh));

@@ -181,7 +181,10 @@ MsnRtc parse_rtc(const IniFile& ini) {
                 else if (iequals(e.key, "mission_text_id")) r.mission_text_id = e.at(0) ? e.at(0)->as_int() : 0;
                 else if (iequals(e.key, "nooffer_text_id")) r.nooffer_text_id = e.at(0) ? e.at(0)->as_int() : 0;
                 else if (iequals(e.key, "autoplay")) r.autoplay = true;
-                else if (iequals(e.key, "relocate_player")) r.relocate_player = v(0);
+                else if (iequals(e.key, "relocate_player")) {
+                    r.relocate_player = v(0);
+                    r.relocate_base = v(1);
+                }
             }
         } else if (iequals(sec.name, "Reserve")) {
             for (auto* e : sec.find_all("spot"))

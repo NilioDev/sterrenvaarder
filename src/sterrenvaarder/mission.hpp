@@ -125,6 +125,7 @@ struct MsnRtc {
     int mission_text_id = 0, nooffer_text_id = 0;
     bool autoplay = false;
     std::string relocate_player;  // room the player is moved to
+    std::string relocate_base;    // and its base (empty: this one)
     struct Char { std::string npc, actor, fidget; };
     std::vector<Char> chars;
     std::vector<std::string> spots;  // reserved standing spots
