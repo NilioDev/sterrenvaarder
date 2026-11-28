@@ -7,6 +7,8 @@
 #include <string>
 
 #include "sterrenvaarder/ini.hpp"
+#include "sterrenvaarder/mission.hpp"
+#include "game/mission.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/texture.hpp"
 #include "sterrenvaarder/ale.hpp"
@@ -30,6 +32,8 @@ int main(int argc, char** argv) {
         ++fail[kind];
         if (shown++ < 25) std::printf("FAIL [%s] %s: %s\n", kind.c_str(), path.c_str(), msg.c_str());
     };
+    std::size_t msn_triggers = 0, msn_dangling = 0;
+    std::map<std::string, int> msn_unknown;  // conditions the runner doesn't evaluate yet
     for (auto& path : vfs.list()) {
         auto data = vfs.read(path);
         std::string kind;
@@ -46,7 +50,25 @@ int main(int argc, char** argv) {
                             throw FormatError("effect " + e.name + " names a missing node");
             } else if (is_bini(data) || path.ends_with(".ini")) {
                 kind = is_bini(data) ? "bini" : "text-ini";
-                parse_ini(data);
+                auto ini = parse_ini(data);
+                bool story = false;
+                for (auto& sec : ini) story = story || iequals(sec.name, "Mission");
+                if (story && path.starts_with("missions/")) {
+                    // Story script: every trigger an action or watch names must exist.
+                    kind = "mission";
+                    auto m = parse_mission(ini);
+                    msn_triggers += m.triggers.size();
+                    for (auto& t : m.triggers) {
+                        for (auto& c : t.conditions) {
+                            if (!game::MissionRunner::knows_condition(c.name)) ++msn_unknown[c.name];
+                            if (iequals(c.name, "WatchTrigger") && !m.trigger(c.arg(0)))
+                                throw FormatError("trigger " + t.nickname + " watches a missing trigger");
+                        }
+                        for (auto& a : t.actions)
+                            if ((iequals(a.name, "ActTrig") || iequals(a.name, "DeactTrig")) && !m.trigger(a.arg(0)))
+                                ++msn_dangling;
+                    }
+                }
             } else if (UtfFile::is_utf(data)) {
                 kind = "utf";
                 auto f = UtfFile::parse(std::move(data));
@@ -110,5 +132,7 @@ int main(int argc, char** argv) {
     for (auto& [k, n] : fail) total_fail += n;
     std::printf("models %zu, parts %zu, meshes %zu, triangles (all LODs) %zu, textures decoded %zu\n", models, parts,
                 meshes, triangles, textures);
+    std::printf("mission triggers %zu, actions naming a missing trigger %zu\n", msn_triggers, msn_dangling);
+    for (auto& [n, c] : msn_unknown) std::printf("  condition not evaluated yet: %s (%d)\n", n.c_str(), c);
     return total_fail ? 1 : 0;
 }

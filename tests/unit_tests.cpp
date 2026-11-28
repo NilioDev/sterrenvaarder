@@ -27,6 +27,7 @@ static int failures = 0;
 #include "game/flight.hpp"
 #include "game/navigation.hpp"
 #include "game/particles.hpp"
+#include "game/mission.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -699,6 +700,90 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_mission() {
+    using namespace sterrenvaarder;
+    using namespace sterrenvaarder::game;
+    // A small self-written script: start, a timed call, an escort that must survive and
+    // two raiders (one label) whose loss wins the mission.
+    const char* text =
+        "[Mission]\nmission_title = 10\nreward = 500\n"
+        "[MsnShip]\nnickname = raider1\nlabel = raiders\nsystem = Sys1\n"
+        "[MsnShip]\nnickname = raider2\nlabel = raiders\nsystem = Sys1\n"
+        "[Trigger]\nnickname = t_start\nInitState = ACTIVE\nCnd_True = no_params\nAct_ActTrig = t_wait\nAct_ActTrig = t_escort_dies\n"
+        "[Trigger]\nnickname = t_wait\nsystem = Sys1\nCnd_Timer = 2\nAct_SendComm = a, Player, LINE_1\nAct_ActTrig = t_after_comm\n"
+        "[Trigger]\nnickname = t_after_comm\nCnd_CommComplete = LINE_1\nAct_SpawnShip = raider1\nAct_SpawnShip = raider2\nAct_ActTrig = t_near\n"
+        "[Trigger]\nnickname = t_near\nCnd_DistVec = inside, Player, 0, 0, -1000, 300\nAct_ActTrig = t_raiders_dead\n"
+        "[Trigger]\nnickname = t_raiders_dead\nCnd_Destroyed = raiders, -1\nAct_ChangeState = SUCCEED, 77\n"
+        "[Trigger]\nnickname = t_escort_dies\nCnd_Destroyed = escort, 1, EXPLODE\nAct_ChangeState = FAIL, 66\n"
+        "[Trigger]\nnickname = t_watch\nInitState = ACTIVE\nrepeatable = true\nCnd_WatchTrigger = t_wait, OFF\nAct_Ping = x\n";
+    MissionScript m = parse_mission(parse_text_ini(text));
+    CHECK(m.title_ids == 10 && m.reward == 500 && m.triggers.size() == 7 && m.ships.size() == 2);
+    CHECK(m.trigger("t_wait") && m.trigger("t_wait")->conditions[0].name == "Timer" && m.trigger("t_start")->initially_active);
+
+    struct World : MissionWorld {
+        std::string sys = "Sys1";
+        DVec3 player{0, 0, 0};
+        std::string system() const override { return sys; }
+        bool in_space() const override { return true; }
+        std::string base() const override { return {}; }
+        std::optional<DVec3> position(std::string_view o) const override {
+            if (iequals(o, "Player")) return player;
+            return std::nullopt;
+        }
+        float health(std::string_view) const override { return 1; }
+    } w;
+    MissionRunner r(m);
+    std::vector<std::string> acts;
+    auto act = [&](const MsnCommand& c, const MsnTrigger&) {
+        acts.push_back(c.name + ":" + c.arg(0));
+        if (c.name == "SpawnShip") r.ship_spawned(c.arg(0));
+    };
+    r.start();
+    r.update(0.1f, w, act);  // t_start fires
+    CHECK(r.fired("t_start") && r.active("t_wait") && !r.active("t_start"));
+    int pings = 0;
+    for (auto& a : acts) pings += a == "Ping:x";
+    CHECK(pings == 1);  // t_wait was not on yet when this frame's checks were made
+    r.update(0.1f, w, act);
+    pings = 0;
+    for (auto& a : acts) pings += a == "Ping:x";
+    CHECK(pings == 1);  // now t_wait is on: the watch waits
+    for (int i = 0; i < 25; ++i) r.update(0.1f, w, act);
+    CHECK(r.fired("t_wait") && r.active("t_after_comm"));
+    CHECK(std::find(acts.begin(), acts.end(), "SendComm:a") != acts.end());
+    std::size_t before = acts.size();
+    r.update(0.1f, w, act);
+    CHECK(r.fired("t_after_comm") == false);  // the comm hasn't finished
+    r.event({MissionEvent::Type::CommComplete, "LINE_1", "", ""});
+    r.update(0.1f, w, act);
+    CHECK(r.fired("t_after_comm") && acts.size() > before);
+    r.update(0.1f, w, act);
+    CHECK(!r.fired("t_near"));  // too far away
+    w.player = {0, 0, -900};
+    r.update(0.1f, w, act);
+    CHECK(r.fired("t_near") && r.active("t_raiders_dead"));
+    r.event({MissionEvent::Type::Destroyed, "raider1", "", ""});
+    r.update(0.1f, w, act);
+    CHECK(r.outcome() == MissionRunner::Outcome::Running);  // one of two
+    r.event({MissionEvent::Type::Destroyed, "raider2", "", ""});
+    r.update(0.1f, w, act);
+    CHECK(r.outcome() == MissionRunner::Outcome::Succeeded && r.outcome_ids() == 77);
+    pings = 0;
+    for (auto& a : acts) pings += a == "Ping:x";
+    CHECK(pings > 1);  // repeatable: fires on every check once t_wait is off
+
+    // Wrong system: a system-bound trigger waits.
+    MissionRunner r2(m);
+    r2.start();
+    w.sys = "Sys2";
+    r2.update(0.1f, w, {});
+    for (int i = 0; i < 30; ++i) r2.update(0.1f, w, {});
+    CHECK(r2.active("t_wait") && !r2.fired("t_wait"));
+    r2.event({MissionEvent::Type::Destroyed, "escort", "", ""});
+    r2.update(0.1f, w, {});
+    CHECK(r2.outcome() == MissionRunner::Outcome::Failed && r2.outcome_ids() == 66);
+}
+
 static void test_fonts() {
     using namespace sterrenvaarder;
     auto styles = parse_fonts_ini(parse_text_ini("[TrueType]\nnickname = HudSmall\nfont = Agency FB\nfixed_height = 0.03\n"));
@@ -730,6 +815,7 @@ static void test_postfx() {
 }
 
 int main() {
+    test_mission();
     test_fonts();
     test_postfx();
     test_thn();

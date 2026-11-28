@@ -32,6 +32,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/effects.cpp
   src/sterrenvaarder/postfx.cpp
   src/sterrenvaarder/fonts.cpp
+  src/sterrenvaarder/mission.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )
@@ -39,7 +40,7 @@ target_include_directories(sterrenvaarder_data PUBLIC src)
 target_include_directories(sterrenvaarder_data PRIVATE third_party)
 
 # Game logic without graphics (flight model); unit-tested headless.
-add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp src/game/trade.cpp src/game/ai.cpp src/game/particles.cpp)
+add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp src/game/trade.cpp src/game/ai.cpp src/game/particles.cpp src/game/mission.cpp)
 target_include_directories(sterrenvaarder_game PUBLIC src)
 target_link_libraries(sterrenvaarder_game PUBLIC sterrenvaarder_data)
 
@@ -56,7 +57,7 @@ target_link_libraries(sterrenvaarder_tests PRIVATE sterrenvaarder_game)
 add_test(NAME unit COMMAND sterrenvaarder_tests)
 
 add_executable(sterrenvaarder_corpus tests/corpus_test.cpp)
-target_link_libraries(sterrenvaarder_corpus PRIVATE sterrenvaarder_data)
+target_link_libraries(sterrenvaarder_corpus PRIVATE sterrenvaarder_game)
 
 # ---------------------------------------------------------------- client (renderer + viewer)
 option(SV_BUILD_CLIENT "Build the renderer and viewer (fetches SDL3)" ON)
