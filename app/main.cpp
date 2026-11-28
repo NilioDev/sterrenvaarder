@@ -50,6 +50,7 @@
 #include "sterrenvaarder/thn.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
+#include "game/mixer.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/dfm.hpp"
@@ -95,6 +96,7 @@ struct Args {
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     bool no_traffic = false;  // no random traffic
     bool no_characters = false;  // rooms without their characters
+    bool no_sound = false;        // no audio device
     bool show_map = false;    // open the navigation map
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
@@ -167,6 +169,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--no-traffic") a.no_traffic = true;
         else if (k == "--no-characters") a.no_characters = true;
+        else if (k == "--no-sound") a.no_sound = true;
         else if (k == "--map") a.show_map = true;
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
@@ -821,6 +824,7 @@ struct FlightSession {
     game::PlayerState player;
     RoomView room;
     CharacterData chars;
+    game::Mixer* mixer = nullptr;  // sound output (music, voices, effects)
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
     const ShipDatabase* shipdb = nullptr;
@@ -2789,6 +2793,23 @@ int run(const Args& args) {
     const bool offscreen = !args.screenshot.empty();
     if (offscreen) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO)) throw std::runtime_error(SDL_GetError());
+    // Sound: one stereo 16-bit stream that pulls from the mixer. Screenshot runs stay silent.
+    game::Mixer mixer(44100);
+    SDL_AudioStream* audio = nullptr;
+    if (!offscreen && !args.no_sound && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        SDL_AudioSpec spec{SDL_AUDIO_S16, 2, mixer.rate()};
+        audio = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,
+            [](void* user, SDL_AudioStream* stream, int additional, int) {
+                auto* mx = static_cast<game::Mixer*>(user);
+                std::vector<std::int16_t> buf(static_cast<std::size_t>(additional) / sizeof(std::int16_t));
+                mx->mix(buf.data(), buf.size() / 2);
+                SDL_PutAudioStreamData(stream, buf.data(), static_cast<int>(buf.size() * sizeof(std::int16_t)));
+            },
+            &mixer);
+        if (audio) SDL_ResumeAudioStreamDevice(audio);
+        else SDL_Log("sound: %s", SDL_GetError());
+    }
 
     SDL_Window* window = nullptr;
     if (!offscreen) {
@@ -2828,6 +2849,7 @@ int run(const Args& args) {
             fs->pilots = &pilots;
             fs->traffic_on = !args.no_traffic;
             fs->characters_on = !args.no_characters;
+            fs->mixer = &mixer;
             fs->show_map = args.show_map;
             auto fx_files = files.effects;
             fx_files.insert(fx_files.end(), files.explosions.begin(), files.explosions.end());
@@ -3164,6 +3186,7 @@ int run(const Args& args) {
         }
     }
     if (window) SDL_DestroyWindow(window);
+    if (audio) SDL_DestroyAudioStream(audio);
     SDL_Quit();
     return rc;
 }
