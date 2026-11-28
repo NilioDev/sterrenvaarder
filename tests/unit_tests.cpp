@@ -565,7 +565,8 @@ static void test_thn() {
                                                    "[Room]\nnickname = Gone\nfile = universe\\missing.ini\n";
     std::ofstream(root / "universe/deck.ini") << "[Room_Info]\nset_script = s\\deck.thn\nscene = all, ambient, s\\amb.thn\n"
                                                  "[Camera]\nname = Camera_0\n[Hotspot]\nname = IDS_HOTSPOT_BAR\nbehavior = ExitDoor\nroom_switch = Bar\n"
-                                                 "[ForSaleShipPlacement]\nname = X/Pad/01\n[ForSaleShipPlacement]\nname = X/Pad/02\n";
+                                                 "[ForSaleShipPlacement]\nname = X/Pad/01\n[ForSaleShipPlacement]\nname = X/Pad/02\n"
+                                                 "[Room_Sound]\nmusic = tune_a\nambient = hum_a\n";
     Vfs vfs;
     vfs.mount(root, "base");
     auto file = base_file_of(vfs, "x_base");
@@ -575,6 +576,7 @@ static void test_thn() {
     CHECK(deck && deck->camera == "Camera_0" && deck->scenes.size() == 1 && deck->hotspots.size() == 1 &&
           deck->hotspots[0].room_switch == "Bar");
     CHECK(deck && deck->ship_placements.size() == 2 && deck->ship_placements[1] == "X/Pad/02");
+    CHECK(deck && deck->music == "tune_a" && deck->ambient == "hum_a");
     fs::remove_all(root);
 }
 
@@ -864,8 +866,16 @@ static void test_thn_player() {
     zoom.fovh = 30;
     s.camera_props.push_back(zoom);
 
+    s.sounds.push_back({0, 0, 0, "Hum", true});
+    s.sounds.push_back({1.25f, 0, 0, "Click", false});
+
     game::ThnPlayer p(s);
     CHECK(p.duration() == 3);
+    // Sounds start once each: the one at 0 on the first look, the other when its time passes.
+    CHECK(p.sounds_between(-1, 0).size() == 1 && p.sounds_between(-1, 0)[0] == 0);
+    CHECK(p.sounds_between(0, 1).empty());
+    CHECK(p.sounds_between(1, 1.25f).size() == 1 && p.sounds_between(1, 1.25f)[0] == 1);
+    CHECK(p.sounds_between(1.25f, 3).empty());
     p.seek(0.5f);
     CHECK(p.camera() == "CamA");
     CHECK(std::abs(p.state("BOX")->pos.x - 2.5f) < 1e-4f);

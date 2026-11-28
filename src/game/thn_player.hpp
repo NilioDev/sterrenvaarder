@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "sterrenvaarder/thn.hpp"
 
@@ -25,6 +26,9 @@ public:
     const std::string& camera() const { return camera_; }  // empty until the first SET_CAMERA
     float duration() const { return duration_; }
     bool done(float time) const { return time >= duration_; }
+    // The START_SOUND events (indices into script.sounds) that start after `from` and at or
+    // before `to`. Pass a negative `from` on the first call so sounds at 0 are included.
+    std::vector<std::size_t> sounds_between(float from, float to) const;
 
     // The view through the active camera: false before the first cut or for an unknown camera.
     struct View {

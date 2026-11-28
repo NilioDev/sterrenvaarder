@@ -47,6 +47,8 @@ int main(int argc, char** argv) {
     std::size_t msn_triggers = 0, msn_dangling = 0;
     std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
     std::vector<std::string> scene_costumes, scene_anims;  // what scene characters wear and play
+    std::vector<std::string> scene_sounds;                 // SOUND entity sound names
+    std::size_t thn_sound_events = 0, thn_bad_sound_events = 0;
     double wav_seconds = 0;
     std::size_t thn_paths = 0, thn_short_paths = 0, thn_rides = 0, thn_bad_rides = 0;
     std::size_t thn_views = 0, thn_moves = 0, thn_cuts = 0, thn_bad_cuts = 0, thn_bad_moves = 0;
@@ -110,6 +112,12 @@ int main(int argc, char** argv) {
                 for (auto& m : scene.moves) thn_bad_moves += !scene.entity(m.target);
                 for (auto& e : scene.entities)
                     if (e.type == "DEFORMABLE") scene_costumes.push_back(e.template_name);
+                    else if (e.type == "SOUND") scene_sounds.push_back(e.template_name);
+                for (auto& so : scene.sounds) {
+                    ++thn_sound_events;
+                    auto* e = scene.entity(so.target);
+                    thn_bad_sound_events += !e || e->type != "SOUND";
+                }
                 for (auto& m : scene.motions) scene_anims.push_back(m.animation);
                 for (auto& [n, pth] : scene.paths) {
                     ++thn_paths;
@@ -323,7 +331,8 @@ int main(int argc, char** argv) {
     // Base rooms: [Room_Sound] music and ambience should name sounds with a file (counts only).
     if (vfs.exists("universe/universe.ini") && vfs.exists("audio/music.ini")) {
         SoundDb sounds;
-        for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini"})
+        for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini", "audio/sounds.ini",
+                              "audio/story_sounds.ini", "audio/engine_sounds.ini", "audio/interface_sounds.ini"})
             if (vfs.exists(f)) sounds.add(parse_ini(vfs.read(f)));
         std::size_t rooms = 0, with_music = 0, with_ambient = 0, unresolved = 0;
         for (auto& sec : parse_ini(vfs.read("universe/universe.ini"))) {
@@ -349,6 +358,10 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        std::size_t scene_found = 0;
+        for (auto& n : scene_sounds) scene_found += sounds.find(n) != nullptr;
+        std::printf("scene sound: %zu of %zu sound entities in the sound lists, %zu sound events (%zu on no sound entity)\n",
+                    scene_found, scene_sounds.size(), thn_sound_events, thn_bad_sound_events);
         std::printf("room sound: %zu rooms, %zu with music, %zu with ambience (%zu unresolved)\n", rooms, with_music, with_ambient,
                     unresolved);
     }

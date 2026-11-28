@@ -35,6 +35,9 @@ struct ThnEntity {
     Vec3 atten{1, 0, 0}, direction{0, 0, 1};
     // SCENE
     Color3 ambient;  // 0..1
+    // SOUND (template_name is the sound's nickname)
+    float attenuation = 0;           // dB
+    float dmin = 0, dmax = 0, pan = 0;  // distances in which it fades; pan -1..1
 
     Vec3 forward() const { return {-orient[6], -orient[7], -orient[8]}; }
     Vec3 up() const { return {orient[3], orient[4], orient[5]}; }
@@ -77,6 +80,13 @@ struct ThnPathAnim {
     Vec3 offset;
 };
 
+// START_SOUND: a SOUND entity plays from `time` on.
+struct ThnSound {
+    float time = 0, duration = 0, start_time = 0;
+    std::string target;  // the SOUND entity
+    bool loop = false;    // flags LOOP
+};
+
 // SET_CAMERA: from `time` on, the scene is seen through `camera`.
 struct ThnCameraCut {
     float time = 0;
@@ -99,6 +109,7 @@ struct ThnScript {
     std::vector<ThnCameraCut> cuts;
     std::vector<ThnCameraProp> camera_props;
     std::vector<ThnPathAnim> path_anims;
+    std::vector<ThnSound> sounds;
     std::unordered_map<std::string, ThnPath> paths;  // lower-case MOTION_PATH entity name
     const ThnEntity* entity(std::string_view name) const;
     static ThnScript parse(Bytes data);  // throws FormatError

@@ -142,6 +142,17 @@ ThnScript ThnScript::parse(Bytes data) {
             if (!c.target.empty()) out.camera_props.push_back(std::move(c));
             continue;
         }
+        if (kind == "START_SOUND") {
+            const LuaValue& p = e[4];
+            ThnSound so;
+            so.time = static_cast<float>(e[1].num());
+            so.target = target_of(e[3]);
+            so.start_time = static_cast<float>(p["start_time"].num());
+            so.duration = static_cast<float>(p["duration"].num());
+            so.loop = p["flags"].str().find("LOOP") != std::string::npos || static_cast<int>(p["flags"].num()) & 2;
+            if (!so.target.empty()) out.sounds.push_back(std::move(so));
+            continue;
+        }
         if (kind != "START_MOTION") continue;
         const LuaValue& who = e[3];
         const LuaValue& p = e[4];
@@ -191,6 +202,13 @@ ThnScript ThnScript::parse(Bytes data) {
             t.range = static_cast<float>(lp["range"].num());
             t.atten = vec3(lp["atten"], {1, 0, 0});
             t.direction = vec3(lp["direction"], {0, 0, 1});
+        }
+        if (t.type == "SOUND") {
+            const LuaValue& a = e["audioprops"];
+            t.attenuation = static_cast<float>(a["attenuation"].num());
+            t.dmin = static_cast<float>(a["dmin"].num());
+            t.dmax = static_cast<float>(a["dmax"].num());
+            t.pan = static_cast<float>(a["pan"].num());
         }
         if (t.type == "SCENE") t.ambient = color(e["ambient"], {}, 1.f / 255.f);
         out.entities.push_back(std::move(t));

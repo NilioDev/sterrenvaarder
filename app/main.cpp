@@ -427,6 +427,10 @@ struct RoomView {
     std::unique_ptr<game::ThnPlayer> scene_player;
     std::vector<std::pair<std::string, Figure>> scene_figures;  // scene entity -> its character
     float scene_time = 0;
+    // Scene sounds that started since the last look (played by the session's mixer).
+    struct SoundCue { std::string sound; float attenuation = 0, duration = 0; bool loop = false; };
+    std::vector<SoundCue> sound_cues;
+    float sound_clock = -1;  // scene time up to which sounds have started
     Camera room_cam;  // the room's own camera, back when the scene ends
     int scenes_played = 0;
     Renderer* renderer_for_scene = nullptr;
@@ -439,6 +443,7 @@ struct RoomView {
             scene = std::make_unique<ThnScript>(ThnScript::parse(vfs.read(path)));
             scene_player = std::make_unique<game::ThnPlayer>(*scene);
             scene_time = 0;
+            sound_clock = -1;
             room_cam = cam;
             scene_figures.clear();
             if (chars && renderer_for_scene) {
@@ -471,6 +476,12 @@ struct RoomView {
             return;
         }
         scene_player->seek(scene_time);
+        for (std::size_t i : scene_player->sounds_between(sound_clock, scene_time)) {
+            const ThnSound& so = scene->sounds[i];
+            if (const ThnEntity* e = scene->entity(so.target); e && !e->template_name.empty())
+                sound_cues.push_back({e->template_name, e->attenuation, so.duration, so.loop});
+        }
+        sound_clock = scene_time;
         // Characters: where the scene has them, playing the motion they last started.
         for (auto& [name, f] : scene_figures) {
             if (auto* st = scene_player->state(name)) {
@@ -837,6 +848,10 @@ struct FlightSession {
         std::map<std::string, std::shared_ptr<Sound>> decoded;  // tracks and ambience of this system, by nickname
         std::string playing;                                     // nickname of the track now on
         game::Mixer::Handle handle = 0;
+        // Sounds of the cutscene now playing; loops end with the scene (or after their duration).
+        struct SceneSound { game::Mixer::Handle handle; float left; bool loop; };
+        std::vector<SceneSound> scene_sounds;
+        const ThnScript* scene = nullptr;
         std::string ambient;                 // nickname of the room ambience now looping
         game::Mixer::Handle ambient_handle = 0;
         game::MusicMood mood = game::MusicMood::Space;
@@ -1643,6 +1658,7 @@ struct FlightSession {
         update_mission(dt);
         update_traffic(dt);
         update_music();
+        update_scene_sound(dt);
     }
 
     // ---- navigation map (M)
@@ -1773,7 +1789,8 @@ struct FlightSession {
         if (!m.loaded) {
             m.loaded = true;
             try {
-                for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini"})
+                for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini", "audio/sounds.ini",
+                                      "audio/story_sounds.ini", "audio/engine_sounds.ini", "audio/interface_sounds.ini"})
                     if (vfs->exists(f)) m.db.add(parse_ini(vfs->read(f)));
             } catch (const std::exception& e) {
                 SDL_Log("music list: %s", e.what());
@@ -1840,7 +1857,44 @@ struct FlightSession {
         mixer->fade(m.handle, d->gain(), 2.f);
         SDL_Log("music: %s track (%.0f s)", what, snd->seconds());
     }
-    // A sound file decoded once and kept (music, ambience).
+    // Cutscene sound: each START_SOUND plays its SOUND entity's sound once (or looping), at
+    // the volume of its list and the entity's attenuation. Sounds are decoded when the scene
+    // starts, so playback does not wait on a decoder.
+    void update_scene_sound(float dt) {
+        if (!mixer || !vfs) return;
+        auto& m = music;
+        const ThnScript* now = room.scene.get();
+        if (now != m.scene) {
+            for (auto& ss : m.scene_sounds)
+                if (ss.loop) mixer->fade(ss.handle, 0, 0.5f, true);
+            m.scene_sounds.clear();
+            m.scene = now;
+            if (now) {
+                int found = 0, entities = 0;
+                for (auto& e : now->entities) {
+                    if (e.type != "SOUND" || e.template_name.empty()) continue;
+                    ++entities;
+                    if (const SoundDef* d = m.db.find(e.template_name); d && sound(*d)) ++found;
+                }
+                SDL_Log("scene sound: %d of %d sounds ready", found, entities);
+            }
+        }
+        for (auto& c : room.sound_cues) {
+            const SoundDef* d = m.db.find(c.sound);
+            auto snd = d ? sound(*d) : nullptr;
+            if (!snd) continue;
+            float gain = d->gain() * std::pow(10.f, c.attenuation / 20.f);
+            m.scene_sounds.push_back({mixer->play(snd, gain, c.loop), c.duration, c.loop});
+        }
+        room.sound_cues.clear();
+        for (auto& ss : m.scene_sounds) {
+            if (!ss.loop || ss.left <= 0) continue;
+            ss.left -= dt;
+            if (ss.left <= 0) mixer->fade(ss.handle, 0, 0.25f, true);
+        }
+        std::erase_if(m.scene_sounds, [this](const Music::SceneSound& ss) { return !mixer->playing(ss.handle); });
+    }
+    // A sound file decoded once and kept (music, ambience, scene sounds).
     std::shared_ptr<Sound> sound(const SoundDef& d) {
         auto& snd = music.decoded[to_lower(d.nickname)];
         if (!snd) {
