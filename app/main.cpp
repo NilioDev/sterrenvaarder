@@ -1387,9 +1387,14 @@ struct FlightSession {
 
     // Puts the ship docked at a base of this system (new games and loaded saves).
     bool dock_at_base(const StarSystem& sys, const std::string& base) {
+        // Planets are left through their dock ring (the planet itself names the base too);
+        // stations through themselves.
         const SystemObject* best = nullptr;
         for (auto& o : sys.objects)
-            if (iequals(o.base, base)) { best = &o; break; }
+            if (iequals(o.dock_with, base) && game::dock_kind(o.archetype) == game::DockKind::Ring) { best = &o; break; }
+        if (!best)
+            for (auto& o : sys.objects)
+                if (iequals(o.base, base)) { best = &o; break; }
         if (!best)
             for (auto& o : sys.objects)
                 if (iequals(o.dock_with, base)) { best = &o; break; }
@@ -1397,7 +1402,7 @@ struct FlightSession {
             for (auto& m : msn_solars)
                 if (solar_here(m) && iequals(m.obj.base, base)) { best = &m.obj; break; }
         if (!best) return false;
-        auto sp = game::exit_point(*best, approach_distance(*best) + 100.f);
+        auto sp = game::launch_point(*best, approach_distance(*best) + 100.f);
         ship.pos = sp.pos;
         ship.orient = sp.orient;
         cam_orient = sp.orient;
@@ -1445,7 +1450,7 @@ struct FlightSession {
             if (auto* o = object_named(sys, nav_target)) {
                 radio_call(radio_voice(sys, *o), game::launch_clear_lines(game::dock_kind(o->archetype)));
                 float d = approach_distance(*o) + 100.f;
-                auto sp = game::exit_point(*o, d);
+                auto sp = game::launch_point(*o, d);
                 ship.pos = sp.pos;
                 ship.orient = sp.orient;
                 ship.vel = game::to_d(sp.orient.forward()) * 40.0;
@@ -1531,6 +1536,7 @@ struct FlightSession {
         Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
         Vec3 local = ship.orient.conjugate().rotate(dir);
         input.steer = {std::clamp(local.y * 3.f, -1.f, 1.f), std::clamp(-local.x * 3.f, -1.f, 1.f), 0};
+        if (local.z > 0.9f) input.steer.y = local.x < 0 ? 1.f : -1.f;  // straight behind: turn round
         input.throttle = 1.f;
         input.cruise = dist > 3000 && -local.z > 0.97f;
         return false;  // the flight model still runs, with these inputs
