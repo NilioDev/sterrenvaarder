@@ -815,6 +815,17 @@ struct FlightSession {
     // rest keep their distance. RpopAttClamp = true counts random traffic in. Our reading.
     int enemy_clamp = -1;
     bool rpop_clamp = false;
+    // CallThorn = scene.thn, object: a cutscene in space. Its camera takes over until it
+    // ends (Enter skips). The scene's "main object" marker is pinned to the object, so
+    // what is attached to it follows; without one the scene is in system coordinates.
+    // Ships in the scene are not drawn yet.
+    struct SpaceScene {
+        std::unique_ptr<ThnScript> script;
+        std::unique_ptr<game::ThnPlayer> player;
+        float time = 0;
+        std::string anchor, marker;
+    };
+    std::optional<SpaceScene> space_scene;
     std::string pending_save;  // Save = name, title ids: an autosave (handled by the main loop)
     static constexpr float kNextMissionDelay = 6.f;  // the result stays on screen this long
     // Random traffic from the system's population zones.
@@ -1651,6 +1662,63 @@ struct FlightSession {
 
     // Our own simple pursuit AI: steer towards where the player will be, fire when the
     // guns line up. Good enough to test combat; proper AI comes with the mission system.
+    void call_thorn(const std::string& file, const std::string& anchor) {
+        if (!vfs || docked()) return;
+        std::string path = to_lower(file);
+        std::replace(path.begin(), path.end(), '\\', '/');
+        path.erase(std::unique(path.begin(), path.end(), [](char x, char y) { return x == '/' && y == '/'; }), path.end());
+        if (!path.empty() && path[0] == '/') path.erase(0, 1);
+        if (!vfs->exists(path)) {
+            SDL_Log("space scene %s not found", path.c_str());
+            return;
+        }
+        try {
+            SpaceScene sc;
+            sc.script = std::make_unique<ThnScript>(ThnScript::parse(vfs->read(path)));
+            sc.player = std::make_unique<game::ThnPlayer>(*sc.script);
+            sc.anchor = anchor;
+            for (auto& e : sc.script->entities)
+                if (iequals(e.type, "MARKER") && to_lower(e.name).find("main_object") != std::string::npos) sc.marker = e.name;
+            SDL_Log("space scene %s: %.1f s, %s", path.c_str(), sc.player->duration(),
+                    sc.marker.empty() ? "in system coordinates" : "around its object");
+            space_scene = std::move(sc);
+        } catch (const std::exception& e) {
+            SDL_Log("space scene %s: %s", path.c_str(), e.what());
+        }
+    }
+    void update_space_scene(float dt) {
+        if (!space_scene) return;
+        space_scene->time += dt;
+        if (docked() || space_scene->player->done(space_scene->time)) space_scene.reset();
+    }
+    // Where and how an object stands: the player, a mission ship, or a still object.
+    std::optional<std::pair<DVec3, Quat>> pose_of(std::string_view o) const {
+        if (iequals(o, "Player")) return std::make_pair(ship.pos, ship.orient);
+        for (auto& n : npcs)
+            if (n.body.alive() && (iequals(n.mission_name, o) || iequals(n.name, o))) return std::make_pair(n.ship.pos, n.ship.orient);
+        if (auto p = where(o)) return std::make_pair(*p, Quat{});
+        return std::nullopt;
+    }
+    // The scene's camera, when one is playing; false otherwise.
+    bool space_scene_view(Camera& cam) {
+        if (!space_scene) return false;
+        auto& sc = *space_scene;
+        if (!sc.marker.empty()) {
+            auto pose = pose_of(sc.anchor);
+            if (!pose) return false;
+            Vec3 r = pose->second.rotate({1, 0, 0}), u = pose->second.rotate({0, 1, 0}), b = pose->second.rotate({0, 0, 1});
+            sc.player->bind(sc.marker, {static_cast<float>(pose->first.x), static_cast<float>(pose->first.y), static_cast<float>(pose->first.z)},
+                            {r.x, r.y, r.z, u.x, u.y, u.z, b.x, b.y, b.z});
+        }
+        sc.player->seek(sc.time);
+        game::ThnPlayer::View v;
+        if (!sc.player->view(v)) return false;
+        cam.pos = {v.pos.x, v.pos.y, v.pos.z};
+        cam.set_basis(v.forward, v.up);
+        cam.fov_y = v.fov_y;
+        return true;
+    }
+
     // Marks the enemies beyond the clamp (farthest first) to keep their distance.
     void clamp_attackers() {
         std::vector<NpcShip*> foes;
@@ -1792,6 +1860,7 @@ struct FlightSession {
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
         update_effects(dt_d);
         update_mission(dt);
+        update_space_scene(dt);
         update_traffic(dt);
         update_music();
         update_scene_sound(dt);
@@ -2898,6 +2967,8 @@ struct FlightSession {
                 });
             } else if (iequals(a.name, "RevertCam")) {
                 // Gives the camera back after a scripted view; the flight camera never leaves.
+            } else if (iequals(a.name, "CallThorn")) {
+                call_thorn(a.arg(0), a.arg(1));
             } else if (iequals(a.name, "PlayerEnemyClamp")) {
                 enemy_clamp = std::max(0, static_cast<int>(a.num(1)));
             } else if (iequals(a.name, "RpopAttClamp")) {
@@ -3122,7 +3193,10 @@ struct FlightSession {
         Vec3 off = cam_orient.rotate({0, arch ? arch->camera_offset.x : 8.f, arch ? arch->camera_offset.y : 34.f});
         cam.pos = ship.pos + game::to_d(off);
         cam.set_basis(cam_orient.forward(), cam_orient.up());
+        if (space_scene_view(cam)) return;
+        if (!docked()) cam.fov_y = flight_fov_y;  // back from a scene's own lens
     }
+    float flight_fov_y = 0.8f;  // the chase camera's, set at start (scenes bring their own)
 
     void draw(Renderer& r) {
         Mat4 rot = ship.orient.matrix() * Mat4::rotate_z(ship.bank);
@@ -3467,7 +3541,8 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             }
         }
         else if (fs->show_map) game::build_nav_map(hud, layout, fs->nav_map(renderer.system()));
-        else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
+        else if (!fs->space_scene)  // a cutscene shows the picture without the flight HUD
+            game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
         if (!base_screen && !fs->show_map && fs->mission) {
             // Mission lines: the current objective, who is on the radio, and the outcome.
             auto& m = *fs->mission;
@@ -3478,7 +3553,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             if (!m.result.empty()) hud.text(cx, static_cast<float>(h) * 0.35f, 26 * s, m.result, {1, 0.85f, 0.4f, 1}, TextAlign::Center);
         }
         renderer.set_hud(&hud);
-        if (!base_screen && !fs->show_map && hud_cfg.style == game::HudStyle::Classic)
+        if (!base_screen && !fs->show_map && !fs->space_scene && hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
                 renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
@@ -3580,6 +3655,7 @@ int run(const Args& args) {
                     }
             if (args.fov > 0) fovx = std::clamp(args.fov, 40.f, 120.f);
             cam.fov_y = 2.f * std::atan(std::tan(fovx * 3.14159265f / 360.f) * 0.75f);
+            fs->flight_fov_y = cam.fov_y;
             fs->universe = &universe;
             fs->spawn(renderer.system(), args);
             set_ship(*fs, *ships, vfs, renderer, args, args.ship, {}, true);
@@ -3839,6 +3915,7 @@ int run(const Args& args) {
                         SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
                     else if (fs && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                         if (e.key.key == SDLK_SPACE) fs->mouse_flight = !fs->mouse_flight;
+                        else if (e.key.key == SDLK_RETURN && fs->space_scene) fs->space_scene.reset();
                         else if (e.key.key == SDLK_T) fs->next_target();
                         else if (e.key.key == SDLK_M && !fs->docked()) fs->show_map = !fs->show_map;
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());

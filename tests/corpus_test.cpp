@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
     std::size_t thn_sound_events = 0, thn_bad_sound_events = 0;
     double wav_seconds = 0;
     std::size_t thn_paths = 0, thn_short_paths = 0, thn_rides = 0, thn_bad_rides = 0;
+    std::size_t thn_onto = 0, thn_onto_match = 0, thn_attach = 0;
     std::size_t thn_views = 0, thn_moves = 0, thn_cuts = 0, thn_bad_cuts = 0, thn_bad_moves = 0;
     std::size_t dfm_posed = 0, dfm_pose_off = 0;  // bones the joints reach, and those that land elsewhere than stored
     float dfm_pose_worst = 0;
@@ -111,7 +112,18 @@ int main(int argc, char** argv) {
                     game::ThnPlayer::View v;
                     thn_views += player.view(v) && std::isfinite(v.fov_y) && v.fov_y > 0;
                 }
-                for (auto& m : scene.moves) thn_bad_moves += !scene.entity(m.target);
+                for (auto& m : scene.moves) {
+                    thn_bad_moves += !scene.entity(m.target);
+                    // A move onto another entity should end in that entity's orientation.
+                    const ThnEntity* to = m.to.empty() ? nullptr : scene.entity(m.to);
+                    if (!to || !m.has_orient) continue;
+                    Mat3 got = game::thn_quat(game::move_quat(m.q));
+                    float err = 0;
+                    for (int k = 0; k < 9; ++k) err += std::fabs(got[k] - to->orient[k]);
+                    ++thn_onto;
+                    thn_onto_match += err < 0.1f;
+                }
+                thn_attach += scene.attachments.size();
                 for (auto& e : scene.entities)
                     if (e.type == "DEFORMABLE") scene_costumes.push_back(e.template_name);
                     else if (e.type == "SOUND") scene_sounds.push_back(e.template_name);
@@ -490,6 +502,12 @@ int main(int argc, char** argv) {
     std::printf("character meshes: %zu triangles, %zu bones, %zu bones without a part\n", dfm_tris, dfm_bones, dfm_bad_bones);
     std::printf("scenes: %zu moves (%zu name no entity), %zu camera cuts (%zu to no camera, %zu give a view)\n", thn_moves,
                 thn_bad_moves, thn_cuts, thn_bad_cuts, thn_views);
+    std::printf("scene moves onto an entity: %zu of %zu end in its orientation; %zu attachments\n", thn_onto_match,
+                thn_onto, thn_attach);
+    if (thn_onto && thn_onto_match * 3 < thn_onto) {
+        std::printf("FAIL: q_orient reading no longer matches the scenes\n");
+        ++total_fail;
+    }
     std::printf("sounds: %.0f minutes in all\n", wav_seconds / 60);
     std::printf("scene paths: %zu (%zu with fewer than 2 points), %zu path animations (%zu on no path)\n", thn_paths,
                 thn_short_paths, thn_rides, thn_bad_rides);

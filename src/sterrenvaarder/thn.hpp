@@ -56,6 +56,7 @@ struct ThnMotion {
 struct ThnMove {
     float time = 0, duration = 0;
     std::string target;
+    std::string to;  // the entity whose place it takes, when the event names one
     bool has_pos = false, has_orient = false;
     Vec3 pos;
     std::array<float, 4> q{1, 0, 0, 0};  // q_orient as stored: w, x, y, z
@@ -78,6 +79,20 @@ struct ThnPathAnim {
     std::string target, path;
     float start = 0, stop = 1;  // fractions of the path
     Vec3 offset;
+    // flags: POSITION moves it along the path; ORIENTATION turns it with the path's own
+    // orientations; LOOK_AT faces it along the way it travels. No flags: position.
+    bool position = true, orientation = false, look_along = false;
+};
+
+// ATTACH_ENTITY: from `time` on, `child` follows `parent` (flags POSITION, ORIENTATION;
+// ENTITY_RELATIVE keeps the child's own offset in the parent's frame, ORIENTATION_RELATIVE
+// its own turn on top of the parent's; LOOK_AT turns it to face the parent). Hardpoint
+// and part targets are taken as the parent's root for now.
+struct ThnAttach {
+    float time = 0, duration = 0;
+    std::string child, parent;
+    Vec3 offset;
+    bool position = false, orientation = false, relative = false, orientation_relative = false, look_at = false;
 };
 
 // START_SOUND: a SOUND entity plays from `time` on.
@@ -109,6 +124,7 @@ struct ThnScript {
     std::vector<ThnCameraCut> cuts;
     std::vector<ThnCameraProp> camera_props;
     std::vector<ThnPathAnim> path_anims;
+    std::vector<ThnAttach> attachments;
     std::vector<ThnSound> sounds;
     std::unordered_map<std::string, ThnPath> paths;  // lower-case MOTION_PATH entity name
     const ThnEntity* entity(std::string_view name) const;
