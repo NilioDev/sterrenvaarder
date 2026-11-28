@@ -54,6 +54,7 @@
 #include "game/music.hpp"
 #include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/sounds.hpp"
+#include "sterrenvaarder/voices.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/dfm.hpp"
@@ -768,7 +769,7 @@ struct FlightSession {
         std::vector<FormationShape> shapes;
         std::optional<game::MissionRunner> runner;
         std::string objective;  // current objective text
-        struct Comm { std::string speaker, line; float left; };
+        struct Comm { std::string speaker, line; float left; std::string voice; bool started = false; };
         std::vector<Comm> comms;  // radio calls: one plays at a time
         std::string result;       // shown when the mission ends
         std::vector<std::string> unhandled;  // action names logged once
@@ -2407,11 +2408,54 @@ struct FlightSession {
         }
     }
 
+    // Spoken radio lines: the speaker's voice (mission ship -> its NPC -> voice) says the line,
+    // and the call lasts as long as the clip. Without a clip the call keeps its fixed time.
+    std::optional<VoiceDb> voices;
+    int lines_spoken = 0;  // reported by screenshot runs
+    std::string comm_voice(const std::string& source) const {
+        if (!mission) return {};
+        const auto& sc = mission->script;
+        const MsnShipDef* sh = sc.ship(source);
+        const MsnNpcDef* npc = sc.npc(sh ? sh->npc : source);
+        return npc ? npc->voice : std::string();
+    }
+    void speak(Mission::Comm& c) {
+        if (!mixer || !vfs || c.voice.empty() || c.line.empty()) return;
+        if (!voices) {
+            voices.emplace();
+            for (auto& f : vfs->list(".ini"))
+                if (to_lower(f).rfind("audio/voices_", 0) == 0) {
+                    try {
+                        voices->add(parse_ini(vfs->read(f)));
+                    } catch (const std::exception& e) {
+                        SDL_Log("voices %s: %s", f.c_str(), e.what());
+                    }
+                }
+        }
+        auto wave = voices->line_wave(*vfs, c.voice, c.line);
+        if (!wave) return;
+        try {
+            auto snd = std::make_shared<Sound>(decode_wav(*wave));
+            float gain = 1;
+            if (const Voice* v = voices->voice(c.voice))
+                if (auto it = v->lines.find(to_lower(c.line)); it != v->lines.end()) gain = std::pow(10.f, it->second.attenuation / 20.f);
+            mixer->play(snd, gain, false);
+            c.left = std::max(1.f, snd->seconds() + 0.3f);
+            ++lines_spoken;
+        } catch (const std::exception& e) {
+            SDL_Log("voice line: %s", e.what());
+        }
+    }
+
     void update_mission(float dt) {
         if (!mission || !mission->runner) return;
         auto& m = *mission;
         // Radio calls play one after another; each reports when it is done.
         if (!m.comms.empty()) {
+            if (!m.comms.front().started) {
+                m.comms.front().started = true;
+                speak(m.comms.front());
+            }
             m.comms.front().left -= dt;
             if (m.comms.front().left <= 0) {
                 m.runner->event({game::MissionEvent::Type::CommComplete, m.comms.front().line, "", ""});
@@ -2475,7 +2519,7 @@ struct FlightSession {
                 for (auto& n : npcs)
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
-                m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f});
+                m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f, comm_voice(a.arg(0))});
             } else if (iequals(a.name, "SpawnFormation")) {
                 mission_spawn_formation(a);
             } else if (iequals(a.name, "SpawnSolar")) {
@@ -2525,7 +2569,7 @@ struct FlightSession {
                         for (auto& n : npcs)
                             if (iequals(n.mission_name, who)) who = n.name;
                         if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
-                        m.comms.push_back({who, l.line, 4.f});
+                        m.comms.push_back({who, l.line, 4.f, comm_voice(l.source)});
                     }
             } else if (iequals(a.name, "MovePlayer")) {
                 // MovePlayer = x, y, z, radius: puts the player there (scene changes).
@@ -3284,7 +3328,7 @@ int run(const Args& args) {
                     for (auto& [k, v] : names) list += k + " x" + std::to_string(v) + ", ";
                     if (live || gone) SDL_Log("traffic: %d ships around, %d gone: %s", live, gone, list.c_str());
                 }
-                if (fs->mixer) SDL_Log("space sounds: %d one-shots, engine hum %s", fs->space_sounds, fs->ship_sound.rumble ? "on" : "off");
+                if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->ship_sound.rumble ? "on" : "off");
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
