@@ -180,6 +180,7 @@ script and lists the conditions the runner doesn't evaluate yet.
 - After a mission succeeds, the next story mission starts (M01a, M01b, M02 ... M13). The player carries over and is only moved when the next mission begins in another system. Mission objects stay in their own system, so a battleship a mission leaves behind is still there for the next one.
 - When a room cutscene ends, the script hears `RTCDone`. A cutscene with `relocate_player = room, base` moves the player there, if need be to another system.
 - `--win T` makes the running mission succeed at T seconds, to test the hand-over.
+- `--thorn scene.thn,Object` plays a space cutscene around that object once you are in space. Ships the scene places itself are drawn too.
 - `CallThorn = scene, object` plays a cutscene in space. Its camera takes over (Enter skips) and the flight HUD steps aside. The scene's "main object" marker is pinned to the object, so cameras and paths attached to it follow the ship. Ships placed by the scene itself are not drawn yet.
 - `PlayerEnemyClamp = min, max`: at most `max` enemies attack the player at once, and the others keep 2.5 km away without firing. `RpopAttClamp = true` makes random traffic count too. This is our reading of the two actions. `Save` writes an autosave next to the quick save.
 - Mission ships spawn with the ship, loadout and pilot from their `[NPCShipArch]`. Whether they are hostile follows your reputation with their faction.
