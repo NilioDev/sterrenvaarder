@@ -494,6 +494,10 @@ struct FlightSession {
         struct Rtc { std::string path; MsnRtc def; bool repeatable = false, played = false; };
         std::vector<Rtc> rtcs;               // queued room cutscenes (AddRTC), played in rooms
         bool random_pop = true;              // RandomPop: random traffic on or off
+        std::string name;                    // e.g. "M02"
+        std::vector<MsnCommand> state_log;   // state actions so far, replayed when loading
+        std::string checkpoint;              // the [Mission] save section at the last launch
+        std::string checkpoint_base;         // ... and the base it was taken at
         // What the player did last frame, to report changes as events.
         bool was_docked = false;
         std::string last_room, last_system, last_base;
@@ -1391,10 +1395,114 @@ struct FlightSession {
                 for (auto& a : parse_npc_ship_archs(parse_ini(vfs.read(path)))) m->archs.push_back(std::move(a));
         }
         if (vfs.exists("missions/formations.ini")) m->shapes = parse_formations(parse_ini(vfs.read("missions/formations.ini")));
+        m->name = name;
         mission = std::move(m);
         mission->runner.emplace(mission->script);
         mission->runner->start();
         SDL_Log("mission %s: %zu triggers", name.c_str(), mission->script.triggers.size());
+        return true;
+    }
+
+    // Actions that only change what the mission shows or queues (objective, waypoint, log,
+    // offer, cutscenes). They are logged so a save can replay them.
+    bool apply_state_action(Mission& m, const MsnCommand& a) {
+        if (iequals(a.name, "SetNNObj")) {
+            // ids, text | navmarker, system, name, text, x, y, z | rep_inst, ..., object
+            // A second argument OBJECTIVE_HISTORY only writes to the mission log: the
+            // current objective stays.
+            if (iequals(a.arg(1), "OBJECTIVE_HISTORY")) {
+                if (!m.objective.empty() && (m.history.empty() || m.history.back() != m.objective)) m.history.push_back(m.objective);
+                return true;
+            }
+            if (iequals(a.arg(0), "null")) {
+                m.objective.clear();
+                m.waypoint.reset();
+            }
+            for (auto& o : m.script.objectives) {
+                if (!iequals(o.nickname, a.arg(0)) || !iequals(o.type.name, "type") || o.type.args.empty()) continue;
+                auto ids = [&](std::size_t i) {
+                    return strings ? strings->name(static_cast<std::uint32_t>(o.type.num(i)), o.nickname) : o.nickname;
+                };
+                if (iequals(o.type.arg(0), "ids")) {
+                    m.objective = ids(1);
+                    m.waypoint.reset();
+                } else if (iequals(o.type.arg(0), "navmarker") || iequals(o.type.arg(0), "rep_inst")) {
+                    m.objective = ids(3);
+                    Mission::Waypoint wp{o.type.arg(1), o.type.args.size() > 7 ? o.type.arg(7) : std::string(), ids(2),
+                                         DVec3{o.type.num(4), o.type.num(5), o.type.num(6)}};
+                    m.waypoint = wp;
+                }
+            }
+        } else if (iequals(a.name, "NNPath")) {
+            // NNPath = name ids, text ids, object, system: a waypoint at an object.
+            std::string label = strings ? strings->name(static_cast<std::uint32_t>(a.num(0)), a.arg(2)) : a.arg(2);
+            m.waypoint = Mission::Waypoint{a.arg(3), a.arg(2), label, std::nullopt};
+        } else if (iequals(a.name, "NNIds")) {
+            if (iequals(a.arg(1), "HISTORY") && strings)
+                if (auto t = strings->infocard(static_cast<std::uint32_t>(a.num(0))))
+                    m.history.push_back(rdl_to_text(*t));
+        } else if (iequals(a.name, "SetTitle") || iequals(a.name, "SetOffer")) {
+            std::string text;
+            if (strings) {
+                auto id = static_cast<std::uint32_t>(a.num(0));
+                if (auto t = strings->infocard(id)) text = rdl_to_text(*t);
+                else text = strings->name(id, "");
+            }
+            (iequals(a.name, "SetTitle") ? m.title : m.offer) = text;
+        } else if (iequals(a.name, "AddRTC")) {
+            Mission::Rtc rtc{a.arg(0), {}, iequals(a.arg(1), "repeatable")};
+            std::string path = to_lower(a.arg(0));
+            std::replace(path.begin(), path.end(), '\\', '/');
+            try {
+                if (vfs && vfs->exists(path)) rtc.def = parse_rtc(parse_ini(vfs->read(path)));
+            } catch (const std::exception& e) {
+                SDL_Log("mission: cutscene %s: %s", path.c_str(), e.what());
+            }
+            m.rtcs.push_back(std::move(rtc));
+        } else if (iequals(a.name, "RemoveRTC")) {
+            std::erase_if(m.rtcs, [&](const Mission::Rtc& r) { return iequals(r.path, a.arg(0)); });
+        } else if (iequals(a.name, "RandomPop")) {
+            m.random_pop = !iequals(a.arg(0), "false");
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    // The mission's progress as a save section: trigger states and the state actions so far.
+    std::string mission_section() const {
+        if (!mission || !mission->runner) return {};
+        auto& m = *mission;
+        auto p = m.runner->progress();
+        std::string out = "[Mission]\nname = " + m.name + "\noutcome = " + std::to_string(p.outcome) + "\n";
+        for (auto& n : p.active) out += "active = " + n + "\n";
+        for (auto& [n, c] : p.fired) out += "fired = " + n + ", " + std::to_string(c) + "\n";
+        for (auto& a : m.state_log) {
+            out += "act = " + a.name;
+            for (std::size_t i = 0; i < a.args.size(); ++i) out += ", " + a.arg(i);
+            out += "\n";
+        }
+        return out;
+    }
+    // Starts the mission named in a save section and puts its progress back.
+    bool restore_mission(const Vfs& v, const IniSection& sec) {
+        auto name = sec.find("name");
+        if (!name || name->values.empty() || !start_mission(v, name->values[0].as_string())) return false;
+        game::MissionRunner::Progress p;
+        if (auto o = sec.find("outcome"); o && !o->values.empty()) p.outcome = o->values[0].as_int();
+        for (auto* e : sec.find_all("active"))
+            if (!e->values.empty()) p.active.push_back(e->values[0].as_string());
+        for (auto* e : sec.find_all("fired"))
+            if (e->values.size() >= 2) p.fired.emplace_back(e->values[0].as_string(), e->values[1].as_int());
+        mission->runner->restore(p);
+        for (auto* e : sec.find_all("act")) {
+            if (e->values.empty()) continue;
+            MsnCommand a;
+            a.name = e->values[0].as_string();
+            a.args.assign(e->values.begin() + 1, e->values.end());
+            if (apply_state_action(*mission, a)) mission->state_log.push_back(a);
+        }
+        SDL_Log("mission %s restored: %zu triggers active", mission->name.c_str(), p.active.size());
         return true;
     }
 
@@ -1601,6 +1709,8 @@ struct FlightSession {
             if (m.seen) {
                 if (!m.was_docked && docked()) m.runner->event({T::SpaceExit, "", "", ""});
                 if (m.was_docked && !docked()) {
+                    m.checkpoint = mission_section();  // a save in space goes back to here
+                    m.checkpoint_base = m.last_base;
                     m.runner->event({T::BaseExit, m.last_base, "", ""});
                     m.runner->event({T::PlayerLaunch, "", "", ""});
                     m.runner->event({T::LaunchComplete, "Player", "", ""});
@@ -1702,63 +1812,8 @@ struct FlightSession {
                 // MovePlayer = x, y, z, radius: puts the player there (scene changes).
                 ship.pos = {a.num(0), a.num(1), a.num(2)};
                 ship.vel = {};
-            } else if (iequals(a.name, "SetNNObj")) {
-                // ids, text | navmarker, system, name, text, x, y, z | rep_inst, ..., object
-                // A second argument OBJECTIVE_HISTORY only writes to the mission log: the
-                // current objective stays.
-                if (iequals(a.arg(1), "OBJECTIVE_HISTORY")) {
-                    if (!m.objective.empty() && (m.history.empty() || m.history.back() != m.objective)) m.history.push_back(m.objective);
-                    return;
-                }
-                if (iequals(a.arg(0), "null")) {
-                    m.objective.clear();
-                    m.waypoint.reset();
-                }
-                for (auto& o : m.script.objectives) {
-                    if (!iequals(o.nickname, a.arg(0)) || !iequals(o.type.name, "type") || o.type.args.empty()) continue;
-                    auto ids = [&](std::size_t i) {
-                        return strings ? strings->name(static_cast<std::uint32_t>(o.type.num(i)), o.nickname) : o.nickname;
-                    };
-                    if (iequals(o.type.arg(0), "ids")) {
-                        m.objective = ids(1);
-                        m.waypoint.reset();
-                    } else if (iequals(o.type.arg(0), "navmarker") || iequals(o.type.arg(0), "rep_inst")) {
-                        m.objective = ids(3);
-                        Mission::Waypoint wp{o.type.arg(1), o.type.args.size() > 7 ? o.type.arg(7) : std::string(), ids(2),
-                                             DVec3{o.type.num(4), o.type.num(5), o.type.num(6)}};
-                        m.waypoint = wp;
-                    }
-                }
-            } else if (iequals(a.name, "NNPath")) {
-                // NNPath = name ids, text ids, object, system: a waypoint at an object.
-                std::string label = strings ? strings->name(static_cast<std::uint32_t>(a.num(0)), a.arg(2)) : a.arg(2);
-                m.waypoint = Mission::Waypoint{a.arg(3), a.arg(2), label, std::nullopt};
-            } else if (iequals(a.name, "NNIds")) {
-                if (iequals(a.arg(1), "HISTORY") && strings)
-                    if (auto t = strings->infocard(static_cast<std::uint32_t>(a.num(0))))
-                        m.history.push_back(rdl_to_text(*t));
-            } else if (iequals(a.name, "SetTitle") || iequals(a.name, "SetOffer")) {
-                std::string text;
-                if (strings) {
-                    auto id = static_cast<std::uint32_t>(a.num(0));
-                    if (auto t = strings->infocard(id)) text = rdl_to_text(*t);
-                    else text = strings->name(id, "");
-                }
-                (iequals(a.name, "SetTitle") ? m.title : m.offer) = text;
-            } else if (iequals(a.name, "AddRTC")) {
-                Mission::Rtc rtc{a.arg(0), {}, iequals(a.arg(1), "repeatable")};
-                std::string path = to_lower(a.arg(0));
-                std::replace(path.begin(), path.end(), '\\', '/');
-                try {
-                    if (vfs && vfs->exists(path)) rtc.def = parse_rtc(parse_ini(vfs->read(path)));
-                } catch (const std::exception& e) {
-                    SDL_Log("mission: cutscene %s: %s", path.c_str(), e.what());
-                }
-                m.rtcs.push_back(std::move(rtc));
-            } else if (iequals(a.name, "RemoveRTC")) {
-                std::erase_if(m.rtcs, [&](const Mission::Rtc& r) { return iequals(r.path, a.arg(0)); });
-            } else if (iequals(a.name, "RandomPop")) {
-                m.random_pop = !iequals(a.arg(0), "false");
+            } else if (apply_state_action(m, a)) {
+                m.state_log.push_back(a);
             } else if (iequals(a.name, "ChangeState")) {
                 bool won = iequals(a.arg(0), "SUCCEED");
                 m.result = won ? "MISSION COMPLETE" : "MISSION FAILED";
@@ -2070,8 +2125,20 @@ void save_game(FlightSession& fs, const Renderer& r, const std::string& path) {
         p.base.clear();
         p.position = Vec3{static_cast<float>(fs.ship.pos.x), static_cast<float>(fs.ship.pos.y), static_cast<float>(fs.ship.pos.z)};
     }
+    // During a mission the save holds its progress. In space it goes back to the last
+    // launch, at that base, as mission ships and fights can't be saved.
+    std::string msn;
+    if (fs.mission) {
+        if (!fs.docked() && !fs.mission->checkpoint.empty()) {
+            msn = fs.mission->checkpoint;
+            p.base = fs.mission->checkpoint_base;
+            p.position.reset();
+        } else {
+            msn = fs.mission_section();
+        }
+    }
     std::ofstream f(path, std::ios::binary);
-    f << game::write_save(p);
+    f << game::write_save(p) << (msn.empty() ? "" : "\n" + msn);
     fs.trade_msg = f ? "GAME SAVED" : "SAVE FAILED";
     SDL_Log("%s: %s", fs.trade_msg.c_str(), path.c_str());
 }
@@ -2293,6 +2360,10 @@ int run(const Args& args) {
                 if (!p) throw std::runtime_error("cannot read save " + args.load);
                 if (p->rep.empty()) p->rep = start_rep;
                 apply_player(*fs, *p, *ships, vfs, renderer, cam, args);
+                std::ifstream f(args.load, std::ios::binary);
+                std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                for (auto& sec : parse_text_ini(text))
+                    if (iequals(sec.name, "Mission")) fs->restore_mission(vfs, sec);
             } else if (args.new_game) {
                 if (!start) throw std::runtime_error("characters/newcharacter.ini not found");
                 game::PlayerState p;

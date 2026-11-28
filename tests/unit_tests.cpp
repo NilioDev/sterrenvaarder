@@ -778,6 +778,14 @@ static void test_mission() {
     w.player = {0, 0, -900};
     r.update(0.1f, w, act);
     CHECK(r.fired("t_near") && r.active("t_raiders_dead"));
+    {
+        // Saved progress comes back without running any actions.
+        auto saved = r.progress();
+        MissionRunner copy(m);
+        copy.restore(saved);
+        CHECK(copy.active("t_raiders_dead") && copy.fired("t_near") && !copy.active("t_start"));
+        CHECK(copy.progress().active == saved.active && copy.progress().fired == saved.fired);
+    }
     r.event({MissionEvent::Type::Destroyed, "raider1", "", ""});
     r.update(0.1f, w, act);
     CHECK(r.outcome() == MissionRunner::Outcome::Running);  // one of two

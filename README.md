@@ -184,6 +184,7 @@ script and lists the conditions the runner doesn't evaluate yet.
 - A mission offer shows a panel with its title and text (from the offer scene's `mission_text_id`, or `SetTitle`/`SetOffer`) and "ACCEPT MISSION?". `Y` accepts and `N` declines (`MsnResponse`). For screenshot runs, `--answer accept|reject` answers it and `--launch T` launches from the base at T seconds.
 - Navigation objectives (`navmarker`, `rep_inst`) and `NNPath` put a waypoint on the HUD: a marker with its name and distance, or an arrow at the edge of the view. `NNIds ..., HISTORY` and `SetNNObj ..., OBJECTIVE_HISTORY` write the mission log.
 - `AddRTC`/`RemoveRTC` queue the room cutscenes from `[CharacterEncounter]` files. They count as played when you enter their room; the scenes themselves follow later.
+- Saving (F5) during a mission stores its progress: the active triggers, how often each fired, and the objective, waypoint, log, offer and cutscene actions so far. Loading starts the mission again from there. A save made in space goes back to the moment you last launched, at that base, because mission ships and fights are not saved.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
