@@ -8,6 +8,7 @@
 
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/mission.hpp"
+#include "sterrenvaarder/population.hpp"
 #include "game/mission.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/texture.hpp"
@@ -126,6 +127,49 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             report(kind, path, e.what());
         }
+    }
+    // Random traffic: every populated zone's encounters should find ships for each slot.
+    {
+        auto read = [&](const char* p) { return vfs.exists(p) ? parse_ini(vfs.read(p)) : IniFile{}; };
+        auto classes = parse_ship_classes(read("missions/shipclasses.ini"));
+        auto factions = parse_faction_ships(read("missions/faction_prop.ini"));
+        auto archs = parse_npc_ship_archs(read("missions/npcships.ini"));
+        std::map<std::string, EncounterDef> encs;
+        std::size_t zones = 0, populated = 0, slots = 0, slots_found = 0, missing_enc = 0;
+        std::map<std::string, int> misses;
+        for (auto& path : vfs.list()) {
+            if (!path.starts_with("universe/systems/") || !path.ends_with(".ini") ||
+                std::count(path.begin(), path.end(), '/') != 3)
+                continue;
+            for (auto& z : parse_pop_zones(parse_ini(vfs.read(path)))) {
+                ++zones;
+                if (!z.populated()) continue;
+                ++populated;
+                for (auto& e : z.encounters) {
+                    std::string file = "missions/encounters/" + to_lower(e.name) + ".ini";
+                    if (!encs.count(file)) {
+                        if (!vfs.exists(file)) {
+                            ++missing_enc;
+                            continue;
+                        }
+                        encs[file] = parse_encounter(parse_ini(vfs.read(file)));
+                    }
+                    for (auto& f : encs[file].formations)
+                        for (auto& slot : f.slots)
+                            for (auto& [fac, w] : e.factions) {
+                                ++slots;
+                                int lvl = std::max(1, e.difficulty + slot.level_offset);
+                                if (!ships_for(archs, factions, classes, fac, slot.ship_class, lvl).empty()) ++slots_found;
+                                else ++misses[fac + " " + slot.ship_class + " d" + std::to_string(lvl)];
+                            }
+                }
+            }
+        }
+        std::printf("population: %zu zones, %zu populated, %zu encounter files (%zu missing), slots with ships %zu of %zu\n",
+                    zones, populated, encs.size(), missing_enc, slots_found, slots);
+        int shown_miss = 0;
+        for (auto& [k, n] : misses)
+            if (shown_miss++ < 12) std::printf("  no ship for %s (%d)\n", k.c_str(), n);
     }
     int total_fail = 0;
     for (auto& [k, n] : ok) std::printf("%-14s ok %6d   failed %d\n", k.c_str(), n, fail[k]);

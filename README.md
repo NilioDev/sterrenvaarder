@@ -188,6 +188,15 @@ script and lists the conditions the runner doesn't evaluate yet.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
+## Random traffic (phase 6e, in progress)
+
+Systems fill up with traffic from their own population zones, as in the original:
+- Each zone in the system file names its encounters (`encounter = file, difficulty, chance`, with `faction` weights), its `density`, `repop_time` and `density_restriction`s.
+- When you come near a zone, it sends an encounter from `missions/encounters/*.ini` once per `repop_time` until it holds its density. The ships come from the faction's `npc_ship` list (`missions/faction_prop.ini`), matched to the slot's ship class (`missions/shipclasses.ini`) and level.
+- They appear out of sight (2.5 to 7 km away) inside the zone, fly in formation behind their leader, wander through the zone, and traders head for the nearest base and dock. Ships you leave more than 14 km behind make room for new ones.
+- Ships from a faction that's hostile to you attack. Missions can turn traffic off (`RandomPop`) or keep it out of a sphere (`RandomPopSphere`).
+- `--no-traffic` turns it off.
+
 ## Tools
 
 ```sh
