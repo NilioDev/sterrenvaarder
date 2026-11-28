@@ -2,18 +2,23 @@
 #pragma once
 // 2D overlay geometry in output pixels (origin top-left). The HUD is drawn after
 // upscaling and sharpening, so it stays crisp at every render scale and resolution.
-// Text uses a small built-in stroke font, so no font files are needed.
+// Text uses the interface font when one is set (set_font), else a built-in stroke font.
 #include <cstdint>
 #include <string_view>
 #include <vector>
+
+namespace sterrenvaarder {
+struct FontAtlas;
+}
 
 namespace sterrenvaarder::render {
 
 struct HudVertex {
     float x, y;
     std::uint32_t rgba;  // little-endian RGBA8 (r in the low byte)
+    float u = -1, v = 0;  // font atlas coordinates; u < 0 is a solid shape
 };
-static_assert(sizeof(HudVertex) == 12);
+static_assert(sizeof(HudVertex) == 20);
 
 struct HudColor {
     float r = 1, g = 1, b = 1, a = 1;
@@ -39,8 +44,12 @@ public:
     // `size` is the cap height in pixels. Returns the text width.
     float text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align = TextAlign::Left);
     static float text_width(float size, std::string_view s);
+    // The interface font for all HUD text (nullptr = stroke font). Text is Latin-1 or UTF-8.
+    static void set_font(const FontAtlas* font);
+    static const FontAtlas* font();
 
 private:
+    float font_text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align);
     void tri(float ax, float ay, float bx, float by, float cx, float cy, std::uint32_t c);
     std::vector<HudVertex> verts_;
 };

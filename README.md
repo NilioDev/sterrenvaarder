@@ -74,8 +74,11 @@ game data (`DATA/INTERFACE/HUD`) and placed by the engine; no game files are par
 repository. A second style, `modern`, is our own vector design that needs no game files.
 Both are drawn at output resolution (crisp at any `--scale`). HUD elements sit in a canvas of at most 16:9 (`--hud-aspect`), centred on wider screens, so
 on 21:9 and 32:9 the gauges stay in front of you. On 4:3, 5:4 and 16:10 the canvas is
-the whole screen and the HUD scales down to fit. Text uses a built-in stroke font, so no
-font files are needed.
+the whole screen and the HUD scales down to fit. HUD text uses the font the game's own
+`fonts/fonts.ini` names (Agency FB) when it is installed on your system, like the
+original. Otherwise it uses our bundled Saira Condensed (SIL Open Font License, see
+`fonts/saira-condensed/OFL.txt`). `--hud-font <file or family>` picks another font and
+`--hud-font stroke` the built-in stroke font.
 
 The layout is adjustable: canvas width (16:9, 16:10 or full width), overall size, and
 anchor, offset, size and visibility per panel. See
@@ -179,3 +182,8 @@ the selected one on the pad the room camera looks at. The dealer screen itself i
 
 [Mozilla Public License 2.0](LICENSE). Changes to existing files must be shared under the
 same licence; new files and larger works (mods, tools, platform ports) may use other terms.
+
+## Third-party code and fonts
+
+- `third_party/stb/stb_truetype.h` by Sean Barrett: public domain or MIT, at your choice (licence at the end of the file).
+- `fonts/saira-condensed/`: Saira Condensed by Omnibus-Type, SIL Open Font License 1.1 (`OFL.txt`).

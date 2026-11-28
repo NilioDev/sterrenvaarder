@@ -5,6 +5,8 @@
 #include <cctype>
 #include <cmath>
 
+#include "sterrenvaarder/fonts.hpp"
+
 namespace sterrenvaarder::render {
 
 std::uint32_t HudColor::packed() const {
@@ -13,9 +15,9 @@ std::uint32_t HudColor::packed() const {
 }
 
 void HudBatch::tri(float ax, float ay, float bx, float by, float cx, float cy, std::uint32_t c) {
-    verts_.push_back({ax, ay, c});
-    verts_.push_back({bx, by, c});
-    verts_.push_back({cx, cy, c});
+    verts_.push_back({ax, ay, c, -1, 0});
+    verts_.push_back({bx, by, c, -1, 0});
+    verts_.push_back({cx, cy, c, -1, 0});
 }
 
 void HudBatch::rect(float x, float y, float w, float h, HudColor c) {
@@ -131,13 +133,74 @@ constexpr float kAdvance = 5.6f;  // grid units per character
 
 }  // namespace
 
+namespace {
+const FontAtlas* g_font = nullptr;
+
+// Next character as a Latin-1 code (UTF-8 sequences decoded; anything above 255 becomes '?').
+unsigned next_char(std::string_view s, std::size_t& i) {
+    unsigned char c = static_cast<unsigned char>(s[i++]);
+    if (c < 0x80) return c;
+    if ((c & 0xe0) == 0xc0 && i < s.size() && (static_cast<unsigned char>(s[i]) & 0xc0) == 0x80) {
+        unsigned cp = ((c & 0x1fu) << 6) | (static_cast<unsigned char>(s[i++]) & 0x3fu);
+        return cp < 256 ? cp : '?';
+    }
+    if ((c & 0xf0) == 0xe0 || (c & 0xf8) == 0xf0) {
+        int n = (c & 0xf0) == 0xe0 ? 2 : 3;
+        for (int k = 0; k < n && i < s.size() && (static_cast<unsigned char>(s[i]) & 0xc0) == 0x80; ++k) ++i;
+        return '?';
+    }
+    return c;  // already Latin-1
+}
+}  // namespace
+
+void HudBatch::set_font(const FontAtlas* font) { g_font = font; }
+const FontAtlas* HudBatch::font() { return g_font; }
+
+float HudBatch::font_text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align) {
+    const FontAtlas& f = *g_font;
+    float k = size / f.cap_height;
+    float w = text_width(size, s);
+    if (align == TextAlign::Center) x -= w * 0.5f;
+    else if (align == TextAlign::Right) x -= w;
+    float base = y + size;  // y is the top of the capitals
+    float pen = x;
+    auto p = c.packed();
+    for (std::size_t i = 0; i < s.size();) {
+        unsigned ch = next_char(s, i);
+        const auto* g = &f.glyphs[ch];
+        if (!g->present) g = &f.glyphs['?'];
+        if (g->u1 > g->u0) {
+            float x0 = pen + g->x0 * k, x1 = pen + g->x1 * k, y0 = base + g->y0 * k, y1 = base + g->y1 * k;
+            verts_.push_back({x0, y0, p, g->u0, g->v0});
+            verts_.push_back({x1, y0, p, g->u1, g->v0});
+            verts_.push_back({x1, y1, p, g->u1, g->v1});
+            verts_.push_back({x0, y0, p, g->u0, g->v0});
+            verts_.push_back({x1, y1, p, g->u1, g->v1});
+            verts_.push_back({x0, y1, p, g->u0, g->v1});
+        }
+        pen += g->advance * k;
+    }
+    return w;
+}
+
 float HudBatch::text_width(float size, std::string_view s) {
     if (s.empty()) return 0;
+    if (g_font) {
+        float k = size / g_font->cap_height, w = 0;
+        for (std::size_t i = 0; i < s.size();) {
+            unsigned ch = next_char(s, i);
+            const auto* g = &g_font->glyphs[ch];
+            if (!g->present) g = &g_font->glyphs['?'];
+            w += g->advance * k;
+        }
+        return w;
+    }
     float u = size / 6.f;
     return (static_cast<float>(s.size()) * kAdvance - (kAdvance - 4.f)) * u;
 }
 
 float HudBatch::text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align) {
+    if (g_font) return font_text(x, y, size, s, c, align);
     float u = size / 6.f;
     float w = text_width(size, s);
     if (align == TextAlign::Center) x -= w * 0.5f;
