@@ -1057,6 +1057,24 @@ static void test_sound_db() {
     CHECK(a->gain_at(1e6f) == 1);  // no range: heard everywhere
 }
 
+static void test_mission_music() {
+    using game::MusicMood;
+    SystemMusic sys{"sys_space", "sys_danger", "sys_battle"};
+    // Keep the system's mood tracks, play a motif over them once, with a 3 s fade.
+    auto m = game::parse_play_music({"none", "none", "none", "motif_a", "3", "true"});
+    CHECK(m.tracks.space.empty() && m.motif == "motif_a" && m.fade == 3 && m.once);
+    CHECK(game::music_track(m, sys, MusicMood::Battle) == "motif_a");
+    m.motif.clear();
+    CHECK(game::music_track(m, sys, MusicMood::Battle) == "sys_battle");
+    // Stand-in tracks: the mission's space track, its missing danger track falls back to its space.
+    auto n = game::parse_play_music({"msn_space", "none", "none", "none"});
+    CHECK(n.fade == 2 && !n.once && n.motif.empty());
+    CHECK(game::music_track(n, sys, MusicMood::Space) == "msn_space" && game::music_track(n, sys, MusicMood::Danger) == "msn_space");
+    // no_params gives the music back to the system.
+    auto r = game::parse_play_music({"no_params"});
+    CHECK(game::music_track(r, sys, MusicMood::Danger) == "sys_danger");
+}
+
 static void test_voices() {
     // Self-written voice list: a voice, its lines, and a later section extending it.
     VoiceDb db;
@@ -1291,6 +1309,7 @@ int main() {
     test_mixer();
     test_sound_db();
     test_voices();
+    test_mission_music();
     test_music_mood();
     test_anm_frames();
     test_costumes();

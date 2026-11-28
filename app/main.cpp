@@ -857,6 +857,7 @@ struct FlightSession {
         std::string ambient;                 // nickname of the room ambience now looping
         game::Mixer::Handle ambient_handle = 0;
         game::MusicMood mood = game::MusicMood::Space;
+        game::MissionMusic mission;  // PlayMusic from the running mission
         float since_combat = 1e9f;
     } music;
     const Vfs* vfs = nullptr;
@@ -1831,17 +1832,19 @@ struct FlightSession {
             info = room.rooms->room(room_view_name());
             if (!info) info = room.rooms->room(room.rooms->start_room);  // as the room view falls back
         }
-        const std::string* want = &m.playing;
+        std::string want = m.playing;
         const char* what = "room";
         if (!docked()) {
             m.mood = game::choose_mood(in, m.mood);
-            want = &m.tracks.space;
-            what = "space";
-            if (m.mood == game::MusicMood::Danger && !m.tracks.danger.empty()) want = &m.tracks.danger, what = "danger";
-            if (m.mood == game::MusicMood::Battle && !m.tracks.battle.empty()) want = &m.tracks.battle, what = "battle";
+            // A motif played once gives the mood track back when it has run out.
+            if (m.mission.once && !m.mission.motif.empty() && iequals(m.playing, m.mission.motif) && m.handle &&
+                !mixer->playing(m.handle))
+                m.mission.motif.clear();
+            want = game::music_track(m.mission, m.tracks, m.mood);
+            what = !m.mission.motif.empty() ? "mission" : m.mood == game::MusicMood::Battle ? "battle" : m.mood == game::MusicMood::Danger ? "danger" : "space";
         } else {
             m.mood = game::MusicMood::Space;
-            if (info && !info->music.empty()) want = &info->music;
+            if (info && !info->music.empty()) want = info->music;
         }
         const std::string& amb = info ? info->ambient : std::string();
         if (!iequals(amb, m.ambient)) {
@@ -1855,16 +1858,18 @@ struct FlightSession {
                 SDL_Log("ambience: room loop (%.0f s)", snd->seconds());
             }
         }
-        if (iequals(*want, m.playing)) return;
+        if (iequals(want, m.playing)) return;
         // Cross-fade: the old track fades out while the new one fades in.
-        if (m.handle) mixer->fade(m.handle, 0, 2.f, true);
+        float fade = std::max(0.05f, m.mission.fade);
+        if (m.handle) mixer->fade(m.handle, 0, fade, true);
         m.handle = 0;
-        m.playing = *want;
-        const SoundDef* d = want->empty() ? nullptr : m.db.find(*want);
+        m.playing = want;
+        const SoundDef* d = want.empty() ? nullptr : m.db.find(want);
         auto snd = d ? sound(*d) : nullptr;
         if (!snd) return;
-        m.handle = mixer->play(snd, 0, true);
-        mixer->fade(m.handle, d->gain(), 2.f);
+        bool once = !m.mission.motif.empty() && iequals(want, m.mission.motif) && m.mission.once;
+        m.handle = mixer->play(snd, 0, !once);
+        mixer->fade(m.handle, d->gain(), fade);
         SDL_Log("music: %s track (%.0f s)", what, snd->seconds());
     }
     // Cutscene sound: each START_SOUND plays its SOUND entity's sound once (or looping), at
@@ -2520,6 +2525,10 @@ struct FlightSession {
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
                 m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f, comm_voice(a.arg(0))});
+            } else if (iequals(a.name, "PlayMusic")) {
+                std::vector<std::string> args;
+                for (auto& v : a.args) args.push_back(v.as_string());
+                music.mission = game::parse_play_music(args);
             } else if (iequals(a.name, "SpawnFormation")) {
                 mission_spawn_formation(a);
             } else if (iequals(a.name, "SpawnSolar")) {
