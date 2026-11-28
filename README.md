@@ -196,6 +196,8 @@ Character bodies, heads and hands are deformable models (`.dfm`), and `DfmModel`
 - the skin chains that tie each point to its bones;
 - the bones themselves, which are the `.3db` nodes in file order with their bind transforms, named by their `Cmpnd` parts.
 
+Animations (`.anm`) are read by `AnmLibrary`. Each script has joint maps (parent and child bone) and object maps, and each map has a keyframed channel of times, positions and rotations. Rotations are stored as full quaternions (0x04) or packed into three shorts (0x40 / 0x80). The corpus test reads all 2,794 scripts in the data.
+
 The renderer draws a character mesh in its bind pose for now. Animation and the scenes come next. The corpus test reads all character meshes in the data and checks their strips and skin.
 
 ## Navigation map
