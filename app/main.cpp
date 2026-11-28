@@ -2254,9 +2254,18 @@ struct FlightSession {
         return !t.empty() && !iequals(t, "FIGHTER") && !iequals(t, "ELITE") && !iequals(t, "VERYHEAVYFIGHTER") &&
                !iequals(t, "HEAVYFIGHTER") && !iequals(t, "LIGHTFIGHTER");
     }
-    void npc_think_big(NpcShip& n, const Foe& foe) {
-        n.input = {};
-        n.input.throttle = 0.f;
+    // Warships (gunboats, cruisers, battleships) carry on with their orders under fire;
+    // transports and freighters stop.
+    static bool is_warship(const NpcShip& n) {
+        if (!n.arch) return false;
+        const std::string& t = n.arch->type;
+        return iequals(t, "GUNBOAT") || iequals(t, "CRUISER") || iequals(t, "CAPITAL");
+    }
+    void npc_think_big(NpcShip& n, const Foe& foe, bool keep_course = false) {
+        if (!keep_course) {
+            n.input = {};
+            n.input.throttle = 0.f;
+        }
         if (n.guns.empty() || n.burst <= 0) return;
         float speed = n.guns[0].arch ? n.guns[0].arch->muzzle_velocity : 600.f;
         float range = speed * (n.guns[0].munition ? n.guns[0].munition->lifetime : 1.f);
@@ -2489,7 +2498,10 @@ struct FlightSession {
                 continue;
             }
             if (n.held_off) hold_off(n);
-            else if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
+            else if (!n.orders.empty() && npc_follow_orders(n, dt)) {
+                if (is_warship(n))
+                    if (auto foe = npc_foe(n)) npc_think_big(n, *foe, true);
+            }
             else if (auto foe = npc_foe(n)) {
                 if (is_big_ship(n)) npc_think_big(n, *foe);
                 else if (n.ai) npc_think_pilot(n, dt, *foe);
@@ -3529,7 +3541,8 @@ struct FlightSession {
     // Works the ship's current order. Returns false when there is nothing to do, or a
     // hostile ship is close enough to the player to fight instead.
     bool npc_follow_orders(NpcShip& n, float dt) {
-        if (auto foe = npc_foe(n); foe && foe->dist < 1500) return false;  // a fight close by comes first
+        // A fight close by comes first; warships fight with their turrets on the way.
+        if (auto foe = npc_foe(n); foe && foe->dist < 1500 && !is_warship(n)) return false;
         while (n.order_step < n.orders.size()) {
             const MsnCommand& o = n.orders[n.order_step];
             n.order_time += dt;
