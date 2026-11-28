@@ -315,6 +315,7 @@ struct NpcShip {
     float burst = 0;  // > 0 firing, < 0 pausing (seconds left)
     std::optional<game::FighterAi> ai;  // from the original pilot data, when found
     std::vector<AttachedFx> engine_fx, trail_fx;
+    const EngineArchetype* engine = nullptr;  // its engine (the hum heard nearby)
     DamageFx damage;
     std::vector<Vec3> part_offsets;  // where each model part sits, for breaking up into wreckage
     bool hostile = true;             // attacks the player (mission ships can be friends)
@@ -1487,6 +1488,7 @@ struct FlightSession {
         for (int p = 0; p < r.model_part_count(n.mesh); ++p) n.part_offsets.push_back(r.model_part_offset(n.mesh, p));
         const EngineArchetype* eng = nlo ? db.engine_of(*nlo) : nullptr;
         n.model = game::FlightModel(game::FlightParams::from(na, eng, db.cruise_speed()));
+        n.engine = eng;
         n.ship.pos = pos;
         n.ship.orient = orient;
         n.body.id = next_body_id++;
@@ -1670,6 +1672,7 @@ struct FlightSession {
         update_music();
         update_scene_sound(dt);
         update_ship_sound();
+        update_npc_hum();
     }
 
     // ---- navigation map (M)
@@ -1962,6 +1965,46 @@ struct FlightSession {
         if (body.shield_arch && in_space && down != ss.shield_down)
             play_here(down ? body.shield_arch->collapse_sound : body.shield_arch->rebuilt_sound);
         ss.shield_down = down;
+    }
+    // Other ships' engines: the nearest few within their hum's range loop it, as loud as the
+    // distance allows. Hums of ships that are gone or out of range fade out.
+    struct NpcHum { int id; game::Mixer::Handle handle; };
+    std::vector<NpcHum> npc_hums;
+    static constexpr std::size_t kMaxNpcHums = 6;
+    int npc_hums_started = 0;  // reported by screenshot runs
+    void update_npc_hum() {
+        if (!mixer || !vfs) return;
+        struct Near { const NpcShip* n; const SoundDef* d; float dist; };
+        std::vector<Near> near;
+        if (!docked())
+            for (auto& n : npcs) {
+                if (!n.mesh || !n.body.alive() || n.cloaked || !n.engine || n.engine->rumble_sound.empty()) continue;
+                const SoundDef* d = music.db.find(n.engine->rumble_sound);
+                if (!d) continue;
+                float dist = static_cast<float>((n.ship.pos - ship.pos).length());
+                if (d->gain_at(dist) * d->gain() >= 0.01f) near.push_back({&n, d, dist});
+            }
+        std::sort(near.begin(), near.end(), [](const Near& a, const Near& b) { return a.dist < b.dist; });
+        if (near.size() > kMaxNpcHums) near.resize(kMaxNpcHums);
+        std::erase_if(npc_hums, [&](const NpcHum& h) {
+            bool keep = std::any_of(near.begin(), near.end(), [&](const Near& x) { return x.n->body.id == h.id; });
+            if (!keep) mixer->fade(h.handle, 0, 0.5f, true);
+            return !keep;
+        });
+        for (auto& x : near) {
+            float g = x.d->gain() * x.d->gain_at(x.dist);
+            auto it = std::find_if(npc_hums.begin(), npc_hums.end(), [&](const NpcHum& h) { return h.id == x.n->body.id; });
+            if (it != npc_hums.end()) {
+                mixer->set_gain(it->handle, g);
+                continue;
+            }
+            if (auto snd = sound(*x.d)) {
+                auto h = mixer->play(snd, 0, true);
+                mixer->fade(h, g, 0.5f);
+                npc_hums.push_back({x.n->body.id, h});
+                ++npc_hums_started;
+            }
+        }
     }
     // A sound file decoded once and kept (music, ambience, scene sounds).
     std::shared_ptr<Sound> sound(const SoundDef& d) {
@@ -3337,7 +3380,7 @@ int run(const Args& args) {
                     for (auto& [k, v] : names) list += k + " x" + std::to_string(v) + ", ";
                     if (live || gone) SDL_Log("traffic: %d ships around, %d gone: %s", live, gone, list.c_str());
                 }
-                if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->ship_sound.rumble ? "on" : "off");
+                if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines, %d ship hums started, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->npc_hums_started, fs->ship_sound.rumble ? "on" : "off");
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
