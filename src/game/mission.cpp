@@ -377,8 +377,13 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
             }
             // "True" holds in every system: scripts switch such triggers on from elsewhere
             // (the set-up after a save, the next step of a chain), so the system is no bar.
+            // Nor for SystemEnter / SystemExit and BaseEnter / LocEnter, which name their
+            // system or base themselves (a script may enter one system under a trigger bound
+            // to another; M10 ends on a base the player is moved to in another system).
             bool always = !t.conditions.empty();
-            for (auto& c : t.conditions) always = always && iequals(c.name, "True");
+            for (auto& c : t.conditions)
+                always = always && (iequals(c.name, "True") || iequals(c.name, "SystemEnter") || iequals(c.name, "SystemExit") ||
+                                    iequals(c.name, "BaseEnter") || iequals(c.name, "LocEnter"));
             if (!exit_cnd && !always) continue;
         }
         bool ok = !t.conditions.empty();

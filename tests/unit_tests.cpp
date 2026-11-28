@@ -1321,6 +1321,14 @@ static void test_mission_start() {
     yr.start();
     yr.update(0.1f, mw, act);  // True fires in Sys01 too
     CHECK(pings == 1);
+    // SystemEnter names its own system; the trigger's system line is no bar.
+    MissionScript es = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_enter\nsystem = Sys02\nInitState = ACTIVE\nCnd_SystemEnter = Sys01\nAct_Ping = x\n"));
+    game::MissionRunner er(es);
+    pings = 0;
+    er.start();
+    er.update(0.1f, mw, act);
+    CHECK(pings == 1);
     // "outside ..., distance, seconds": only after staying out that long without a break.
     MissionScript hs = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_held\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 2\nAct_Ping = x\n"));
