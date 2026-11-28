@@ -53,4 +53,13 @@ SpawnPoint exit_point(const SystemObject& gate, float distance) {
     return s;
 }
 
+SpawnPoint launch_point(const SystemObject& o, float distance) {
+    SpawnPoint s = exit_point(o, distance);
+    if (to_lower(o.archetype).find("ring") == std::string::npos || o.dock_with.empty()) return s;
+    Vec3 fwd = s.orient.forward() * -1.f;
+    s.pos = DVec3{o.pos.x, o.pos.y, o.pos.z} + to_d(fwd) * distance;
+    s.orient = Quat::look(fwd);
+    return s;
+}
+
 }  // namespace sterrenvaarder::game

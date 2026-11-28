@@ -318,6 +318,14 @@ void test_lanes() {
     gate.rotate_deg = {0, 180, 0};
     auto sp = exit_point(gate, 400);
     CHECK(std::fabs(sp.pos.z - 400) < 0.01 && std::fabs(sp.pos.x - 100) < 0.01);
+    // A planet's dock ring is left on the side away from the planet (its +Z).
+    SystemObject dock_ring;
+    dock_ring.archetype = "dock_ring";
+    dock_ring.dock_with = "X_Base";
+    auto lp = launch_point(dock_ring, 300);
+    CHECK(std::fabs(lp.pos.z - 300) < 0.01 && lp.orient.forward().z > 0.99f);
+    auto station = launch_point(gate, 400);
+    CHECK(std::fabs(station.pos.z - sp.pos.z) < 0.01);  // other objects: as exit_point
 }
 
 static void put16(std::vector<std::uint8_t>& b, std::size_t o, std::uint16_t v) { b[o] = v & 0xFF; b[o + 1] = v >> 8; }

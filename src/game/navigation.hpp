@@ -39,5 +39,8 @@ const SystemObject* find_object(const StarSystem& sys, std::string_view nickname
 // facing away from it, along the gate's own forward axis.
 struct SpawnPoint { DVec3 pos; Quat orient; };
 SpawnPoint exit_point(const SystemObject& gate, float distance = 400.f);
+// Where a ship leaves a base object: in front of a station; for a planet's dock ring on
+// its far side, away from the planet (the ring's -Z faces the planet in the data: all 26).
+SpawnPoint launch_point(const SystemObject& o, float distance);
 
 }  // namespace sterrenvaarder::game
