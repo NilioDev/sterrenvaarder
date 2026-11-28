@@ -58,6 +58,25 @@ struct ThnMove {
     std::array<float, 4> q{1, 0, 0, 0};  // q_orient as stored: w, x, y, z
 };
 
+// A MOTION_PATH entity's path: a spline through points (with a rotation at each), in the
+// path entity's own frame. path_data reads "OPEN|CLOSED, {x,y,z}, {w,x,y,z}, {x,y,z}, ...".
+struct ThnPath {
+    bool closed = false;
+    std::vector<Vec3> points;
+    std::vector<std::array<float, 4>> orients;  // w, x, y, z; may be empty
+    static ThnPath parse(std::string_view data);
+    // The point at 0..1 along the path (Catmull-Rom through the points).
+    Vec3 at(float f) const;
+};
+
+// START_PATH_ANIMATION: an entity follows a path from start to stop percent over time.
+struct ThnPathAnim {
+    float time = 0, duration = 0;
+    std::string target, path;
+    float start = 0, stop = 1;  // fractions of the path
+    Vec3 offset;
+};
+
 // SET_CAMERA: from `time` on, the scene is seen through `camera`.
 struct ThnCameraCut {
     float time = 0;
@@ -79,6 +98,8 @@ struct ThnScript {
     std::vector<ThnMove> moves;
     std::vector<ThnCameraCut> cuts;
     std::vector<ThnCameraProp> camera_props;
+    std::vector<ThnPathAnim> path_anims;
+    std::unordered_map<std::string, ThnPath> paths;  // lower-case MOTION_PATH entity name
     const ThnEntity* entity(std::string_view name) const;
     static ThnScript parse(Bytes data);  // throws FormatError
 };

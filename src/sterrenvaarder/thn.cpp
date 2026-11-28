@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "sterrenvaarder/thn.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+
 #include "sterrenvaarder/ini.hpp"
 
 namespace sterrenvaarder {
@@ -23,6 +26,54 @@ std::string str(const IniSection& s, std::string_view key) {
 }
 
 }  // namespace
+
+ThnPath ThnPath::parse(std::string_view data) {
+    ThnPath p;
+    std::size_t comma = data.find(',');
+    std::string head(data.substr(0, comma == std::string_view::npos ? data.size() : comma));
+    p.closed = head.find("CLOSED") != std::string::npos || head.find("closed") != std::string::npos;
+    // Then brace groups: three numbers are a point, four a rotation for the point before.
+    std::size_t i = comma == std::string_view::npos ? data.size() : comma;
+    while ((i = data.find('{', i)) != std::string_view::npos) {
+        std::size_t end = data.find('}', i);
+        if (end == std::string_view::npos) break;
+        std::vector<float> nums;
+        std::string_view body = data.substr(i + 1, end - i - 1);
+        std::size_t k = 0;
+        while (k < body.size()) {
+            while (k < body.size() && (body[k] == ',' || body[k] == ' ')) ++k;
+            std::size_t start = k;
+            while (k < body.size() && body[k] != ',') ++k;
+            if (k > start) nums.push_back(std::strtof(std::string(body.substr(start, k - start)).c_str(), nullptr));
+        }
+        if (nums.size() == 3) p.points.push_back({nums[0], nums[1], nums[2]});
+        else if (nums.size() == 4) p.orients.push_back({nums[0], nums[1], nums[2], nums[3]});
+        i = end + 1;
+    }
+    return p;
+}
+
+Vec3 ThnPath::at(float f) const {
+    if (points.empty()) return {};
+    if (points.size() == 1) return points[0];
+    std::size_t n = points.size();
+    std::size_t segs = closed ? n : n - 1;
+    float x = std::clamp(f, 0.f, 1.f) * static_cast<float>(segs);
+    std::size_t seg = std::min(static_cast<std::size_t>(x), segs - 1);
+    float t = x - static_cast<float>(seg);
+    auto pt = [&](long i) -> const Vec3& {
+        long m = static_cast<long>(n);
+        if (closed) return points[static_cast<std::size_t>(((i % m) + m) % m)];
+        return points[static_cast<std::size_t>(std::clamp(i, 0L, m - 1))];
+    };
+    const Vec3 &p0 = pt(static_cast<long>(seg) - 1), &p1 = pt(static_cast<long>(seg)), &p2 = pt(static_cast<long>(seg) + 1),
+               &p3 = pt(static_cast<long>(seg) + 2);
+    float t2 = t * t, t3 = t2 * t;
+    auto cr = [&](float a, float b, float c, float d) {
+        return 0.5f * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+    };
+    return {cr(p0.x, p1.x, p2.x, p3.x), cr(p0.y, p1.y, p2.y, p3.y), cr(p0.z, p1.z, p2.z, p3.z)};
+}
 
 const ThnEntity* ThnScript::entity(std::string_view name) const {
     for (auto& e : entities)
@@ -67,6 +118,20 @@ ThnScript ThnScript::parse(Bytes data) {
             if (!m.target.empty() && (m.has_pos || m.has_orient)) out.moves.push_back(std::move(m));
             continue;
         }
+        if (kind == "START_PATH_ANIMATION") {
+            const LuaValue& who = e[3];
+            const LuaValue& p = e[4];
+            ThnPathAnim a;
+            a.time = static_cast<float>(e[1].num());
+            a.duration = static_cast<float>(p["duration"].num());
+            a.target = target_of(who);
+            a.path = who.is_table() && who.size() >= 2 ? who[2].str() : std::string();
+            a.start = static_cast<float>(p["start_percent"].num(0));
+            a.stop = static_cast<float>(p["stop_percent"].num(1));
+            a.offset = vec3(p["offset"]);
+            if (!a.target.empty() && !a.path.empty()) out.path_anims.push_back(std::move(a));
+            continue;
+        }
         if (kind == "START_CAMERA_PROP_ANIM") {
             const LuaValue& p = e[4];
             ThnCameraProp c;
@@ -101,6 +166,9 @@ ThnScript ThnScript::parse(Bytes data) {
         t.template_name = e["template_name"].str();
         t.flags = e["flags"].str();
         t.category = e["userprops"]["category"].str();
+        if (t.type == "MOTION_PATH")
+            if (const LuaValue& pp = e["pathprops"]; pp.is_table() && !pp["path_data"].str().empty())
+                out.paths[to_lower(t.name)] = ThnPath::parse(pp["path_data"].str());
         t.light_group = static_cast<int>(e["lt_grp"].num());
         t.sort_group = static_cast<int>(e["srt_grp"].num());
         const LuaValue& sp = e["spatialprops"];

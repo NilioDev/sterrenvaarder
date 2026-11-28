@@ -883,6 +883,29 @@ static void test_thn_player() {
     CHECK(std::abs(v.fov_y - 2 * std::atan(std::tan(15 * 3.14159265f / 180) * 0.75f)) < 1e-4f);
     p.seek(0.5f);
     CHECK(!p.view(v));  // camera A is not in the scene
+
+    // A path: an open spline through three points, placed 100 m up by its entity. A box rides
+    // it from 0 to 100% over 4 s, starting at 10 s.
+    ThnPath path = ThnPath::parse("OPEN, {0,0,0}, {1,0,0,0}, {10,0,0}, {1,0,0,0}, {20,0,0}, {1,0,0,0}");
+    CHECK(!path.closed && path.points.size() == 3 && path.orients.size() == 3);
+    CHECK(std::abs(path.at(0.5f).x - 10) < 1e-4f && std::abs(path.at(1).x - 20) < 1e-4f);
+    CHECK(ThnPath::parse("CLOSED, {1,2,3}").closed);
+    ThnEntity rail;
+    rail.name = "Rail";
+    rail.type = "MOTION_PATH";
+    rail.pos = {0, 100, 0};
+    s.entities.push_back(rail);
+    s.paths["rail"] = path;
+    ThnPathAnim ride;
+    ride.time = 10;
+    ride.duration = 4;
+    ride.target = "Box";
+    ride.path = "Rail";
+    s.path_anims.push_back(ride);
+    game::ThnPlayer q(s);
+    CHECK(q.duration() == 14);
+    q.seek(12);
+    CHECK(std::abs(q.state("box")->pos.x - 10) < 1e-3f && std::abs(q.state("box")->pos.y - 100) < 1e-3f);
 }
 
 static void test_population() {
