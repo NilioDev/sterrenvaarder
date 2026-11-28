@@ -33,6 +33,7 @@ static int failures = 0;
 #include "game/thn_player.hpp"
 #include "game/mixer.hpp"
 #include "game/music.hpp"
+#include "game/radio.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -1075,6 +1076,13 @@ static void test_mission_music() {
     CHECK(game::music_track(r, sys, MusicMood::Danger) == "sys_danger");
 }
 
+static void test_radio() {
+    auto ok = game::dock_reply_lines("X_Base", true);
+    CHECK(ok.size() == 3 && ok[0] == "gcs_misc_thisis+" && ok[1] == "gcs_refer_base_x_base-" && ok[2] == "gcs_dockrequest_granted_01-");
+    auto no = game::dock_reply_lines("", false);
+    CHECK(no.size() == 1 && no[0] == "gcs_dockrequest_responsehostile_01-");
+}
+
 static void test_voices() {
     // Self-written voice list: a voice, its lines, and a later section extending it.
     VoiceDb db;
@@ -1309,6 +1317,7 @@ int main() {
     test_mixer();
     test_sound_db();
     test_voices();
+    test_radio();
     test_mission_music();
     test_music_mood();
     test_anm_frames();

@@ -42,6 +42,7 @@ struct SystemObject {
     int ids_name = 0;                  // string id (resources); 0 = none
     std::string base, dock_with;       // dockable base (stations, planets)
     std::string reputation;            // owning faction group (li_p_grp, ...)
+    std::string voice;                 // who answers its radio (a voices_*.ini voice)
     std::string next_ring, prev_ring;  // trade lane chain
     // Jump gates and holes: target system, object there, tunnel effect.
     std::string goto_system, goto_object, goto_tunnel;

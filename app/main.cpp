@@ -52,6 +52,7 @@
 #include "game/thn_player.hpp"
 #include "game/mixer.hpp"
 #include "game/music.hpp"
+#include "game/radio.hpp"
 #include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/sounds.hpp"
 #include "sterrenvaarder/voices.hpp"
@@ -1386,13 +1387,20 @@ struct FlightSession {
         if (target < 0 || target >= static_cast<int>(contacts.size())) return;
         const SystemObject* o = game::find_object(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
+        bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
+        // The base's radio: its own voice, or that of its dock ring (planets answer through it).
+        std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = o->voice;
+        for (auto& x : sys.objects)
+            if (voice.empty() && !x.voice.empty() && (iequals(x.base, base_nick) || iequals(x.dock_with, base_nick))) voice = x.voice;
         if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
             notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
             notice_time = 4.f;
+            if (base) radio_call(voice, game::dock_reply_lines(base_nick, false));
             return;
         }
         nav_target = o->nickname;
         nav = Nav::Approach;
+        if (base) radio_call(voice, game::dock_reply_lines(base_nick, true));
     }
 
     std::string nav_status() const {
@@ -1673,6 +1681,7 @@ struct FlightSession {
         update_scene_sound(dt);
         update_ship_sound();
         update_npc_hum();
+        update_radio();
     }
 
     // ---- navigation map (M)
@@ -2467,31 +2476,56 @@ struct FlightSession {
         const MsnNpcDef* npc = sc.npc(sh ? sh->npc : source);
         return npc ? npc->voice : std::string();
     }
-    void speak(Mission::Comm& c) {
-        if (!mixer || !vfs || c.voice.empty() || c.line.empty()) return;
-        if (!voices) {
-            voices.emplace();
-            for (auto& f : vfs->list(".ini"))
-                if (to_lower(f).rfind("audio/voices_", 0) == 0) {
-                    try {
-                        voices->add(parse_ini(vfs->read(f)));
-                    } catch (const std::exception& e) {
-                        SDL_Log("voices %s: %s", f.c_str(), e.what());
-                    }
+    void load_voices() {
+        if (voices || !vfs) return;
+        voices.emplace();
+        for (auto& f : vfs->list(".ini"))
+            if (to_lower(f).rfind("audio/voices_", 0) == 0) {
+                try {
+                    voices->add(parse_ini(vfs->read(f)));
+                } catch (const std::exception& e) {
+                    SDL_Log("voices %s: %s", f.c_str(), e.what());
                 }
-        }
-        auto wave = voices->line_wave(*vfs, c.voice, c.line);
-        if (!wave) return;
+            }
+    }
+    // Plays one line in one voice; its length in seconds, or 0 when the line is not there.
+    float say(const std::string& voice, const std::string& line, game::Mixer::Handle* handle = nullptr) {
+        if (!mixer || !vfs || voice.empty() || line.empty()) return 0;
+        load_voices();
+        auto wave = voices->line_wave(*vfs, voice, line);
+        if (!wave) return 0;
         try {
             auto snd = std::make_shared<Sound>(decode_wav(*wave));
             float gain = 1;
-            if (const Voice* v = voices->voice(c.voice))
-                if (auto it = v->lines.find(to_lower(c.line)); it != v->lines.end()) gain = std::pow(10.f, it->second.attenuation / 20.f);
-            mixer->play(snd, gain, false);
-            c.left = std::max(1.f, snd->seconds() + 0.3f);
+            if (const Voice* v = voices->voice(voice))
+                if (auto it = v->lines.find(to_lower(line)); it != v->lines.end()) gain = std::pow(10.f, it->second.attenuation / 20.f);
+            auto h = mixer->play(snd, gain, false);
+            if (handle) *handle = h;
             ++lines_spoken;
+            return snd->seconds();
         } catch (const std::exception& e) {
             SDL_Log("voice line: %s", e.what());
+            return 0;
+        }
+    }
+    void speak(Mission::Comm& c) {
+        if (float t = say(c.voice, c.line); t > 0) c.left = std::max(1.f, t + 0.3f);
+    }
+    // Radio calls made of fragments (docking replies): spoken one after another.
+    struct RadioPart { std::string voice, line; };
+    std::vector<RadioPart> radio;
+    game::Mixer::Handle radio_handle = 0;
+    void radio_call(const std::string& voice, const std::vector<std::string>& lines) {
+        if (voice.empty()) return;
+        for (auto& l : lines) radio.push_back({voice, l});
+    }
+    void update_radio() {
+        if (!mixer || (radio_handle && mixer->playing(radio_handle))) return;
+        radio_handle = 0;
+        while (!radio.empty() && !radio_handle) {
+            RadioPart p = radio.front();
+            radio.erase(radio.begin());
+            say(p.voice, p.line, &radio_handle);
         }
     }
 
