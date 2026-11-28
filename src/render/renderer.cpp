@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 
+#include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/sphere.hpp"
 
@@ -552,6 +553,47 @@ struct Renderer::Impl {
 
         if (SphereModel::is_sphere(*file)) {
             build_sphere(*gm, SphereModel::load(*file), lib, verts, indices, background);
+        } else if (DfmModel::is_dfm(file->root())) {
+            // Character mesh, in its bind pose for now (the skin follows with animation).
+            DfmModel dfm = DfmModel::load(file->root());
+            const DfmMesh& mesh = dfm.levels.front();
+            GpuPart gp;
+            GpuLod gl;
+            gl.range_end = 1e9f;
+            for (auto& g : mesh.groups) {
+                DrawRange dr;
+                dr.vertex_offset = static_cast<std::int32_t>(verts.size());
+                dr.first_index = static_cast<std::uint32_t>(indices.size());
+                const Material* mat = lib.material_by_name(g.material);
+                dr.material = material(mat ? fl_model_crc(mat->name) : 0);
+                // One vertex per corner, as corners carry their own uv.
+                for (std::size_t c = 0; c < mesh.point_index.size(); ++c) {
+                    Vertex vx{};
+                    const Vec3& p = mesh.points[mesh.point_index[c]];
+                    vx.pos[0] = p.x * dfm.scale;
+                    vx.pos[1] = p.y * dfm.scale;
+                    vx.pos[2] = p.z * dfm.scale;
+                    if (mesh.point_index[c] < mesh.normals.size()) {
+                        const Vec3& n = mesh.normals[mesh.point_index[c]];
+                        vx.normal[0] = n.x;
+                        vx.normal[1] = n.y;
+                        vx.normal[2] = n.z;
+                    }
+                    if (c < mesh.uv_index.size() && mesh.uv_index[c] < mesh.uvs.size()) {
+                        vx.uv[0] = mesh.uvs[mesh.uv_index[c]][0];
+                        vx.uv[1] = mesh.uvs[mesh.uv_index[c]][1];
+                    }
+                    vx.color = 0xFFFFFFFFu;
+                    verts.push_back(vx);
+                }
+                for (auto i : mesh.triangles(g)) indices.push_back(static_cast<std::uint16_t>(i));
+                dr.index_count = static_cast<std::uint32_t>(indices.size()) - dr.first_index;
+                compute_tangents(verts, indices, dr.vertex_offset, dr.first_index, dr.index_count);
+                gm->triangles += dr.index_count / 3;
+                gl.draws.push_back(dr);
+            }
+            gp.lods.push_back(std::move(gl));
+            gm->parts.push_back(std::move(gp));
         } else {
             Model model = Model::load(file);
             MeshLibrary meshes;

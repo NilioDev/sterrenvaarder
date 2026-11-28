@@ -188,6 +188,16 @@ script and lists the conditions the runner doesn't evaluate yet.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
+## Characters (phase 6d, in progress)
+
+Character bodies, heads and hands are deformable models (`.dfm`), and `DfmModel` reads them:
+- the detail levels (`MultiLevel/MeshN`), with the points, normals, uvs and per-corner indices of each level;
+- the triangle strips of each material group;
+- the skin chains that tie each point to its bones;
+- the bones themselves, which are the `.3db` nodes in file order with their bind transforms, named by their `Cmpnd` parts.
+
+The renderer draws a character mesh in its bind pose for now. Animation and the scenes come next. The corpus test reads all character meshes in the data and checks their strips and skin.
+
 ## Navigation map
 
 `M` opens the map of the system you are in, seen from above on an 8 x 8 grid (A-H across, 1-8 down). It shows the stars, planets, bases, jump gates and holes with their names, the trade lanes, where you are and which way you're heading, and the mission waypoint. `--map` opens it for screenshot runs.
