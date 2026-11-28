@@ -202,7 +202,7 @@ Animations (`.anm`) are read by `AnmLibrary`. Each script has joint maps (parent
 
 Skinning (`game/skin`) poses the skeleton and moves the mesh with it. `pose_bones` walks the joints of `Cmpnd/Cons` from the root down. Each joint is offset by its origin and turned by the animation's rotation at that time, with keys blended spherically; without one it keeps its rest rotation. `skin_points` then moves every point by its bones, weighted. Despite its name, the stored "Bone to root" maps root space into the bone (its inverse is where the bone sits), and body joints store no rotation of their own, so the rest rotations come from those stored transforms. The corpus test checks that the joints rebuild every stored bind pose; 201 of the 204 meshes match exactly (a hurt pose, a torture rig and a creature place a few joints elsewhere).
 
-`parse_mbases` reads `missions/mbases.ini`: for each base, the rooms with their crowd size and their fixed characters (a spot in the room's hardpoint scene and an idle script), and the base's characters with the parts they wear. Heads and hands hang on the body by hardpoints of the same name (`hp_neck`, `hp_left b`, `hp_right b`), and `attach_part` places a part so that its hardpoint lands on the body's. The renderer loads a character mesh per instance (`load_character`) and poses it each frame (`pose_character`) into its own vertex buffer. Placing the characters in the rooms with their idle animations comes next. The corpus test reads all character meshes in the data and checks their strips and skin.
+`parse_mbases` reads `missions/mbases.ini`: for each base, the rooms with their crowd size and their fixed characters (a spot in the room's hardpoint scene and an idle script), and the base's characters with the parts they wear. Heads and hands hang on the body by hardpoints of the same name (`hp_neck`, `hp_left b`, `hp_right b`), and `attach_part` places a part so that its hardpoint lands on the body's. The renderer loads a character mesh per instance (`load_character`) and poses it each frame (`pose_character`) into its own vertex buffer. In a room, the fixed characters (the bartender, the dealers) stand on their marker. They wear their body, head and hands, and play the looping motion of their idle script (`START_MOTION` events, read into `ThnScript::motions`), lifted by the animation's root height. `--no-characters` leaves the rooms empty. The corpus test poses all 497 fixed characters in their idle animation. Open point: the feet then end up about 15 cm below the floor on average, so the lift may need another reference. The corpus test reads all character meshes in the data and checks their strips and skin.
 
 ## Navigation map
 
@@ -216,6 +216,7 @@ Systems fill up with traffic from their own population zones, as in the original
 - They appear out of sight (2.5 to 7 km away) inside the zone, fly in formation behind their leader, wander through the zone, and traders head for the nearest base and dock. Ships you leave more than 14 km behind make room for new ones.
 - Ships from a faction that's hostile to you attack. Missions can turn traffic off (`RandomPop`) or keep it out of a sphere (`RandomPopSphere`).
 - `--no-traffic` turns it off.
+- `--no-characters` shows the rooms without their characters.
 
 ## Tools
 

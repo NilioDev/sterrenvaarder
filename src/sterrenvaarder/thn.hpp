@@ -39,10 +39,20 @@ struct ThnEntity {
     Vec3 up() const { return {orient[3], orient[4], orient[5]}; }
 };
 
+// A START_MOTION event: an animation script played on a character entity.
+struct ThnMotion {
+    float time = 0;            // when it starts, in the scene
+    std::string target;        // the entity it moves
+    std::string animation;     // the .anm script name (with its "Sc_" prefix)
+    float start_time = 0, duration = 0, time_scale = 1;
+    bool loop = false;          // event_flags LOOP
+};
+
 struct ThnScript {
     double duration = 0;
     std::vector<ThnEntity> entities;
     LuaValue events;  // raw: {time, EVENT_TYPE, targets..., params}
+    std::vector<ThnMotion> motions;  // the START_MOTION events, in order
     const ThnEntity* entity(std::string_view name) const;
     static ThnScript parse(Bytes data);  // throws FormatError
 };

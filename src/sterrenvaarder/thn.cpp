@@ -35,6 +35,22 @@ ThnScript ThnScript::parse(Bytes data) {
     ThnScript out;
     out.duration = chunk.global("duration").num();
     out.events = chunk.global("events");
+    for (std::size_t i = 1; i <= out.events.size(); ++i) {
+        const LuaValue& e = out.events[i];
+        if (!e.is_table() || e[2].str() != "START_MOTION") continue;
+        const LuaValue& who = e[3];
+        const LuaValue& p = e[4];
+        ThnMotion m;
+        m.time = static_cast<float>(e[1].num());
+        m.target = who.is_table() ? who[1].str() : who.str();
+        m.animation = p["animation"].str();
+        m.start_time = static_cast<float>(p["start_time"].num());
+        m.duration = static_cast<float>(p["duration"].num());
+        m.time_scale = static_cast<float>(p["time_scale"].num(1));
+        m.loop = p["event_flags"].str().find("LOOP") != std::string::npos ||
+                 static_cast<int>(p["event_flags"].num()) & 2;
+        if (!m.animation.empty()) out.motions.push_back(std::move(m));
+    }
     const LuaValue& ents = chunk.global("entities");
     for (std::size_t i = 1; i <= ents.size(); ++i) {
         const LuaValue& e = ents[i];
