@@ -41,6 +41,7 @@ void MissionRunner::activate(std::string_view trigger) {
     s.since = clock_;
     s.events_from = events_.size();
     s.closest = -1;
+    s.apart_since = -1;
 }
 
 MissionRunner::Progress MissionRunner::progress() const {
@@ -128,7 +129,9 @@ bool MissionRunner::knows_condition(std::string_view n) {
                                   "DistShip",   "DistVec",      "HealthDec",    "SpaceEnter",   "SpaceExit",
                                   "BaseEnter",  "BaseExit",     "SystemEnter",  "SystemExit",   "PlayerLaunch",
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
-                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect",   "PlayerManeuver"};
+                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect",   "PlayerManeuver",
+                                  "DistVecLbL",  "ProjHitShipToLbl", "InTradelane", "JumpInComplete", "DistCircle",
+                                  "NPCSystemEnter", "TetherBroke"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -156,8 +159,11 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return dead > 0 && dead >= std::max(1, size);
     }
     if (iequals(n, "WatchTrigger")) {
+        // trigger, ON / ACTIVE (switched on) | OFF (switched off) | COMPLETE (has fired, now off)
         bool on = active(c.arg(0));
-        return iequals(c.arg(1), "ON") ? on : !on;
+        if (iequals(c.arg(1), "ON") || iequals(c.arg(1), "ACTIVE")) return on;
+        if (iequals(c.arg(1), "COMPLETE")) return !on && fired(c.arg(0)) > 0;
+        return !on;
     }
     if (iequals(n, "DistShip") || iequals(n, "DistVec")) {
         bool inside = iequals(c.arg(0), "inside");
@@ -217,6 +223,50 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return any_event(T::LocExit, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "RTCDone"))
         return any_event(T::RTCDone, [&](const MissionEvent& e) { return same_data_path(e.a, c.arg(0)); });
+    if (iequals(n, "DistVecLbL")) {
+        // inside | outside, ANY | ALL, label, x, y, z, radius
+        auto ps = w.positions_of(c.arg(2));
+        if (ps.empty()) return false;
+        bool inside = iequals(c.arg(0), "inside"), all = iequals(c.arg(1), "ALL");
+        DVec3 at{c.num(3), c.num(4), c.num(5)};
+        int hits = 0;
+        for (auto& p : ps) hits += ((p - at).length() <= c.num(6)) == inside;
+        return all ? hits == static_cast<int>(ps.size()) : hits > 0;
+    }
+    if (iequals(n, "ProjHitShipToLbl")) {
+        // label, hits needed, shooter: hits on any ship of the label
+        int need = std::max(1, static_cast<int>(c.num(1, 1))), hits = 0;
+        std::string label = to_lower(c.arg(0));
+        for (std::size_t i = s.events_from; i < events_.size(); ++i) {
+            auto& e = events_[i];
+            if (e.type != T::ProjHit || (c.args.size() > 2 && !iequals(e.b, c.arg(2)))) continue;
+            bool in = iequals(e.a, label);
+            if (auto it = ship_labels_.find(to_lower(e.a)); it != ship_labels_.end())
+                in = in || std::find(it->second.begin(), it->second.end(), label) != it->second.end();
+            hits += in;
+        }
+        return hits >= need;
+    }
+    if (iequals(n, "InTradelane")) return w.in_tradelane(c.arg(1)) == c.args[0].as_bool();
+    if (iequals(n, "JumpInComplete"))
+        return any_event(T::JumpInComplete, [&](const MissionEvent& e) { return is(e.a, c.arg(0)); });
+    if (iequals(n, "DistCircle")) {
+        // ship, ring: flying through it (within the ring's opening; our estimate of its size)
+        auto a = w.position(c.arg(0)), b = w.position(c.arg(1));
+        return a && b && (*a - *b).length() < 150;
+    }
+    if (iequals(n, "NPCSystemEnter")) return w.position(c.arg(1)).has_value() && (is(w.system(), c.arg(0)));
+    if (iequals(n, "TetherBroke")) {
+        // ship, other, distance, seconds: they stayed farther apart than that for that long
+        auto a = w.position(c.arg(0)), b = w.position(c.arg(1));
+        if (!a || !b) return false;
+        if ((*a - *b).length() <= c.num(2)) {
+            s.apart_since = -1;
+            return false;
+        }
+        if (s.apart_since < 0) s.apart_since = clock_;
+        return clock_ - s.apart_since >= c.num(3);
+    }
     if (iequals(n, "PlayerManeuver"))
         return any_event(T::PlayerManeuver, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "CharSelect"))

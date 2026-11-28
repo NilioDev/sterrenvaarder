@@ -38,6 +38,7 @@ struct MissionEvent {
         PopUpDialog,    // a = the button the player pressed (CLOSE, ...)
         CharSelect,     // a = the character talked to, b = room, c = base
         PlayerManeuver, // a = Dock / Formation, b = the object or ship
+        JumpInComplete, // a = the system arrived in
     } type;
     std::string a, b, c;
 };
@@ -53,6 +54,9 @@ public:
     virtual std::optional<DVec3> position(std::string_view object) const = 0;
     virtual float health(std::string_view object) const = 0;  // fraction of hull left
     virtual std::string room() const { return {}; }  // room part ("Bar") while docked
+    // Where the live ships of a label are (empty when none, or not known).
+    virtual std::vector<DVec3> positions_of(std::string_view /*label*/) const { return {}; }
+    virtual bool in_tradelane(std::string_view /*ship*/) const { return false; }
 };
 
 class MissionRunner {
@@ -97,6 +101,7 @@ private:
         double since = 0;          // clock when it was activated
         std::size_t events_from = 0;  // first event it may react to
         mutable double closest = -1;  // DistShip ... TICK_AWAY: the nearest it has seen (-1: none yet)
+        mutable double apart_since = -1;  // TetherBroke: clock when the two drifted apart (-1: together)
     };
     bool holds(const MsnTrigger& t, const MsnCommand& c, const State& s, const MissionWorld& w) const;
     void activate(std::string_view trigger);
