@@ -3553,7 +3553,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             if (!m.result.empty()) hud.text(cx, static_cast<float>(h) * 0.35f, 26 * s, m.result, {1, 0.85f, 0.4f, 1}, TextAlign::Center);
         }
         renderer.set_hud(&hud);
-        if (!base_screen && !fs->show_map && hud_cfg.style == game::HudStyle::Classic)
+        if (!base_screen && !fs->show_map && !fs->space_scene && hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
                 renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
