@@ -170,7 +170,13 @@ or label, distances, health, entering space, a base, a system or a trade lane, w
 another trigger, the player's answer to an offer, hits). Then it runs its actions.
 The runner itself handles activating and deactivating triggers and the mission's success
 or failure. Every other action goes to the game. The corpus test checks every story
-script and lists the conditions the runner doesn't evaluate yet. Nothing from the scripts
+script and lists the conditions the runner doesn't evaluate yet.
+
+`--mission M01a` runs a story mission in flight:
+- Mission ships spawn with the ship, loadout and pilot from their `[NPCShipArch]`. Whether they are hostile follows your reputation with their faction.
+- Radio calls and dialogs play one after another (the speaker is shown for now; voices come with audio).
+- Objectives (`SetNNObj`) show their text from your game's own resources, and the outcome is shown when the mission ends.
+- Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
 ## Tools

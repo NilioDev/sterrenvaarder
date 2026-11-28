@@ -146,4 +146,24 @@ MissionScript parse_mission(const IniFile& ini) {
     return m;
 }
 
+std::vector<NpcShipArch> parse_npc_ship_archs(const IniFile& ini) {
+    std::vector<NpcShipArch> out;
+    for (auto& sec : ini) {
+        if (!iequals(sec.name, "NPCShipArch")) continue;
+        NpcShipArch a;
+        for (auto& e : sec.entries) {
+            if (iequals(e.key, "nickname")) a.nickname = first(e);
+            else if (iequals(e.key, "loadout")) a.loadout = first(e);
+            else if (iequals(e.key, "level")) a.level = first(e);
+            else if (iequals(e.key, "ship_archetype")) a.ship_archetype = first(e);
+            else if (iequals(e.key, "pilot")) a.pilot = first(e);
+            else if (iequals(e.key, "state_graph")) a.state_graph = first(e);
+            else if (iequals(e.key, "npc_class"))
+                for (auto& v : e.values) a.npc_class.push_back(v.as_string());
+        }
+        if (!a.nickname.empty()) out.push_back(std::move(a));
+    }
+    return out;
+}
+
 }  // namespace sterrenvaarder

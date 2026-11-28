@@ -36,12 +36,14 @@
 #include "game/combat.hpp"
 #include "game/flight.hpp"
 #include "game/hud.hpp"
+#include "game/mission.hpp"
 #include "game/navigation.hpp"
 #include "game/particles.hpp"
 #include "game/trade.hpp"
 #include "render/renderer.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/effects.hpp"
+#include "sterrenvaarder/mission.hpp"
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -80,6 +82,7 @@ struct Args {
     std::string npc_ship = "pi_fighter";
     bool cruise = false;    // screenshot runs: hold cruise (it charges first)
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
+    std::string mission;    // --mission M01a: run that story mission's script
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
@@ -146,6 +149,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--npcs") a.npcs = std::stoi(next());
         else if (k == "--npc-ship") a.npc_ship = next();
         else if (k == "--npc-pilot") a.npc_pilot = next();
+        else if (k == "--mission") a.mission = next();
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
@@ -288,6 +292,8 @@ struct NpcShip {
     std::vector<AttachedFx> engine_fx, trail_fx;
     DamageFx damage;
     std::vector<Vec3> part_offsets;  // where each model part sits, for breaking up into wreckage
+    bool hostile = true;             // attacks the player (mission ships can be friends)
+    std::string mission_name;        // [MsnShip] nickname, when a mission spawned it
 };
 
 struct Explosion {
@@ -458,6 +464,23 @@ struct FlightSession {
     std::vector<game::Gun> guns;
     std::vector<NpcShip> npcs;
     game::CombatWorld world;
+    int next_body_id = 1;  // combatant ids: 0 is the player
+
+    // Story mission: its script, the runner, and what the HUD shows from it.
+    struct Mission {
+        MissionScript script;
+        std::vector<NpcShipArch> archs;
+        std::optional<game::MissionRunner> runner;
+        std::string objective;  // current objective text
+        struct Comm { std::string speaker, line; float left; };
+        std::vector<Comm> comms;  // radio calls: one plays at a time
+        std::string result;       // shown when the mission ends
+        std::vector<std::string> unhandled;  // action names logged once
+    };
+    std::unique_ptr<Mission> mission;
+    const ShipDatabase* db = nullptr;
+    // (vfs is set with the economy, below)
+    Renderer* rend = nullptr;
     std::vector<Explosion> explosions;
     struct Flash { DVec3 pos; float age = 0; bool shield = false; };
     std::vector<Flash> flashes;
@@ -1054,6 +1077,8 @@ struct FlightSession {
     }
 
     void setup_combat(const ShipDatabase& db, const Vfs& vfs, const Loadout* lo, Renderer& r, const Args& args) {
+        this->db = &db;
+        rend = &r;
         world.set_shield_mods(&db);
         body.id = 0;
         body.radius = 8;
@@ -1064,43 +1089,52 @@ struct FlightSession {
         const ShipArchetype* na = db.ship(args.npc_ship);
         if (!na) { SDL_Log("unknown NPC ship %s", args.npc_ship.c_str()); return; }
         const Loadout* nlo = db.loadout_for_ship(args.npc_ship);
-        auto mesh = r.load_model(na->model, na->material_libraries);
-        auto nguns = guns_for(db, vfs, *na, nlo);
         const Pilot* pilot = pilots ? pilots->pilot(pilot_for(vfs, args)) : nullptr;
         if (pilots && !pilot) SDL_Log("no pilot data for %s; using the simple test AI", args.npc_ship.c_str());
         else if (pilot) SDL_Log("NPC pilot: %s", pilot->nickname.c_str());
         for (int i = 0; i < args.npcs; ++i) {
-            NpcShip n;
-            n.name = na->nickname + " " + std::to_string(i + 1);
-            n.arch = na;
-            for (int p = 0; p < r.model_part_count(mesh); ++p) n.part_offsets.push_back(r.model_part_offset(mesh, p));
-            n.model = game::FlightModel(game::FlightParams::from(*na, nlo ? db.engine_of(*nlo) : nullptr, db.cruise_speed()));
             Vec3 off = ship.orient.rotate({(i - (args.npcs - 1) * 0.5f) * 90.f, 25.f * (i % 2), -700.f - 60.f * i});
-            n.ship.pos = ship.pos + game::to_d(off);
             Vec3 f = ship.orient.forward();
-            n.ship.orient = Quat::look({-f.x, -f.y, -f.z});  // head-on
-            n.body.id = i + 1;
-            n.body.radius = 8;
-            n.body.hull = n.body.max_hull = na->hit_pts * (nlo ? db.armor_scale_of(*nlo) : 1.f);
-            if (nlo) n.body.set_shield(db.shield_of(*nlo));
-            n.guns = nguns;
-            n.mesh = mesh;
-            if (fxdb) {
-                n.engine_fx = engine_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, fx_seed += 16, pending_textures);
-                n.trail_fx = trail_fx_for(*fxdb, vfs, *na, nlo ? db.engine_of(*nlo) : nullptr, false, fx_seed += 16, pending_textures);
-            }
-            n.damage.hardpoints = model_hardpoints(vfs, *na);
-            auto nsh = shield_shape_for(n.damage.hardpoints);
-            n.damage.shield_center = nsh.center;
-            n.damage.shield_radii = nsh.radii;
-            if (pilot) {
-                n.ai.emplace(*pilot, static_cast<std::uint32_t>(i + 1));
-                float rx, uy;
-                game::FighterAi::wing_slot(i, rx, uy);
-                n.ai->set_trail_offset(rx, uy);
-            }
-            npcs.push_back(std::move(n));
+            spawn_npc(db, vfs, r, *na, nlo, pilot, na->nickname + " " + std::to_string(i + 1),
+                      ship.pos + game::to_d(off), Quat::look({-f.x, -f.y, -f.z}), true);
         }
+    }
+
+    // Puts a ship into space with its loadout, pilot, effects and damage points.
+    NpcShip& spawn_npc(const ShipDatabase& db, const Vfs& vfs, Renderer& r, const ShipArchetype& na, const Loadout* nlo,
+                       const Pilot* pilot, std::string name, DVec3 pos, Quat orient, bool hostile) {
+        int slot = static_cast<int>(npcs.size());
+        NpcShip n;
+        n.name = std::move(name);
+        n.arch = &na;
+        n.hostile = hostile;
+        n.mesh = r.load_model(na.model, na.material_libraries);
+        for (int p = 0; p < r.model_part_count(n.mesh); ++p) n.part_offsets.push_back(r.model_part_offset(n.mesh, p));
+        const EngineArchetype* eng = nlo ? db.engine_of(*nlo) : nullptr;
+        n.model = game::FlightModel(game::FlightParams::from(na, eng, db.cruise_speed()));
+        n.ship.pos = pos;
+        n.ship.orient = orient;
+        n.body.id = next_body_id++;
+        n.body.radius = 8;
+        n.body.hull = n.body.max_hull = na.hit_pts * (nlo ? db.armor_scale_of(*nlo) : 1.f);
+        if (nlo) n.body.set_shield(db.shield_of(*nlo));
+        n.guns = guns_for(db, vfs, na, nlo);
+        if (fxdb) {
+            n.engine_fx = engine_fx_for(*fxdb, vfs, na, eng, fx_seed += 16, pending_textures);
+            n.trail_fx = trail_fx_for(*fxdb, vfs, na, eng, false, fx_seed += 16, pending_textures);
+        }
+        n.damage.hardpoints = model_hardpoints(vfs, na);
+        auto nsh = shield_shape_for(n.damage.hardpoints);
+        n.damage.shield_center = nsh.center;
+        n.damage.shield_radii = nsh.radii;
+        if (pilot) {
+            n.ai.emplace(*pilot, static_cast<std::uint32_t>(n.body.id));
+            float rx, uy;
+            game::FighterAi::wing_slot(slot, rx, uy);
+            n.ai->set_trail_offset(rx, uy);
+        }
+        npcs.push_back(std::move(n));
+        return npcs.back();
     }
 
     // The pilot for test NPCs: --npc-pilot, else the first npcships.ini entry flying this
@@ -1128,7 +1162,7 @@ struct FlightSession {
         float hull = n.body.max_hull > 0 ? n.body.hull / n.body.max_hull : 1.f;
         auto out = n.ai->update(self, tgt, hull, true, w, dt);
         n.input = out.input;
-        if (out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) fire_guns(n.guns, n.body.id, n.ship, out.aim_dir);
+        if (n.hostile && out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) fire_guns(n.guns, n.body.id, n.ship, out.aim_dir);
     }
 
     // Pilots hold fire while a wingman is in the line of fire, also beyond the target,
@@ -1165,7 +1199,7 @@ struct FlightSession {
         float range = speed * (n.guns.empty() || !n.guns[0].munition ? 1.f : n.guns[0].munition->lifetime);
         // Bursts of about a second with pauses, and a small aiming error, so a group of
         // pilots does not focus every bolt on the player at once.
-        if (aligned && dist < range * 0.9 && n.burst > 0) {
+        if (n.hostile && aligned && dist < range * 0.9 && n.burst > 0) {
             float a = std::sin(static_cast<float>(sim_time) * 7.3f + n.body.id * 1.7f) * 0.03f;
             float b = std::cos(static_cast<float>(sim_time) * 5.1f + n.body.id * 2.3f) * 0.03f;
             Vec3 r = n.ship.orient.right(), u = n.ship.orient.up();
@@ -1238,6 +1272,8 @@ struct FlightSession {
                 else
                     explosions.push_back({n.ship.pos, 0, 35});
                 break_up(n);
+                if (mission && mission->runner && !n.mission_name.empty())
+                    mission->runner->event({game::MissionEvent::Type::Destroyed, n.mission_name, "", ""});
                 n.mesh = {};
             }
         for (auto& e : explosions) e.age += dt;
@@ -1247,6 +1283,139 @@ struct FlightSession {
         for (auto& f : flashes) f.age += dt;
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
         update_effects(dt_d);
+        update_mission(dt);
+    }
+
+    // ---- story missions
+    struct MissionView : game::MissionWorld {
+        const FlightSession& fs;
+        std::string sys;
+        MissionView(const FlightSession& f, std::string s) : fs(f), sys(std::move(s)) {}
+        std::string system() const override { return sys; }
+        bool in_space() const override { return !fs.docked(); }
+        std::string base() const override { return fs.docked() ? fs.player.base : std::string(); }
+        const NpcShip* npc(std::string_view o) const {
+            for (auto& n : fs.npcs)
+                if (n.body.alive() && iequals(n.mission_name, o)) return &n;
+            return nullptr;
+        }
+        std::optional<DVec3> position(std::string_view o) const override {
+            if (iequals(o, "Player")) return fs.ship.pos;
+            if (auto* n = npc(o)) return n->ship.pos;
+            if (fs.rend)
+                if (auto* so = game::find_object(fs.rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
+            return std::nullopt;
+        }
+        float health(std::string_view o) const override {
+            if (iequals(o, "Player")) return fs.body.hull / std::max(1.f, fs.body.max_hull);
+            if (auto* n = npc(o)) return n->body.hull / std::max(1.f, n->body.max_hull);
+            return 0;
+        }
+    };
+
+    bool start_mission(const Vfs& vfs, const std::string& name) {
+        std::string dir = "missions/" + to_lower(name) + "/";
+        std::string file = dir + to_lower(name) + ".ini";
+        if (!vfs.exists(file)) {
+            SDL_Log("no mission script %s", file.c_str());
+            return false;
+        }
+        auto m = std::make_unique<Mission>();
+        m->script = parse_mission(parse_ini(vfs.read(file)));
+        for (const std::string& f : {m->script.npc_ship_file, std::string("missions/npcships.ini")}) {
+            std::string path = to_lower(f);
+            std::replace(path.begin(), path.end(), '\\', '/');
+            if (!path.empty() && vfs.exists(path))
+                for (auto& a : parse_npc_ship_archs(parse_ini(vfs.read(path)))) m->archs.push_back(std::move(a));
+        }
+        mission = std::move(m);
+        mission->runner.emplace(mission->script);
+        mission->runner->start();
+        SDL_Log("mission %s: %zu triggers", name.c_str(), mission->script.triggers.size());
+        return true;
+    }
+
+    std::string npc_display_name(const MsnNpcDef* npc) const {
+        if (npc && npc->individual_name && strings) return strings->name(static_cast<std::uint32_t>(npc->individual_name), npc->nickname);
+        return npc ? npc->nickname : std::string();
+    }
+
+    void mission_spawn(const std::string& name) {
+        auto& m = *mission;
+        const MsnShipDef* def = m.script.ship(name);
+        const MsnNpcDef* npc = def ? m.script.npc(def->npc) : nullptr;
+        const NpcShipArch* arch = nullptr;
+        if (npc)
+            for (auto& a : m.archs)
+                if (iequals(a.nickname, npc->ship_arch)) arch = &a;
+        const ShipArchetype* sa = arch && db ? db->ship(arch->ship_archetype) : nullptr;
+        if (!def || !sa || !rend || !vfs) {
+            SDL_Log("mission: cannot spawn %s", name.c_str());
+            return;
+        }
+        const Loadout* lo = db->loadout(arch->loadout);
+        const Pilot* pilot = pilots && !arch->pilot.empty() ? pilots->pilot(arch->pilot) : nullptr;
+        bool hostile = factions && !npc->affiliation.empty() && attitude_of(player.rep_with(npc->affiliation)) == Attitude::Hostile;
+        DVec3 pos{def->position[0], def->position[1], def->position[2]};
+        Quat q{def->orientation[0], def->orientation[1], def->orientation[2], def->orientation[3]};
+        auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, npc_display_name(npc), pos, q.normalized(), hostile);
+        n.mission_name = def->nickname;
+        m.runner->ship_spawned(def->nickname);
+    }
+
+    void update_mission(float dt) {
+        if (!mission || !mission->runner) return;
+        auto& m = *mission;
+        // Radio calls play one after another; each reports when it is done.
+        if (!m.comms.empty()) {
+            m.comms.front().left -= dt;
+            if (m.comms.front().left <= 0) {
+                m.runner->event({game::MissionEvent::Type::CommComplete, m.comms.front().line, "", ""});
+                m.comms.erase(m.comms.begin());
+            }
+        }
+        MissionView view(*this, rend ? rend->system().nickname : std::string());
+        m.runner->update(dt, view, [&](const MsnCommand& a, const MsnTrigger&) {
+            if (iequals(a.name, "SpawnShip")) mission_spawn(a.arg(0));
+            else if (iequals(a.name, "Destroy")) {
+                for (auto& n : npcs)
+                    if (iequals(n.mission_name, a.arg(0))) n.mesh = {}, n.body.hull = 0;
+            } else if (iequals(a.name, "SendComm") || iequals(a.name, "EtherComm") || iequals(a.name, "Ethercomm")) {
+                // Speaker and line; the voice clip's length comes later with audio.
+                std::string who = a.arg(0);
+                for (auto& n : npcs)
+                    if (iequals(n.mission_name, who)) who = n.name;
+                if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
+                m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f});
+            } else if (iequals(a.name, "StartDialog")) {
+                // A dialog is a row of radio lines, played in order.
+                if (auto* d = m.script.dialog(a.arg(0)))
+                    for (auto& l : d->lines) {
+                        std::string who = l.source;
+                        for (auto& n : npcs)
+                            if (iequals(n.mission_name, who)) who = n.name;
+                        if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
+                        m.comms.push_back({who, l.line, 4.f});
+                    }
+            } else if (iequals(a.name, "MovePlayer")) {
+                // MovePlayer = x, y, z, radius: puts the player there (scene changes).
+                ship.pos = {a.num(0), a.num(1), a.num(2)};
+                ship.vel = {};
+            } else if (iequals(a.name, "SetNNObj")) {
+                for (auto& o : m.script.objectives)
+                    if (iequals(o.nickname, a.arg(0)) && iequals(o.type.name, "type") && !o.type.args.empty() &&
+                        iequals(o.type.arg(0), "ids") && strings)
+                        m.objective = strings->name(static_cast<std::uint32_t>(o.type.num(1)), o.nickname);
+            } else if (iequals(a.name, "ChangeState")) {
+                bool won = iequals(a.arg(0), "SUCCEED");
+                m.result = won ? "MISSION COMPLETE" : "MISSION FAILED";
+                if (strings && a.num(1) > 0)
+                    if (auto t = strings->string(static_cast<std::uint32_t>(a.num(1)))) m.result += ": " + *t;
+                SDL_Log("mission: %s", m.result.c_str());
+            } else if (std::find(m.unhandled.begin(), m.unhandled.end(), a.name) == m.unhandled.end()) {
+                m.unhandled.push_back(a.name);
+            }
+        });
     }
 
     void draw_combat(Renderer& r) {
@@ -1438,6 +1607,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
     fs.player.ship = arch->nickname;
     fs.player.hold_size = arch->hold_size;
     fs.npcs.clear();
+    fs.next_body_id = 1;
     fs.wrecks.clear();
     Args a = args;
     if (!spawn_npcs) a.npcs = 0;
@@ -1583,6 +1753,7 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
         return;
     }
     fs.npcs.clear();
+    fs.next_body_id = 1;
     fs.wrecks.clear();
     if (auto* o = game::find_object(renderer.system(), obj)) {
         auto sp = game::exit_point(*o, 600.f);
@@ -1622,6 +1793,15 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         bool base_screen = fs->docked() && fs->econ;
         if (base_screen) game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
         else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
+        if (!base_screen && fs->mission) {
+            // Mission lines: the current objective, who is on the radio, and the outcome.
+            auto& m = *fs->mission;
+            float s = static_cast<float>(h) / 1080.f, cx = static_cast<float>(w) * 0.5f;
+            HudColor text{0.55f, 0.85f, 1.f, 0.95f}, call{0.9f, 0.9f, 0.6f, 0.95f};
+            if (!m.objective.empty()) hud.text(cx, 70 * s, 16 * s, m.objective, text, TextAlign::Center);
+            if (!m.comms.empty()) hud.text(cx, 100 * s, 15 * s, m.comms.front().speaker + "  (radio)", call, TextAlign::Center);
+            if (!m.result.empty()) hud.text(cx, static_cast<float>(h) * 0.35f, 26 * s, m.result, {1, 0.85f, 0.4f, 1}, TextAlign::Center);
+        }
         renderer.set_hud(&hud);
         if (!base_screen && hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
@@ -1706,6 +1886,7 @@ int run(const Args& args) {
             fs->universe = &universe;
             fs->spawn(renderer.system(), args);
             set_ship(*fs, *ships, vfs, renderer, args, args.ship, {}, true);
+            if (!args.mission.empty()) fs->start_mission(vfs, args.mission);
             fs->player.system = renderer.system().nickname;
             if (!args.load.empty()) {
                 auto p = read_save_file(args.load);
@@ -1853,6 +2034,19 @@ int run(const Args& args) {
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
+                if (fs->mission) {
+                    auto& m = *fs->mission;
+                    int fired = 0;
+                    for (auto& t : m.script.triggers) fired += m.runner->fired(t.nickname);
+                    std::string un;
+                    for (auto& u : m.unhandled) un += u + " ";
+                    for (auto& t : m.script.triggers)
+                        if (m.runner->active(t.nickname))
+                            SDL_Log("  waiting: %s (%s) in %s", t.nickname.c_str(),
+                                    t.conditions.empty() ? "-" : t.conditions[0].name.c_str(), t.system.c_str());
+                    SDL_Log("mission: %d of %zu triggers fired, %zu ships, objective '%s', not handled yet: %s", fired,
+                            m.script.triggers.size(), fs->npcs.size(), m.objective.c_str(), un.c_str());
+                }
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),

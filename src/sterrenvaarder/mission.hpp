@@ -100,4 +100,12 @@ struct MissionScript {
 
 MissionScript parse_mission(const IniFile& ini);
 
+// [NPCShipArch] from npcships.ini (the mission's own npc_ship_file, or missions/npcships.ini):
+// which ship, loadout and pilot an NPC flies.
+struct NpcShipArch {
+    std::string nickname, loadout, level, ship_archetype, pilot, state_graph;
+    std::vector<std::string> npc_class;
+};
+std::vector<NpcShipArch> parse_npc_ship_archs(const IniFile& ini);
+
 }  // namespace sterrenvaarder
