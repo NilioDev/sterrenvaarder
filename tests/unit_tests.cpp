@@ -28,6 +28,7 @@ static int failures = 0;
 #include "game/navigation.hpp"
 #include "game/particles.hpp"
 #include "game/mission.hpp"
+#include "game/vibes.hpp"
 #include "game/population.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
@@ -1175,8 +1176,54 @@ static void test_mission_start() {
     pr.event({game::MissionEvent::Type::PopUpDialog, "close", "", ""});
     pr.update(0.1f, dw, act);
     CHECK(pings == 2 && pr.waiting_on("CharSelect").empty());
+    // Moving away from a point (TICK_AWAY) and asking for a maneuver.
+    MissionScript ts = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_away\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 50, TICK_AWAY\nAct_Ping = x\n"
+        "[Trigger]\nnickname = t_dock\nInitState = ACTIVE\nCnd_PlayerManeuver = Dock, ring_1\nAct_Ping = x\n"));
+    struct MovingWorld : game::MissionWorld {
+        double player_x = 2000;
+        std::string system() const override { return "Sys01"; }
+        bool in_space() const override { return true; }
+        std::string base() const override { return {}; }
+        std::optional<game::DVec3> position(std::string_view o) const override {
+            if (o == "Player") return game::DVec3{player_x, 0, 0};
+            return game::DVec3{0, 0, 0};
+        }
+        float health(std::string_view) const override { return 1; }
+    } mw;
+    game::MissionRunner tr(ts);
+    pings = 0;
+    tr.start();
+    tr.update(0.1f, mw, act);
+    mw.player_x = 1900;  // outside, but closing in
+    tr.update(0.1f, mw, act);
+    mw.player_x = 1940;  // turned back, not yet a tick farther than the nearest
+    tr.update(0.1f, mw, act);
+    CHECK(pings == 0);
+    mw.player_x = 1960;
+    tr.update(0.1f, mw, act);
+    CHECK(pings == 1);
+    tr.event({game::MissionEvent::Type::PlayerManeuver, "Dock", "ring_2", ""});
+    tr.update(0.1f, mw, act);
+    CHECK(pings == 1);
+    tr.event({game::MissionEvent::Type::PlayerManeuver, "dock", "RING_1", ""});
+    tr.update(0.1f, mw, act);
+    CHECK(pings == 2);
     auto rel = parse_rtc(parse_text_ini("[CharacterEncounter]\nLocation = b1, Bar\nrelocate_player = Deck2, b2\n"));
     CHECK(rel.relocate_player == "Deck2" && rel.relocate_base == "b2");
+}
+
+static void test_vibes() {
+    CHECK(game::rep_value("REP_HOSTILE_MAXIMUM") < -0.8f && game::rep_value("REP_HOSTILE_THRESHOLD") <= -0.6f);
+    CHECK(game::rep_value("REP_FRIEND_MAXIMUM") > 0.8f && game::rep_value("REP_NEUTRAL") == 0);
+    game::Vibes v;
+    v.set("lbl_raiders", "convoy_lead", game::rep_value("REP_HOSTILE_MAXIMUM"));
+    // One way only: the raiders hate the convoy leader; the leader has no say yet.
+    auto r = v.between({"raider_1", "LBL_RAIDERS"}, {"Convoy_Lead", "lbl_convoy"});
+    CHECK(r && *r < -0.8f);
+    CHECK(!v.between({"convoy_lead"}, {"raider_1", "lbl_raiders"}));
+    v.set("convoy_lead", "lbl_raiders", game::rep_value("REP_FRIEND_MAXIMUM"));
+    CHECK(v.between({"convoy_lead"}, {"raider_1", "lbl_raiders"}) > 0.8f);
 }
 
 static void test_new_player_file() {
@@ -1470,6 +1517,7 @@ static void test_postfx() {
 int main() {
     test_mission();
     test_new_player_file();
+    test_vibes();
     test_population();
     test_dfm_strips();
     test_skinning();

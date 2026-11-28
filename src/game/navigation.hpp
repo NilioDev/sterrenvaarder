@@ -22,11 +22,13 @@ public:
     DVec3 position() const { return pos_; }
     Vec3 direction() const { return dir_; }
     const std::vector<DVec3>& rings() const { return rings_; }
+    const std::vector<std::string>& ring_names() const { return names_; }  // nicknames, in travel order
     std::size_t next_index() const { return next_; }
     float speed() const { return speed_; }
 
 private:
     std::vector<DVec3> rings_;
+    std::vector<std::string> names_;
     std::size_t next_ = 1;
     DVec3 pos_;
     Vec3 dir_{0, 0, -1};

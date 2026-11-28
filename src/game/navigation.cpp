@@ -17,6 +17,7 @@ std::optional<LaneTrip> LaneTrip::start(const StarSystem& sys, const SystemObjec
     const SystemObject* cur = &entry;
     for (int guard = 0; cur && guard < 256; ++guard) {
         t.rings_.push_back({cur->pos.x, cur->pos.y, cur->pos.z});
+        t.names_.push_back(cur->nickname);
         const std::string& nx = forward ? cur->next_ring : cur->prev_ring;
         cur = nx.empty() ? nullptr : find_object(sys, nx);
     }

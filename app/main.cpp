@@ -29,6 +29,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@
 #include "sterrenvaarder/thn.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
+#include "game/vibes.hpp"
 #include "game/mixer.hpp"
 #include "game/music.hpp"
 #include "game/radio.hpp"
@@ -108,6 +110,7 @@ struct Args {
     bool show_map = false;    // open the navigation map
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
+    bool autoplay = false;                            // test runs: fly and fight for the player (see FlightSession::autoplay)
     std::string dock;  // screenshot runs: autopilot to this object first
     bool ship_given = false;
     bool new_game = false;
@@ -148,6 +151,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--free") a.free = true;
         else if (k == "--ship") { a.ship = next(); a.ship_given = true; }
         else if (k == "--new-game") a.new_game = true;
+        else if (k == "--autoplay") a.autoplay = true;
         else if (k == "--load") a.load = next();
         else if (k == "--save-file") a.save_file = next();
         else if (k == "--exe") a.exe = next();
@@ -344,6 +348,8 @@ struct NpcShip {
     DamageFx damage;
     std::vector<Vec3> part_offsets;  // where each model part sits, for breaking up into wreckage
     bool hostile = true;             // attacks the player (mission ships can be friends)
+    std::string faction;             // its faction group (for fights between ships), when known
+    std::vector<std::string> names;  // mission nickname and labels (for SetVibe), when a mission spawned it
     bool cloaked = false;            // mission Cloak: unseen and untargetable
     std::string mission_name;        // [MsnShip] nickname, when a mission spawned it
     // Mission orders ([ObjList] steps given by GiveObjList), worked through in order.
@@ -824,6 +830,7 @@ struct FlightSession {
         bool seen = false;
         int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
         float next_in = -1;     // after success: seconds until the next story mission
+        std::set<std::string> maneuver_off;  // EnableManeuver = name, false: maneuvers switched off (lower case)
         // A message box the mission put up (title and text ids, its buttons), until closed.
         struct Popup { std::uint32_t title = 0, text = 0; std::vector<std::string> buttons; };
         std::optional<Popup> popup;
@@ -899,7 +906,8 @@ struct FlightSession {
     Vec3 aim_dir{0, 0, -1};
 
     // Navigation: autopilot approach, trade lanes, docking and jumps.
-    enum class Nav { Free, Approach, Lane, Docked };
+    enum class Nav { Free, Approach, Lane, Docked, Formation };
+    int formation_leader = -1;  // Nav::Formation: body id of the ship the player flies beside
     Nav nav = Nav::Free;
     std::string nav_target;            // object nickname
     std::optional<game::LaneTrip> lane;
@@ -1505,6 +1513,14 @@ struct FlightSession {
         if (target < 0 || target >= static_cast<int>(contacts.size())) return;
         const SystemObject* o = object_named(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
+        // A mission can switch the dock maneuver off (EnableManeuver = Dock, false). Asking to
+        // dock is a maneuver missions watch for (PlayerManeuver = Dock, object), allowed or not.
+        if (mission && mission->maneuver_off.count("dock")) {
+            notice = "NOT AVAILABLE NOW";
+            notice_time = 3.f;
+            return;
+        }
+        if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::PlayerManeuver, "Dock", o->nickname, ""});
         if (!may_use(*o)) {
             notice = o->is_tradelane() ? "TRADE LANE NOT AVAILABLE" : "DOCKING NOT PERMITTED: " + label_of(*o);
             notice_time = 4.f;
@@ -1528,18 +1544,157 @@ struct FlightSession {
         switch (nav) {
             case Nav::Approach: return "AUTOPILOT: " + nav_target;
             case Nav::Lane: return "TRADE LANE";
+            case Nav::Formation: return "FORMATION";
             case Nav::Docked: return "DOCKED: " + docked_label + "  (F3 = LAUNCH)";
             default: return {};
         }
     }
 
+    // Formation (F4): fly beside the targeted ship, or leave formation. Missions watch it
+    // (PlayerManeuver = formation, ship; leaving reports "inverse") and can switch it off.
+    void formation_request() {
+        auto report = [&](const std::string& who) {
+            if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::PlayerManeuver, "formation", who, ""});
+        };
+        if (nav == Nav::Formation) {
+            nav = Nav::Free;
+            formation_leader = -1;
+            report("inverse");
+            return;
+        }
+        if (nav != Nav::Free || target < 0 || target >= static_cast<int>(contacts.size())) return;
+        const NpcShip* lead = nullptr;
+        for (auto& n : npcs)
+            if (n.body.alive() && n.name == contacts[target].name) lead = &n;
+        if (!lead) return;
+        if (mission && mission->maneuver_off.count("formation")) {
+            notice = "NOT AVAILABLE NOW";
+            notice_time = 3.f;
+            return;
+        }
+        if (lead->hostile) {
+            notice = "CANNOT FORM UP WITH A HOSTILE SHIP";
+            notice_time = 3.f;
+            return;
+        }
+        report(lead->mission_name.empty() ? lead->name : lead->mission_name);
+        nav = Nav::Formation;
+        formation_leader = lead->body.id;
+    }
+
     // Returns true while navigation owns the controls.
+    // Test runs (--autoplay): plays the player's part in space so a mission can be followed
+    // without hands. Fights the nearest hostile ship close by, else flies to the objective.
+    std::string autoplay_doing;
+    void autoplay(const StarSystem& sys) {
+        input.steer = {};
+        firing = false;
+        autoplay_doing.clear();
+        if (docked() || space_scene || nav != Nav::Free) return;
+        const NpcShip* foe = nullptr;
+        double best = 3000;
+        for (auto& n : npcs)
+            if (n.body.alive() && n.hostile)
+                if (double d = (n.body.pos - ship.pos).length(); d < best) best = d, foe = &n;
+        if (foe) {
+            DVec3 to = foe->body.pos - ship.pos;
+            Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+            input.steer = game::steer_towards(ship.orient, dir, 1.f);
+            input.cruise = false;
+            input.throttle = best > 600 ? 1.f : 0.5f;
+            aim_dir = dir;
+            firing = game::dot(ship.orient.forward(), dir) > 0.97f && best < 1200;
+            autoplay_doing = "fights " + foe->name;
+            return;
+        }
+        // The mission waits for the player to form up with a ship: do so.
+        if (mission && mission->runner)
+            for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
+                if (iequals(c.arg(0), "formation") && !iequals(c.arg(1), "inverse"))
+                    for (auto& n : npcs)
+                        if (n.body.alive() && !n.mission_name.empty() && iequals(n.mission_name, c.arg(1)) && !mission->maneuver_off.count("formation")) {
+                            DVec3 to = n.ship.pos - ship.pos;
+                            if (to.length() < 2500) {
+                                contacts.push_back({n.name, {}, 0, false});
+                                target = static_cast<int>(contacts.size() - 1);
+                                formation_request();
+                                autoplay_doing = "forms up with " + n.name;
+                                return;
+                            }
+                            Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                            input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                            input.throttle = 1.f;
+                            input.cruise = to.length() > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                            autoplay_doing = "flies to " + n.name;
+                            return;
+                        }
+        auto m = nav_map(sys);
+        if (!m.has_waypoint) {
+            input.throttle = 0;
+            input.cruise = false;
+            return;
+        }
+        DVec3 to = m.waypoint - ship.pos;
+        double dist = to.length();
+        // A waypoint on a trade lane ring or a jump gate: take it, as a player would.
+        if (mission && mission->waypoint && !mission->waypoint->object.empty() && dist < 1200)
+            if (auto* o = object_named(sys, mission->waypoint->object); o && (o->is_tradelane() || o->is_jump())) {
+                contacts.push_back({o->nickname, {}, 0, true});
+                target = static_cast<int>(contacts.size() - 1);
+                dock_request(sys);
+                autoplay_doing = "takes " + o->nickname;
+                return;
+            }
+        if (dist < 400) {
+            input.throttle = 0;
+            input.cruise = false;
+            autoplay_doing = "waits at the objective";
+            return;
+        }
+        Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+        input.steer = game::steer_towards(ship.orient, dir, 1.f);
+        bool facing = game::dot(ship.orient.forward(), dir) > 0.95f;
+        input.throttle = 1.f;
+        input.cruise = facing && dist > 3000;
+        autoplay_doing = "flies to the objective";
+    }
+
     bool update_nav(const StarSystem& sys, double dt) {
         notice_time = std::max(0.f, notice_time - static_cast<float>(dt));
         if (nav == Nav::Free) return false;
         if (nav == Nav::Docked) { ship.vel = {}; return true; }
+        if (nav == Nav::Formation) {
+            const NpcShip* lead = nullptr;
+            for (auto& n : npcs)
+                if (n.body.id == formation_leader && n.body.alive()) lead = &n;
+            if (!lead) {
+                nav = Nav::Free;
+                formation_leader = -1;
+                return false;
+            }
+            // Our slot: behind and to the right of the leader (our estimate of the original's).
+            DVec3 spot = lead->ship.pos + game::to_d(lead->ship.orient.rotate({40, 0, 60}));
+            DVec3 to = spot - ship.pos;
+            double dist = to.length();
+            if (dist < 200) {
+                // In the slot: keep station, moving and turning with the leader.
+                double k = std::min(1.0, dt * 2.0);
+                ship.pos = ship.pos + to * k;
+                ship.vel = lead->ship.vel;
+                ship.orient = Quat::slerp(ship.orient, lead->ship.orient, static_cast<float>(k));
+                return true;
+            }
+            Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+            input.steer = game::steer_towards(ship.orient, dir, 1.f);
+            input.throttle = 1.f;
+            input.cruise = dist > 2500 && game::dot(ship.orient.forward(), dir) > 0.97f;
+            return false;  // the flight model flies us there
+        }
         if (nav == Nav::Lane) {
             if (!lane || !lane->update(dt)) {
+                // TLExited = ship, the last ring
+                if (lane && mission && mission->runner)
+                    mission->runner->event({game::MissionEvent::Type::TLExited, "Player", lane->ring_names().back(), ""});
                 // Leave the lane at the last ring, moving at normal flight speed.
                 ship.vel = game::to_d(ship.orient.forward()) * 80.0;
                 lane.reset();
@@ -1562,6 +1717,9 @@ struct FlightSession {
             if (o->is_tradelane()) {
                 lane = game::LaneTrip::start(sys, *o);
                 nav = lane ? Nav::Lane : Nav::Free;
+                // TLEntered = ship, ring entered, the ring after it
+                if (lane && mission && mission->runner)
+                    mission->runner->event({game::MissionEvent::Type::TLEntered, "Player", lane->ring_names()[0], lane->ring_names()[1]});
             } else if (o->is_jump()) {
                 pending_jump_system = o->goto_system;
                 pending_jump_object = o->goto_object;
@@ -1657,18 +1815,65 @@ struct FlightSession {
         return "light_fighter_default";
     }
 
+    // ---- fights between ships
+    game::Vibes vibes;  // SetVibe: how mission ships feel about each other
+    static constexpr double kNpcScanRange = 2500;  // how far a ship looks for enemies other than the player (our estimate)
+    // Whether ship a attacks ship b: the mission's vibe from a to b first, else how a's faction
+    // feels about b's. It goes one way: a mission can have b take the attack without firing back.
+    bool npc_enemies(const NpcShip& a, const NpcShip& b) const {
+        if (auto v = vibes.between(a.names, b.names)) return attitude_of(*v) == Attitude::Hostile;
+        if (!factions || a.faction.empty() || b.faction.empty()) return false;
+        auto* f = factions->faction(a.faction);
+        if (!f) return false;
+        auto it = f->rep.find(to_lower(b.faction));
+        return it != f->rep.end() && attitude_of(it->second) == Attitude::Hostile;
+    }
+    // Who a ship fights now: the player if it is hostile to them, or a nearer enemy ship.
+    struct Foe { game::AiBody body; int id = 0; double dist = 0; };
+    std::optional<Foe> npc_foe(const NpcShip& n) const {
+        std::optional<Foe> best;
+        if (n.hostile && body.alive())
+            best = Foe{{ship.pos, ship.vel, ship.orient}, body.id, (ship.pos - n.ship.pos).length()};
+        for (auto& o : npcs) {
+            if (&o == &n || !o.body.alive() || o.docked_away || o.cloaked) continue;
+            double d = (o.ship.pos - n.ship.pos).length();
+            if (d > kNpcScanRange || (best && d >= best->dist) || !npc_enemies(n, o)) continue;
+            best = Foe{{o.ship.pos, o.ship.vel, o.ship.orient}, o.body.id, d};
+        }
+        return best;
+    }
+
+    // Gunboats, cruisers, transports and the like do not dogfight: they hold their course
+    // and their turrets fire at what comes in range.
+    static bool is_big_ship(const NpcShip& n) {
+        if (!n.arch) return false;
+        const std::string& t = n.arch->type;
+        return !t.empty() && !iequals(t, "FIGHTER") && !iequals(t, "ELITE") && !iequals(t, "VERYHEAVYFIGHTER") &&
+               !iequals(t, "HEAVYFIGHTER") && !iequals(t, "LIGHTFIGHTER");
+    }
+    void npc_think_big(NpcShip& n, const Foe& foe) {
+        n.input = {};
+        n.input.throttle = 0.f;
+        if (n.guns.empty() || n.burst <= 0) return;
+        float speed = n.guns[0].arch ? n.guns[0].arch->muzzle_velocity : 600.f;
+        float range = speed * (n.guns[0].munition ? n.guns[0].munition->lifetime : 1.f);
+        if (foe.dist > range * 0.9) return;
+        DVec3 lead = foe.body.pos + foe.body.vel * (foe.dist / speed) - n.ship.pos;
+        fire_guns(n.guns, n.body.id, n.ship, render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)}));
+    }
+
     // Original-data AI: the pilot's blocks decide how it flies and shoots.
-    void npc_think_pilot(NpcShip& n, float dt) {
-        if (!body.alive()) { n.input = {}; n.input.throttle = 0.5f; return; }
+    void npc_think_pilot(NpcShip& n, float dt, const Foe& foe) {
+        if (foe.id == body.id && !body.alive()) { n.input = {}; n.input.throttle = 0.5f; return; }
         game::AiBody self{n.ship.pos, n.ship.vel, n.ship.orient};
-        game::AiBody tgt{ship.pos, ship.vel, ship.orient};
+        game::AiBody tgt = foe.body;
         game::AiWeapons w;
         if (!n.guns.empty() && n.guns[0].arch) w.muzzle_speed = n.guns[0].arch->muzzle_velocity;
         if (!n.guns.empty() && n.guns[0].munition) w.range = w.muzzle_speed * n.guns[0].munition->lifetime;
         float hull = n.body.max_hull > 0 ? n.body.hull / n.body.max_hull : 1.f;
         auto out = n.ai->update(self, tgt, hull, true, w, dt);
         n.input = out.input;
-        if (n.hostile && out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) fire_guns(n.guns, n.body.id, n.ship, out.aim_dir);
+        if (out.fire && !ally_in_line(n, out.aim_dir, w.muzzle_speed, w.range)) fire_guns(n.guns, n.body.id, n.ship, out.aim_dir);
     }
 
     // Pilots hold fire while a wingman is in the line of fire, also beyond the target,
@@ -1676,7 +1881,8 @@ struct FlightSession {
     // Allies are checked where they will be when the bolt passes them.
     bool ally_in_line(const NpcShip& n, Vec3 dir, float muzzle_speed, float range) const {
         for (auto& o : npcs) {
-            if (&o == &n || !o.body.alive()) continue;
+            // Its own target and other ships it would attack are no reason to hold fire.
+            if (&o == &n || !o.body.alive() || npc_enemies(n, o)) continue;
             DVec3 now = o.ship.pos - n.ship.pos;
             double t = now.length() / std::max(1.f, muzzle_speed);
             DVec3 to = now + (o.ship.vel - n.ship.vel) * t;
@@ -1779,12 +1985,18 @@ struct FlightSession {
         else { n.input = {}; n.input.throttle = 0.f; }
     }
 
-    void npc_think(NpcShip& n) {
-        if (!body.alive()) { n.input.throttle = 0.5f; n.input.steer = {}; return; }
+    // A mission ship that leaves the scene (docks, its time runs out) no longer counts for
+    // "every ship of the label destroyed".
+    void npc_left(const NpcShip& n) {
+        if (mission && mission->runner && !n.mission_name.empty()) mission->runner->ship_left(n.mission_name);
+    }
+
+    void npc_think(NpcShip& n, const Foe& foe) {
+        if (foe.id == body.id && !body.alive()) { n.input.throttle = 0.5f; n.input.steer = {}; return; }
         float speed = n.guns.empty() || !n.guns[0].arch ? 600.f : n.guns[0].arch->muzzle_velocity;
-        DVec3 to = ship.pos - n.ship.pos;
+        DVec3 to = foe.body.pos - n.ship.pos;
         double dist = to.length();
-        DVec3 lead = ship.pos + ship.vel * (dist / speed) - n.ship.pos;
+        DVec3 lead = foe.body.pos + foe.body.vel * (dist / speed) - n.ship.pos;
         Vec3 dir = render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)});
         Vec3 local = n.ship.orient.conjugate().rotate(dir);
         n.input.steer = {std::clamp(local.y * 3.f, -1.f, 1.f), std::clamp(-local.x * 3.f, -1.f, 1.f), 0};
@@ -1794,7 +2006,7 @@ struct FlightSession {
         float range = speed * (n.guns.empty() || !n.guns[0].munition ? 1.f : n.guns[0].munition->lifetime);
         // Bursts of about a second with pauses, and a small aiming error, so a group of
         // pilots does not focus every bolt on the player at once.
-        if (n.hostile && aligned && dist < range * 0.9 && n.burst > 0) {
+        if (aligned && dist < range * 0.9 && n.burst > 0) {
             float a = std::sin(static_cast<float>(sim_time) * 7.3f + n.body.id * 1.7f) * 0.03f;
             float b = std::cos(static_cast<float>(sim_time) * 5.1f + n.body.id * 2.3f) * 0.03f;
             Vec3 r = n.ship.orient.right(), u = n.ship.orient.up();
@@ -1815,6 +2027,7 @@ struct FlightSession {
                     n.mesh = {};
                     n.body.hull = 0;
                     n.docked_away = true;
+                    npc_left(n);
                 }
             }
             n.burst = n.burst > 0 ? n.burst - dt : n.burst + dt;
@@ -1829,9 +2042,11 @@ struct FlightSession {
             world.update_guns(n.guns, dt);
             if (n.held_off) hold_off(n);
             else if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
-            else if (!n.hostile) { n.input = {}; n.input.throttle = 0.f; }
-            else if (n.ai) npc_think_pilot(n, dt);
-            else npc_think(n);
+            else if (auto foe = npc_foe(n)) {
+                if (is_big_ship(n)) npc_think_big(n, *foe);
+                else if (n.ai) npc_think_pilot(n, dt, *foe);
+                else npc_think(n, *foe);
+            } else { n.input = {}; n.input.throttle = 0.f; }
             n.model.update(n.ship, n.input, dt_d);
             n.body.pos = n.ship.pos;
             n.body.update(dt);
@@ -1842,6 +2057,17 @@ struct FlightSession {
         for (auto& n : npcs) targets.push_back(&n.body);
         music.since_combat += dt;
         world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
+            // Report the hit to the mission (ProjHit = ship hit, shooter).
+            if (mission && mission->runner) {
+                auto name_of = [&](int id) -> std::string {
+                    if (id == body.id) return "Player";
+                    for (auto& nn : npcs)
+                        if (nn.body.id == id) return nn.mission_name;
+                    return {};
+                };
+                std::string hit = name_of(t.id), by = name_of(p.owner);
+                if (!hit.empty()) mission->runner->event({game::MissionEvent::Type::ProjHit, hit, by, ""});
+            }
             // Shots landing on the player or on an enemy mean a fight is on (battle music).
             if (t.id == 0) music.since_combat = 0;
             for (auto& nn : npcs)
@@ -2279,6 +2505,7 @@ struct FlightSession {
                     n.mesh = {};
                     n.body.hull = 0;
                     n.docked_away = true;  // just out of the scene, no explosion
+                    npc_left(n);
                 }
             } else if (n.pop_leader && n.order_step >= n.orders.size()) {
                 give_traffic_orders(n);
@@ -2311,6 +2538,7 @@ struct FlightSession {
                 auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, name, pos, q, hostile);
                 n.pop_zone = static_cast<int>(s.zone);
                 n.pop_arch = a;
+                n.faction = s.faction;
                 n.pop_behavior = s.behavior;
                 n.mission_name = "~traffic" + std::to_string(++t.serial);
                 if (leader.empty()) {
@@ -2436,6 +2664,7 @@ struct FlightSession {
         marked.clear();
         music.mission = {};
         mission->runner.emplace(mission->script);
+        vibes.clear();
         mission->runner->start();
         SDL_Log("mission %s: %zu triggers", name.c_str(), mission->script.triggers.size());
         return true;
@@ -2620,6 +2849,9 @@ struct FlightSession {
         Quat q = facing ? *facing : Quat{def->orientation[0], def->orientation[1], def->orientation[2], def->orientation[3]};
         auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, npc_display_name(npc), pos, q.normalized(), hostile);
         n.mission_name = def->nickname;
+        n.faction = npc->affiliation;
+        n.names = {def->nickname};
+        for (auto& l : def->labels) n.names.push_back(l);
         m.runner->ship_spawned(def->nickname);
     }
 
@@ -2726,7 +2958,7 @@ struct FlightSession {
     // Works the ship's current order. Returns false when there is nothing to do, or a
     // hostile ship is close enough to the player to fight instead.
     bool npc_follow_orders(NpcShip& n, float dt) {
-        if (n.hostile && body.alive() && (ship.pos - n.ship.pos).length() < 1500) return false;
+        if (auto foe = npc_foe(n); foe && foe->dist < 1500) return false;  // a fight close by comes first
         while (n.order_step < n.orders.size()) {
             const MsnCommand& o = n.orders[n.order_step];
             n.order_time += dt;
@@ -2755,7 +2987,7 @@ struct FlightSession {
                 if (!lead) { next(); continue; }
                 Vec3 off = iequals(k, "Follow") && o.args.size() >= 5 ? Vec3{o.num(2), o.num(3), o.num(4)} : Vec3{30, 0, 40};
                 DVec3 spot = lead->pos + game::to_d(lead->orient.rotate(off));
-                if (steer_to(n, spot, 30, 1.f, false)) {
+                if (steer_to(n, spot, 30, 1.f, true)) {  // far behind: cruise to catch up
                     n.ship.orient = lead->orient;
                     n.input.throttle = 0.8f;
                 }
@@ -2771,6 +3003,7 @@ struct FlightSession {
                 auto p = where(o.arg(0));
                 if (!p || steer_to(n, *p, 300, 1.f, true)) {
                     n.docked_away = true;
+                    npc_left(n);
                     n.mesh = {};
                     n.body.hull = 0;
                     next();
@@ -2810,6 +3043,11 @@ struct FlightSession {
             if (!match && mission)
                 if (auto* d = mission->script.ship(n.mission_name))
                     for (auto& l : d->labels) match = match || iequals(l, name);
+            // A formation's nickname stands for its ships (GiveObjList = formation, list).
+            if (!match && mission)
+                for (auto& fm : mission->script.formations)
+                    if (iequals(fm.nickname, name))
+                        for (auto& sh : fm.ships) match = match || iequals(sh, n.mission_name);
             if (match) f(n);
         }
     }
@@ -2984,7 +3222,11 @@ struct FlightSession {
             }
             else if (iequals(a.name, "Destroy")) {
                 for (auto& n : npcs)
-                    if (iequals(n.mission_name, a.arg(0))) n.mesh = {}, n.body.hull = 0;
+                    if (iequals(n.mission_name, a.arg(0)) && n.body.alive()) {
+                        n.mesh = {};
+                        n.body.hull = 0;
+                        npc_left(n);
+                    }
             } else if (iequals(a.name, "SendComm") || iequals(a.name, "EtherComm") || iequals(a.name, "Ethercomm")) {
                 // Speaker and line; the voice clip's length comes later with audio.
                 std::string who = a.arg(0);
@@ -3079,11 +3321,20 @@ struct FlightSession {
                         n.order_time = 0;
                     });
             } else if (iequals(a.name, "RelocateShip")) {
-                // RelocateShip = ship, x, y, z: moves it there at once.
-                for_mission_ships(a.arg(0), [&](NpcShip& n) {
-                    n.ship.pos = {a.num(1), a.num(2), a.num(3)};
-                    n.ship.vel = {};
-                });
+                // RelocateShip = ship, x, y, z [, orientation w, x, y, z]: moves it there at once.
+                // The player too: scenes park them out of the way and bring them back.
+                std::optional<Quat> q;
+                if (a.args.size() >= 8) q = Quat{a.num(4), a.num(5), a.num(6), a.num(7)}.normalized();
+                if (iequals(a.arg(0), "Player")) {
+                    ship.pos = {a.num(1), a.num(2), a.num(3)};
+                    ship.vel = {};
+                    if (q) ship.orient = cam_orient = *q;
+                } else
+                    for_mission_ships(a.arg(0), [&](NpcShip& n) {
+                        n.ship.pos = {a.num(1), a.num(2), a.num(3)};
+                        n.ship.vel = {};
+                        if (q) n.ship.orient = *q;
+                    });
             } else if (iequals(a.name, "LightFuse")) {
                 // LightFuse = ship, fuse: its sparks, fire and smoke start at the hardpoints.
                 for_mission_ships(a.arg(0), [&](NpcShip& n) { light_fuse(n.damage, a.arg(1), true); });
@@ -3094,6 +3345,7 @@ struct FlightSession {
                 // feels about b. Toward the player it decides whether the ship attacks.
                 std::string x = a.arg(0), y = a.arg(1), rep = a.arg(2);
                 bool hostile = rep.find("HOSTILE") != std::string::npos;
+                vibes.set(x, y, game::rep_value(rep));
                 if (iequals(y, "Player")) for_mission_ships(x, [&](NpcShip& n) { n.hostile = hostile; });
                 else if (iequals(x, "Player")) for_mission_ships(y, [&](NpcShip& n) { n.hostile = hostile; });
             } else if (iequals(a.name, "StartDialog")) {
@@ -3116,6 +3368,10 @@ struct FlightSession {
                 // SetShipAndLoadout = ship, loadout; "none" takes the ship away (between
                 // scenes), which we leave to the next one given.
                 if (!iequals(a.arg(0), "none")) pending_ship = {a.arg(0), iequals(a.arg(1), "none") ? std::string() : a.arg(1)};
+            } else if (iequals(a.name, "EnableManeuver")) {
+                // EnableManeuver = Dock | formation | ..., true / false
+                if (!a.args.empty() && a.args.size() > 1 && !a.args[1].as_bool()) m.maneuver_off.insert(to_lower(a.arg(0)));
+                else m.maneuver_off.erase(to_lower(a.arg(0)));
             } else if (iequals(a.name, "ForceLand")) {
                 // ForceLand = base: the player lands there at once, in another system if need be.
                 pending_relocation = Relocation{a.arg(0), "", solar_with_base(m, a.arg(0))};
@@ -3981,6 +4237,13 @@ int run(const Args& args) {
                             else fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(n, 0, 3)));
                         }
                     advance_room(*fs, renderer, t);
+                    if (args.autoplay) {
+                        std::string was = fs->autoplay_doing;
+                        fs->autoplay(renderer.system());
+                        if (fs->autoplay_doing != was)
+                            SDL_Log("autoplay at %.0f s: %s (at %.0f, %.0f, %.0f)", t, fs->autoplay_doing.empty() ? "idle" : fs->autoplay_doing.c_str(),
+                                    fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
+                    }
                     bool nav_owns = fs->update_nav(renderer.system(), 1.0 / 60);
                     if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
                     handle_jump(*fs, renderer, cam);
@@ -3992,7 +4255,7 @@ int run(const Args& args) {
                         fs->mission->next_in = 0.01f;
                     }
                     fs->update_camera(cam, 1.0 / 60);
-                    fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
+                    if (!args.autoplay) fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
                     if (args.npc_die >= 0 && t < args.npc_die && t + 1.0 / 60 >= args.npc_die)
                         for (auto& n : fs->npcs) n.body.hull = 0;
                     fs->update_combat(1.0 / 60);
@@ -4035,6 +4298,8 @@ int run(const Args& args) {
                 fs->update_contacts(renderer.system());
                 SDL_Log("after %.1f s: %s in %s at %.0f, %.0f, %.0f", args.sim, fs->nav_status().c_str(),
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
+                SDL_Log("  scene %s, popup %s, autoplay: %s", fs->space_scene ? "on" : "off", fs->popup_open() ? "open" : "none", fs->autoplay_doing.c_str());
+                if (fs->mission) SDL_Log("  %zu radio calls queued%s%s", fs->mission->comms.size(), fs->mission->comms.empty() ? "" : ", first ", fs->mission->comms.empty() ? "" : fs->mission->comms.front().line.c_str());
                 if (fs->mission) {
                     auto& m = *fs->mission;
                     int fired = 0;
@@ -4065,9 +4330,15 @@ int run(const Args& args) {
                 if (fs->mixer) SDL_Log("space sounds: %d one-shots, %d spoken lines (%d nags), %d ship hums started, engine hum %s", fs->space_sounds, fs->lines_spoken, fs->nags_given, fs->npc_hums_started, fs->ship_sound.rumble ? "on" : "off");
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
-                    SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),
+                    SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away, %s order %zu/%zu%s", n.name.c_str(),
                             !n.body.alive() ? "destroyed" : n.ai ? std::string(game::FighterAi::name(n.ai->state())).c_str() : "test AI",
-                            n.body.hull, n.body.max_hull, (n.ship.pos - fs->ship.pos).length());
+                            n.body.hull, n.body.max_hull, (n.ship.pos - fs->ship.pos).length(), n.faction.c_str(), n.order_step,
+                            n.orders.size(), n.order_step < n.orders.size() ? (" " + n.orders[n.order_step].name).c_str() : "");
+                for (auto& n : fs->npcs)
+                    if (n.body.alive())
+                        if (auto f = fs->npc_foe(n))
+                            for (auto& o : fs->npcs)
+                                if (o.body.id == f->id) SDL_Log("  %s fights %s at %.0f m", n.name.c_str(), o.name.c_str(), f->dist);
             }
             renderer.set_output_format(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
             auto* out = gpu.render_target(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, args.width, args.height);
@@ -4106,6 +4377,7 @@ int run(const Args& args) {
                         else if (e.key.key == SDLK_T) fs->next_target();
                         else if (e.key.key == SDLK_M && !fs->docked()) fs->show_map = !fs->show_map;
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
+                        else if (e.key.key == SDLK_F4 && !fs->docked()) fs->formation_request();
                         else if (e.key.key == SDLK_F5) save_game(*fs, renderer, save_path(args));
                         else if (e.key.key == SDLK_F9) {
                             if (auto p = read_save_file(save_path(args))) {
