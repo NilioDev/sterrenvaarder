@@ -1736,6 +1736,35 @@ struct FlightSession {
         firing = false;
         autoplay_doing.clear();
         if (docked() || space_scene) return;
+        // Leashes (DistShip / DistVec = outside, Player, ...: the mission fails out there):
+        // past three quarters of the way, turn back before anything else.
+        if (mission && mission->runner && nav == Nav::Free) {
+            auto back_to = [&](DVec3 anchor, double r) {
+                DVec3 to = anchor - ship.pos;
+                if (to.length() < r * 0.75) return false;
+                Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                input.throttle = 1.f;
+                input.cruise = false;
+                autoplay_doing = "turns back (leash)";
+                return true;
+            };
+            for (auto& t : mission->script.triggers) {
+                if (!mission->runner->active(t.nickname)) continue;
+                bool fails = false;  // only a leash that fails the mission
+                for (auto& a : t.actions) fails = fails || (iequals(a.name, "ChangeState") && iequals(a.arg(0), "FAIL"));
+                if (!fails) continue;
+                for (auto& c : t.conditions) {
+                    if (!iequals(c.arg(0), "outside")) continue;
+                    if (iequals(c.name, "DistShip")) {
+                        std::string other = iequals(c.arg(1), "Player") ? c.arg(2) : iequals(c.arg(2), "Player") ? c.arg(1) : std::string();
+                        if (auto p = other.empty() ? std::nullopt : where(other); p && back_to(*p, c.num(3))) return;
+                    } else if (iequals(c.name, "DistVec") && iequals(c.arg(1), "Player") && back_to({c.num(2), c.num(3), c.num(4)}, c.num(5))) {
+                        return;
+                    }
+                }
+            }
+        }
         // The mission waits for the player to dock somewhere close by: leave any formation and dock.
         if (mission && mission->runner && (nav == Nav::Free || nav == Nav::Formation))
             for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
@@ -3176,7 +3205,9 @@ struct FlightSession {
                     Mission::Waypoint wp{o.type.arg(1), o.type.args.size() > 7 ? o.type.arg(7) : std::string(), ids(2),
                                          DVec3{o.type.num(4), o.type.num(5), o.type.num(6)}};
                     if (rep && !wp.object.empty() && rend && game::find_object(rend->system(), wp.object)) wp.system = rend->system().nickname;
-                    m.waypoint = wp;
+                    // A navmarker at 0, 0, 0 marks no place ("defend yourselves"): text only.
+                    if (wp.object.empty() && o.type.num(4) == 0 && o.type.num(5) == 0 && o.type.num(6) == 0) m.waypoint.reset();
+                    else m.waypoint = wp;
                 }
             }
         } else if (iequals(a.name, "NNPath")) {
@@ -3272,7 +3303,14 @@ struct FlightSession {
         const MsnFormationDef* f = nullptr;
         for (auto& d : m.script.formations)
             if (iequals(d.nickname, a.arg(0))) f = &d;
-        if (!f) return;
+        if (!f) {  // a lone ship spawned this way (SpawnFormation = cruiser3 in M04)
+            if (m.script.ship(a.arg(0))) {
+                std::optional<DVec3> at;
+                if (a.args.size() >= 4) at = DVec3{a.num(1), a.num(2), a.num(3)};
+                mission_spawn(a.arg(0), at);
+            }
+            return;
+        }
         const FormationShape* shape = nullptr;
         for (auto& sh : m.shapes)
             if (iequals(sh.nickname, f->formation)) shape = &sh;
@@ -3459,6 +3497,13 @@ struct FlightSession {
             if (solar_here(m) && m.alive() && iequals(m.nickname, o)) return m.pos;
         if (rend)
             if (auto* so = game::find_object(rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
+        // A formation's nickname stands for its first ship still flying.
+        if (mission)
+            for (auto& fm : mission->script.formations)
+                if (iequals(fm.nickname, o))
+                    for (auto& sh : fm.ships)
+                        for (auto& n : npcs)
+                            if (n.body.alive() && iequals(n.mission_name, sh)) return n.ship.pos;
         return std::nullopt;
     }
 
