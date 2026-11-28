@@ -359,6 +359,7 @@ struct NpcShip {
     std::vector<MsnCommand> orders;
     std::size_t order_step = 0;
     float order_time = 0;  // seconds in the current step
+    int order_sub = 0;     // GotoSpline: the point on the curve it flies to now
     bool docked_away = false;
     std::optional<game::LaneTrip> lane;  // riding a trade lane (Dock order on a ring)
     float lifetime = -1;  // mission SetLifeTime: seconds left before it leaves the scene (< 0: no limit)
@@ -885,6 +886,11 @@ struct FlightSession {
     bool traffic_on = true;  // --no-traffic turns it off
     bool characters_on = true;  // --no-characters turns them off
     // Objects a mission puts into space ([MsnSolar] via SpawnSolar).
+    std::unordered_map<int, std::string> last_hit_by;  // body id -> mission name of the last shooter
+    std::string killer(int id) const {
+        auto it = last_hit_by.find(id);
+        return it == last_hit_by.end() ? std::string() : it->second;
+    }
     struct MissionSolar {
         std::string nickname, name;
         Renderer::ModelHandle mesh;
@@ -900,6 +906,7 @@ struct FlightSession {
         std::string faction;
         std::vector<std::string> names;  // nickname and labels (for SetVibe)
         float burst = 0;
+        std::optional<float> vibe;  // SetVibe toward the player, over its faction's standing
         bool alive() const { return !destructible || body.alive(); }
     };
     bool solar_here(const MissionSolar& m) const {
@@ -972,6 +979,7 @@ struct FlightSession {
         loots.push_back(std::move(l));
     }
     bool solar_hostile(const MissionSolar& ms) const {
+        if (ms.vibe) return attitude_of(*ms.vibe) == Attitude::Hostile;
         return !ms.faction.empty() && attitude_of(player.rep_with(ms.faction)) == Attitude::Hostile;
     }
     // A system object, or a solar the mission has put into space.
@@ -1614,7 +1622,11 @@ struct FlightSession {
         }
         bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
         std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = radio_voice(sys, *o);
-        if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
+        // A mission's SetVibe toward the player (M07: the outcast base takes the player in)
+        // goes before the faction's standing.
+        std::optional<float> vibe = vibes.between({o->nickname}, {"Player"});
+        if (vibe ? attitude_of(*vibe) == Attitude::Hostile
+                 : !o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
             notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
             notice_time = 4.f;
             if (base) radio_call(voice, game::dock_reply_lines(base_nick, false));
@@ -1800,6 +1812,53 @@ struct FlightSession {
                     return;
                 }
             }
+        // The mission waits for the player to fly through a ring (a race): fly through its middle.
+        // Not one that would stop a countdown going on: that is jumping the gun. The one the
+        // objective points at; without an objective object the nearest one ahead (others watch
+        // who leads farther on; the one just passed is behind). An objective elsewhere (the
+        // race is over) comes first.
+        if (mission && mission->runner && nav == Nav::Free) {
+            std::optional<DVec3> ring;
+            std::string ring_name;
+            double best = 1e300;
+            for (auto& t : mission->script.triggers) {
+                if (!mission->runner->active(t.nickname)) continue;
+                bool early = false;
+                auto restarts = [&](const std::string& n) {  // a gate's timer, switched off and on again
+                    for (auto& b : t.actions)
+                        if (iequals(b.name, "ActTrig") && iequals(b.arg(0), n)) return true;
+                    return false;
+                };
+                for (auto& a : t.actions)
+                    if (iequals(a.name, "DeactTrig") && mission->runner->active(a.arg(0)) && !restarts(a.arg(0)))
+                        if (auto* d = mission->script.trigger(a.arg(0)))
+                            for (auto& dc : d->conditions) early = early || iequals(dc.name, "Timer");
+                if (early) continue;
+                for (auto& c : t.conditions) {
+                    if (!iequals(c.name, "DistCircle") || !iequals(c.arg(0), "Player")) continue;
+                    auto p = where(c.arg(1));
+                    if (!p) continue;
+                    const std::string* wp = mission->waypoint && !mission->waypoint->object.empty() ? &mission->waypoint->object : nullptr;
+                    if (wp && !iequals(*wp, c.arg(1))) continue;
+                    DVec3 to = *p - ship.pos;
+                    double dist = to.length();
+                    if (dist > 6000) continue;
+                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                    double score = dist + (game::dot(ship.orient.forward(), dir) < 0 ? 10000 : 0);
+                    if (score < best) best = score, ring = *p, ring_name = c.arg(1);
+                }
+            }
+            if (ring) {
+                DVec3 to = *ring - ship.pos;
+                double dist = to.length();
+                Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                input.throttle = 1.f;
+                input.cruise = game::dot(ship.orient.forward(), dir) > 0.95f && dist > 3000;
+                autoplay_doing = "flies through " + ring_name;
+                return;
+            }
+        }
         // The mission waits for the player to dock somewhere close by: leave any formation and dock.
         if (mission && mission->runner && (nav == Nav::Free || nav == Nav::Formation))
             for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
@@ -1880,8 +1939,10 @@ struct FlightSession {
             };
             int best_rank = 4;
             for (auto& n : npcs)
-                if (n.body.alive() && n.hostile)
+                if (n.body.alive() && n.hostile && !n.cloaked)
                     if (double d = (n.body.pos - ship.pos).length(); d < 25000) {
+                        // Worn down as far as the player's guns go (Invulnerable): nothing left to do.
+                        if (n.body.player_floor > 0 && n.body.hull <= n.body.player_floor + 1.f) continue;
                         int r = rank(n);
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
                         // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
@@ -1890,11 +1951,19 @@ struct FlightSession {
                     }
         }
         // Solars: those the mission wants destroyed (by nickname or label), else any hostile one.
+        // Not one whose end fails the mission (M06: shooting the race's platforms).
         auto wanted = [&](const MissionSolar& ms) {
             if (!mission || !mission->runner) return false;
-            for (auto& c : mission->runner->waiting_on("Destroyed"))
-                for (auto& nm : ms.names)
-                    if (iequals(nm, c.arg(0))) return true;
+            for (auto& t : mission->script.triggers) {
+                if (!mission->runner->active(t.nickname)) continue;
+                bool fails = false;
+                for (auto& a : t.actions) fails = fails || (iequals(a.name, "ChangeState") && iequals(a.arg(0), "FAIL"));
+                if (fails) continue;
+                for (auto& c : t.conditions)
+                    if (iequals(c.name, "Destroyed"))
+                        for (auto& nm : ms.names)
+                            if (iequals(nm, c.arg(0))) return true;
+            }
             return false;
         };
         bool any_wanted = false;
@@ -2073,6 +2142,10 @@ struct FlightSession {
                         // "outside" is a leash, not a goal; and it must be about the player.
                         bool player = iequals(k, "PlayerManeuver") || iequals(k, "JumpInComplete");
                         for (auto& v : c.args) player = player || iequals(v.as_string(), "Player");
+                        // A race's rings while the objective is elsewhere: the race is over.
+                        if (iequals(k, "DistCircle") && mission->waypoint && !mission->waypoint->object.empty() &&
+                            !iequals(mission->waypoint->object, c.arg(1)))
+                            continue;
                         space_work = space_work || (player && !iequals(c.arg(0), "outside"));
                     }
             if (mission && mission->runner && !space_work && !mission->maneuver_off.count("dock"))
@@ -2688,6 +2761,7 @@ struct FlightSession {
                     return {};
                 };
                 std::string hit = name_of(t.id), by = name_of(p.owner);
+                last_hit_by[t.id] = by;
                 if (!hit.empty()) mission->runner->event({game::MissionEvent::Type::ProjHit, hit, by, ""});
                 if (SDL_getenv("SV_TRACE_HITS")) SDL_Log("HIT %s by %s", hit.c_str(), by.c_str());
             }
@@ -2734,7 +2808,7 @@ struct FlightSession {
                     explosions.push_back({n.ship.pos, 0, 35});
                 break_up(n);
                 if (mission && mission->runner && !n.mission_name.empty())
-                    mission->runner->event({game::MissionEvent::Type::Destroyed, n.mission_name, "", ""});
+                    mission->runner->event({game::MissionEvent::Type::Destroyed, n.mission_name, killer(n.body.id), ""});
                 n.mesh = {};
             }
         for (auto& ms : msn_solars)
@@ -2743,7 +2817,7 @@ struct FlightSession {
                 if (!boom.empty() && fxdb->vis(boom)) spawn_fx(boom, ms.pos, {}, ms.orient);
                 else explosions.push_back({ms.pos, 0, 120});
                 ms.mesh = {};
-                if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::Destroyed, ms.nickname, "", ""});
+                if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::Destroyed, ms.nickname, killer(ms.body.id), ""});
             }
         for (auto& e : explosions) e.age += dt;
         std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
@@ -3283,6 +3357,15 @@ struct FlightSession {
             }
             return out;
         }
+        std::optional<DVec3> axis(std::string_view o) const override {
+            const SystemObject* so = nullptr;
+            for (auto& m : fs.msn_solars)
+                if (fs.solar_here(m) && m.alive() && iequals(m.nickname, o)) so = &m.obj;
+            if (!so && fs.rend) so = game::find_object(fs.rend->system(), o);
+            if (!so) return std::nullopt;
+            Mat4 r = Mat4::euler_deg(so->rotate_deg);
+            return DVec3{r.at(0, 2), r.at(1, 2), r.at(2, 2)};
+        }
         bool in_tradelane(std::string_view o) const override {
             if (iequals(o, "Player")) return fs.nav == Nav::Lane;
             for (auto& n : fs.npcs)
@@ -3759,13 +3842,32 @@ struct FlightSession {
         while (n.order_step < n.orders.size()) {
             const MsnCommand& o = n.orders[n.order_step];
             n.order_time += dt;
-            auto next = [&] { ++n.order_step; n.order_time = 0; };
+            auto next = [&] { ++n.order_step; n.order_time = 0; n.order_sub = 0; };
             const std::string& k = o.name;
             if (iequals(k, "GotoVec")) {
                 // goto type, x, y, z, range, ...
                 bool cruise = !iequals(o.arg(0), "goto_no_cruise");
                 if (steer_to(n, {o.num(1), o.num(2), o.num(3)}, std::max(50.f, o.num(4, 100)), 1.f, cruise)) { next(); continue; }
                 return true;
+            }
+            if (iequals(k, "GotoSpline")) {
+                // goto type, four points, range, ...: the curve through the middle two, the outer
+                // two giving its bends (our reading: each leg starts where the last one ended).
+                DVec3 p[4];
+                for (int i = 0; i < 4; ++i) p[i] = {o.num(1 + 3 * i), o.num(2 + 3 * i), o.num(3 + 3 * i)};
+                constexpr int steps = 8;
+                while (n.order_sub < steps) {
+                    double t = (n.order_sub + 1.0) / steps, t2 = t * t, t3 = t2 * t;
+                    DVec3 at = (p[1] * 2 + (p[2] - p[0]) * t + (p[0] * 2 - p[1] * 5 + p[2] * 4 - p[3]) * t2 +
+                                (p[1] * 3 - p[0] - p[2] * 3 + p[3]) * t3) * 0.5;
+                    bool last = n.order_sub == steps - 1;
+                    float range = last ? std::max(50.f, o.num(13, 100)) : 150.f;
+                    if (steer_to(n, at, range, 1.f, false)) { ++n.order_sub; continue; }
+                    n.input.cruise = !iequals(o.arg(0), "goto_no_cruise") && (p[2] - n.ship.pos).length() > 2500;
+                    return true;
+                }
+                next();
+                continue;
             }
             if (iequals(k, "GotoShip")) {
                 // goto type, target, range, ...
@@ -4192,6 +4294,11 @@ struct FlightSession {
                 vibes.set(x, y, game::rep_value(rep));
                 if (iequals(y, "Player")) for_mission_ships(x, [&](NpcShip& n) { n.hostile = hostile; });
                 else if (iequals(x, "Player")) for_mission_ships(y, [&](NpcShip& n) { n.hostile = hostile; });
+                // Mission solars (M06's weapon platforms) by nickname or label.
+                const std::string& other = iequals(y, "Player") ? x : iequals(x, "Player") ? y : std::string();
+                for (auto& ms : msn_solars)
+                    for (auto& nm : ms.names)
+                        if (!other.empty() && iequals(nm, other)) ms.vibe = game::rep_value(rep);
             } else if (iequals(a.name, "StartDialog")) {
                 // A dialog is a row of radio lines, played in order.
                 if (auto* d = m.script.dialog(a.arg(0)))

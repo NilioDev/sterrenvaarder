@@ -43,6 +43,7 @@ void MissionRunner::activate(std::string_view trigger) {
     s.closest = -1;
     s.apart_since = -1;
     s.held_since = -1;
+    s.last_pos.reset();
     s.armed = true;
 }
 
@@ -80,10 +81,15 @@ bool MissionRunner::fired(std::string_view trigger) const {
 void MissionRunner::event(MissionEvent e) {
     if (e.type == MissionEvent::Type::SystemExit) exited_system_ = e.a;
     if (e.type == MissionEvent::Type::Destroyed) {
-        std::string n = to_lower(e.a);
+        // Counted as such, and by who made the kill (e.b, when known).
+        std::string n = to_lower(e.a), by = e.b.empty() ? std::string() : "|by:" + to_lower(e.b);
         ++destroyed_[n];
+        if (!by.empty()) ++destroyed_[n + by];
         if (auto it = ship_labels_.find(n); it != ship_labels_.end())
-            for (auto& l : it->second) ++destroyed_["label:" + l];
+            for (auto& l : it->second) {
+                ++destroyed_["label:" + l];
+                if (!by.empty()) ++destroyed_["label:" + l + by];
+            }
     }
     int type = static_cast<int>(e.type);
     events_[type].emplace_back(event_count_++, std::move(e));
@@ -114,6 +120,12 @@ int MissionRunner::label_size(std::string_view label) const {
     return it == spawned_labels_.end() ? 0 : it->second;
 }
 
+int MissionRunner::destroyed_count(std::string_view name, std::string_view killer) const {
+    std::string n = to_lower(name), by = killer.empty() ? std::string() : "|by:" + to_lower(killer);
+    if (auto it = destroyed_.find(n + by); it != destroyed_.end()) return it->second;
+    if (auto it = destroyed_.find("label:" + n + by); it != destroyed_.end()) return it->second;
+    return 0;
+}
 int MissionRunner::destroyed_count(std::string_view name) const {
     std::string n = to_lower(name);
     if (auto it = destroyed_.find(n); it != destroyed_.end()) return it->second;
@@ -166,8 +178,10 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return any_event(T::CommComplete, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)); });
     if (iequals(n, "Destroyed")) {
         // count > 0: that many destroyed; -1 (or none): every ship of the label (or the ship).
+        // A fourth value names who must make the kills (M06: the platforms fail the race only
+        // when the player shoots them, not when Hovis's men miss the player and hit them).
         int want = c.args.size() > 1 ? static_cast<int>(c.num(1)) : -1;
-        int dead = destroyed_count(c.arg(0));
+        int dead = c.args.size() > 3 && !c.arg(3).empty() ? destroyed_count(c.arg(0), c.arg(3)) : destroyed_count(c.arg(0));
         if (want > 0) return dead >= want;
         int size = label_size(c.arg(0));
         return dead > 0 && dead >= std::max(1, size);
@@ -196,14 +210,21 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         }
         double d = (*a - b).length();
         bool in = d <= r;
-        // "outside ..., tick, TICK_AWAY": outside and moving away, i.e. farther than the
-        // nearest seen since the trigger was switched on by more than the tick (our reading).
+        // "outside ..., seconds, TICK_AWAY": outside and not coming closer (farther than the
+        // nearest seen since the trigger was switched on) for that many seconds without a
+        // break (our reading, like DistShip's seconds; M06 warns after 45 s, fails 20 s later).
         bool tick_away = false;
         for (auto& v : c.args) tick_away = tick_away || iequals(v.as_string(), "TICK_AWAY");
         if (tick_away && !inside) {
-            double tick = iequals(n, "DistShip") ? c.num(4) : c.num(6);
+            double secs = iequals(n, "DistShip") ? c.num(4) : c.num(6);
+            bool nearer = s.closest < 0 || d < s.closest - 1.0;
             if (s.closest < 0 || d < s.closest) s.closest = d;
-            return !in && d > s.closest + tick;
+            if (in || nearer) {
+                s.held_since = -1;
+                return false;
+            }
+            if (s.held_since < 0) s.held_since = clock_;
+            return clock_ - s.held_since >= secs;
         }
         bool ok = inside ? in : !in;
         // "DistShip = outside, a, b, distance, seconds": it must hold that long without a
@@ -279,9 +300,25 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
     if (iequals(n, "JumpInComplete"))
         return any_event(T::JumpInComplete, [&](const MissionEvent& e) { return is(e.a, c.arg(0)); });
     if (iequals(n, "DistCircle")) {
-        // ship, ring: flying through it (within the ring's opening; our estimate of its size)
+        // ship, ring: flying through it, i.e. crossing the ring's plane within its opening
+        // (our estimate of its size). Being near it is not enough: M06 lines the racers up
+        // just behind the start ring, and passing it before the start fails the race.
         auto a = w.position(c.arg(0)), b = w.position(c.arg(1));
-        return a && b && (*a - *b).length() < 150;
+        if (!a || !b) return false;
+        constexpr double opening = 150;
+        auto ax = w.axis(c.arg(1));
+        if (!ax) return (*a - *b).length() < opening;
+        auto side = [&](DVec3 p) { DVec3 d = p - *b; return d.x * ax->x + d.y * ax->y + d.z * ax->z; };
+        bool through = false;
+        if (s.last_pos && (*a - *s.last_pos).length() < 2000) {  // a jump (scene, relocation) is no pass
+            double d0 = side(*s.last_pos), d1 = side(*a);
+            if ((d0 < 0) != (d1 < 0)) {
+                DVec3 at = *s.last_pos + (*a - *s.last_pos) * (d0 / (d0 - d1));
+                through = (at - *b).length() < opening;
+            }
+        }
+        s.last_pos = *a;
+        return through;
     }
     if (iequals(n, "NPCSystemEnter")) return w.position(c.arg(1)).has_value() && (is(w.system(), c.arg(0)));
     if (iequals(n, "TetherBroke")) {
