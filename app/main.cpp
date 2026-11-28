@@ -309,6 +309,7 @@ struct DamageFx {
 // A computer-controlled ship: same flight model and weapons as the player.
 struct NpcShip {
     std::string name;
+    bool held_off = false;  // PlayerEnemyClamp: too many others are attacking the player
     const ShipArchetype* arch = nullptr;
     game::FlightModel model{game::FlightParams{}};
     game::ShipState ship;
@@ -810,6 +811,11 @@ struct FlightSession {
     struct Relocation { std::string base, room, solar; };
     std::optional<Relocation> pending_relocation;
     std::unique_ptr<Mission> mission;
+    // PlayerEnemyClamp = min, max: at most `max` enemies attack the player at once; the
+    // rest keep their distance. RpopAttClamp = true counts random traffic in. Our reading.
+    int enemy_clamp = -1;
+    bool rpop_clamp = false;
+    std::string pending_save;  // Save = name, title ids: an autosave (handled by the main loop)
     static constexpr float kNextMissionDelay = 6.f;  // the result stays on screen this long
     // Random traffic from the system's population zones.
     struct Traffic {
@@ -1639,6 +1645,30 @@ struct FlightSession {
 
     // Our own simple pursuit AI: steer towards where the player will be, fire when the
     // guns line up. Good enough to test combat; proper AI comes with the mission system.
+    // Marks the enemies beyond the clamp (farthest first) to keep their distance.
+    void clamp_attackers() {
+        std::vector<NpcShip*> foes;
+        for (auto& n : npcs) {
+            n.held_off = false;
+            bool traffic = n.mission_name.rfind("~traffic", 0) == 0;
+            if (n.hostile && n.body.alive() && !n.docked_away && (!traffic || rpop_clamp)) foes.push_back(&n);
+        }
+        if (enemy_clamp < 0 || static_cast<int>(foes.size()) <= enemy_clamp) return;
+        std::sort(foes.begin(), foes.end(), [&](NpcShip* a, NpcShip* b) {
+            return (a->ship.pos - ship.pos).length() < (b->ship.pos - ship.pos).length();
+        });
+        for (std::size_t i = static_cast<std::size_t>(enemy_clamp); i < foes.size(); ++i) foes[i]->held_off = true;
+    }
+    static constexpr double kHoldOffDistance = 2500;
+    // A held-off enemy waits at a distance from the player, without firing.
+    void hold_off(NpcShip& n) {
+        DVec3 away = n.ship.pos - ship.pos;
+        double d = away.length();
+        DVec3 dir = d > 1 ? away * (1.0 / d) : DVec3{0, 0, 1};
+        if (d < kHoldOffDistance) steer_to(n, ship.pos + dir * (kHoldOffDistance + 200), 50.f, 0.8f, false);
+        else { n.input = {}; n.input.throttle = 0.f; }
+    }
+
     void npc_think(NpcShip& n) {
         if (!body.alive()) { n.input.throttle = 0.5f; n.input.steer = {}; return; }
         float speed = n.guns.empty() || !n.guns[0].arch ? 600.f : n.guns[0].arch->muzzle_velocity;
@@ -1683,10 +1713,12 @@ struct FlightSession {
         }
         world.update_guns(guns, dt);
         if (firing && body.alive()) fire_guns(guns, body.id, ship, aim_dir);
+        clamp_attackers();
         for (auto& n : npcs) {
             if (!n.body.alive()) continue;
             world.update_guns(n.guns, dt);
-            if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
+            if (n.held_off) hold_off(n);
+            else if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
             else if (!n.hostile) { n.input = {}; n.input.throttle = 0.f; }
             else if (n.ai) npc_think_pilot(n, dt);
             else npc_think(n);
@@ -2247,6 +2279,8 @@ struct FlightSession {
         m->name = name;
         mission = std::move(m);
         dock_rules = {};
+        enemy_clamp = -1;
+        rpop_clamp = false;
         marked.clear();
         music.mission = {};
         mission->runner.emplace(mission->script);
@@ -2858,6 +2892,12 @@ struct FlightSession {
                 });
             } else if (iequals(a.name, "RevertCam")) {
                 // Gives the camera back after a scripted view; the flight camera never leaves.
+            } else if (iequals(a.name, "PlayerEnemyClamp")) {
+                enemy_clamp = std::max(0, static_cast<int>(a.num(1)));
+            } else if (iequals(a.name, "RpopAttClamp")) {
+                rpop_clamp = iequals(a.arg(0), "true");
+            } else if (iequals(a.name, "Save")) {
+                pending_save = a.arg(0);
             } else if (iequals(a.name, "MarkObj")) {
                 // MarkObj = ship, label or object, 1 | 0.
                 std::string who = a.arg(0);
@@ -3685,6 +3725,7 @@ int run(const Args& args) {
                     if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
                     handle_jump(*fs, renderer, cam);
                     handle_story(*fs, renderer, cam);
+                    fs->pending_save.clear();  // runs without a window keep the player's saves as they are
                     if (args.win >= 0 && t < args.win && t + 1.0 / 60 >= args.win && fs->mission) {
                         SDL_Log("--win: %s succeeds", fs->mission->name.c_str());
                         fs->mission->next_in = 0.01f;
@@ -3736,6 +3777,9 @@ int run(const Args& args) {
                         if (m.runner->active(t.nickname))
                             SDL_Log("  waiting: %s (%s) in %s", t.nickname.c_str(),
                                     t.conditions.empty() ? "-" : t.conditions[0].name.c_str(), t.system.c_str());
+                    int held = 0;
+                    for (auto& n : fs->npcs) held += n.held_off;
+                    if (fs->enemy_clamp >= 0) SDL_Log("  enemy clamp %d: %d held off", fs->enemy_clamp, held);
                     SDL_Log("mission: %d of %zu triggers fired, %zu ships, objective '%s', not handled yet: %s", fired,
                             m.script.triggers.size(), fs->npcs.size(), m.objective.c_str(), un.c_str());
                 }
@@ -3853,6 +3897,13 @@ int run(const Args& args) {
                     if (!nav_owns) fs->model.update(fs->ship, in, dt);
                     handle_jump(*fs, renderer, cam);
                     handle_story(*fs, renderer, cam);
+                    if (!fs->pending_save.empty()) {  // the mission's autosave, next to the quick save
+                        std::string q = save_path(args);
+                        std::string dir = q.substr(0, q.find_last_of("/\\") + 1);
+                        save_game(*fs, renderer, args.save_file.empty() ? dir + "autosave.ini" : args.save_file);
+                        SDL_Log("autosave (%s)", fs->pending_save.c_str());
+                        fs->pending_save.clear();
+                    }
                     fs->update_camera(cam, dt);
                     fs->firing = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
                     fs->aim_dir = aim_through(cam, mx, my, static_cast<float>(ww), static_cast<float>(wh));
