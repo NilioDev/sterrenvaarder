@@ -29,12 +29,20 @@ struct MsnTrigger {
     std::vector<MsnCommand> actions;
 };
 
+// rel_pos = angle, object, distance: spawn that far from the object, at that angle around it
+// (degrees, 0 = ahead of it, 180 = behind it).
+struct MsnRelPos {
+    float angle = 0, distance = 0;
+    std::string object;
+};
+
 struct MsnShipDef {
     std::string nickname, system, npc;
     std::vector<std::string> labels;
     float position[3] = {0, 0, 0};
     float orientation[4] = {1, 0, 0, 0};  // w, x, y, z
     std::string relative_to;   // relative_pos = object, min, max (spawns near an object)
+    MsnRelPos rel_pos;
     bool random_name = false, jumper = false;
     float radius = 0;
     std::string arrival_obj;
@@ -60,6 +68,7 @@ struct MsnFormationDef {
     std::vector<std::string> ships;
     float position[3] = {0, 0, 0};
     float orientation[4] = {1, 0, 0, 0};
+    MsnRelPos rel_pos;
 };
 
 struct MsnObjList {

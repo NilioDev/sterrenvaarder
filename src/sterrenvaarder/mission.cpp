@@ -12,6 +12,16 @@ void read_vec(const IniEntry& e, float* out, std::size_t n) {
     for (std::size_t i = 0; i < n && i < e.values.size(); ++i) out[i] = e.values[i].as_float();
 }
 
+MsnRelPos read_rel_pos(const IniEntry& e) {
+    MsnRelPos r;
+    if (e.values.size() >= 3) {
+        r.angle = e.values[0].as_float();
+        r.object = e.values[1].as_string();
+        r.distance = e.values[2].as_float();
+    }
+    return r;
+}
+
 bool starts_with_ci(std::string_view s, std::string_view prefix) {
     return s.size() >= prefix.size() && iequals(s.substr(0, prefix.size()), prefix);
 }
@@ -72,6 +82,7 @@ MissionScript parse_mission(const IniFile& ini) {
                 else if (iequals(e.key, "position")) read_vec(e, s.position, 3);
                 else if (iequals(e.key, "orientation")) read_vec(e, s.orientation, 4);
                 else if (iequals(e.key, "relative_pos")) s.relative_to = first(e);
+                else if (iequals(e.key, "rel_pos")) s.rel_pos = read_rel_pos(e);
                 else if (iequals(e.key, "random_name")) s.random_name = !e.values.empty() && e.values[0].as_bool();
                 else if (iequals(e.key, "jumper")) s.jumper = !e.values.empty() && e.values[0].as_bool();
                 else if (iequals(e.key, "radius") && !e.values.empty()) s.radius = e.values[0].as_float();
@@ -114,6 +125,7 @@ MissionScript parse_mission(const IniFile& ini) {
                 else if (iequals(e.key, "ship")) f.ships.push_back(first(e));
                 else if (iequals(e.key, "position")) read_vec(e, f.position, 3);
                 else if (iequals(e.key, "orientation")) read_vec(e, f.orientation, 4);
+                else if (iequals(e.key, "rel_pos")) f.rel_pos = read_rel_pos(e);
             }
             m.formations.push_back(std::move(f));
         } else if (iequals(sec.name, "ObjList")) {

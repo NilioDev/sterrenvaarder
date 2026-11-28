@@ -20,6 +20,10 @@ struct SolarArchetype {
     std::vector<std::string> material_libraries;
     std::vector<float> lod_ranges;  // LODranges: switch distances, last one = draw distance
     float solar_radius = 0;
+    // Destructible solars (weapon platforms, some stations): hull, guns and how they blow up.
+    bool destructible = false;
+    float hit_pts = 0;
+    std::string loadout, explosion_arch;
 };
 
 struct StarGlow {

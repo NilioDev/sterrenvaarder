@@ -1389,7 +1389,7 @@ static void test_mission() {
     const char* text =
         "[Mission]\nmission_title = 10\nreward = 500\n"
         "[MsnShip]\nnickname = raider1\nlabel = raiders\nsystem = Sys1\n"
-        "[MsnShip]\nnickname = raider2\nlabel = raiders\nsystem = Sys1\n"
+        "[MsnShip]\nnickname = raider2\nlabel = raiders\nsystem = Sys1\nrel_pos = 180, Player, 2000\n"
         "[Trigger]\nnickname = t_start\nInitState = ACTIVE\nCnd_True = no_params\nAct_ActTrig = t_wait\nAct_ActTrig = t_escort_dies\n"
         "[Trigger]\nnickname = t_wait\nsystem = Sys1\nCnd_Timer = 2\nAct_SendComm = a, Player, LINE_1\nAct_ActTrig = t_after_comm\n"
         "[Trigger]\nnickname = t_after_comm\nCnd_CommComplete = LINE_1\nAct_SpawnShip = raider1\nAct_SpawnShip = raider2\nAct_ActTrig = t_near\n"
@@ -1412,6 +1412,8 @@ static void test_mission() {
     CHECK(!rtc2.is_offer() && rtc2.autoplay && rtc2.action == "s.thn");
     CHECK(m.title_ids == 10 && m.reward == 500 && m.triggers.size() == 7 && m.ships.size() == 2);
     CHECK(m.trigger("t_wait") && m.trigger("t_wait")->conditions[0].name == "Timer" && m.trigger("t_start")->initially_active);
+    CHECK(m.ships[1].rel_pos.object == "Player" && m.ships[1].rel_pos.angle == 180.f && m.ships[1].rel_pos.distance == 2000.f);
+    CHECK(m.ships[0].rel_pos.object.empty());
 
     struct World : MissionWorld {
         std::string sys = "Sys1";
