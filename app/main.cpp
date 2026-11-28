@@ -48,6 +48,11 @@
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
+#include "game/skin.hpp"
+#include "sterrenvaarder/anm.hpp"
+#include "sterrenvaarder/characters.hpp"
+#include "sterrenvaarder/dfm.hpp"
+#include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
@@ -88,6 +93,7 @@ struct Args {
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     bool no_traffic = false;  // no random traffic
+    bool no_characters = false;  // rooms without their characters
     bool show_map = false;    // open the navigation map
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
@@ -159,6 +165,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--answer") a.answer = next();
         else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--no-traffic") a.no_traffic = true;
+        else if (k == "--no-characters") a.no_characters = true;
         else if (k == "--map") a.show_map = true;
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
@@ -324,6 +331,63 @@ struct Explosion {
 
 // The original base room behind the base screen: the set, props and lights from the
 // room's scene scripts, seen through the room's own camera.
+
+// Who lives on the bases, what they wear and how they move: loaded once from the player's data.
+struct CharacterData {
+    std::vector<BaseCrowd> bases;
+    CharacterParts parts;
+    AnmLibrary anims;
+    std::map<std::string, std::unique_ptr<DfmModel>> meshes;  // by normalised path
+    bool loaded = false;
+
+    void load(const Vfs& vfs) {
+        if (loaded) return;
+        loaded = true;
+        try {
+            if (vfs.exists("missions/mbases.ini")) bases = parse_mbases(parse_ini(vfs.read("missions/mbases.ini")));
+            if (vfs.exists("characters/bodyparts.ini")) parts.add_body_parts(parse_ini(vfs.read("characters/bodyparts.ini")));
+            if (vfs.exists("characters/costumes.ini")) parts.add_costumes(parse_ini(vfs.read("characters/costumes.ini")));
+            for (auto& f : parts.animation_files()) {
+                std::string path = normal_path(f);
+                if (!vfs.exists(path)) continue;
+                auto file = UtfFile::parse(vfs.read(path));
+                anims.add(file->root());
+            }
+        } catch (const std::exception& e) {
+            SDL_Log("characters: %s", e.what());
+        }
+        SDL_Log("characters: %zu bases, %zu parts, %zu animations", bases.size(), parts.part_count(), anims.scripts().size());
+    }
+    static std::string normal_path(std::string p) {
+        p = to_lower(p);
+        std::replace(p.begin(), p.end(), '\\', '/');
+        return p;
+    }
+    const BaseCrowd* base(std::string_view nick) const {
+        for (auto& b : bases)
+            if (iequals(b.nickname, nick)) return &b;
+        return nullptr;
+    }
+    // The mesh of a body part, read once.
+    const DfmModel* mesh(const Vfs& vfs, const std::string& part, std::string* path_out = nullptr) {
+        const BodyPart* p = parts.part(part);
+        if (!p) return nullptr;
+        std::string path = normal_path(p->mesh);
+        if (path_out) *path_out = path;
+        auto it = meshes.find(path);
+        if (it == meshes.end()) {
+            std::unique_ptr<DfmModel> m;
+            try {
+                if (vfs.exists(path)) m = std::make_unique<DfmModel>(DfmModel::load(UtfFile::parse(vfs.read(path))->root()));
+            } catch (const std::exception& e) {
+                SDL_Log("character mesh %s: %s", path.c_str(), e.what());
+            }
+            it = meshes.emplace(path, std::move(m)).first;
+        }
+        return it->second.get();
+    }
+};
+
 struct RoomView {
     std::optional<BaseRooms> rooms;
     std::string base, current;
@@ -336,6 +400,20 @@ struct RoomView {
     std::vector<std::string> shown_ships;  // ship nicknames on the pads, for change detection
     RoomLighting lighting;
     Camera cam;
+    // The room's fixed characters (bartender, dealers): body, head and hands on their spot,
+    // playing their idle animation.
+    struct Figure {
+        struct Part { Renderer::ModelHandle mesh; const DfmModel* model = nullptr; std::string hardpoint; };
+        Part body;
+        std::vector<Part> parts;  // head and hands, hung on the body's hardpoints
+        game::Xform spot;
+        const AnmScript* anim = nullptr;
+        float time = 0, time_scale = 1;
+    };
+    std::vector<Figure> figures;
+    CharacterData* chars = nullptr;
+    int figure_serial = 0;
+    double last_time = -1;  // instance names for the renderer
     bool active() const { return !models.empty(); }
 
     void clear() {
@@ -346,6 +424,7 @@ struct RoomView {
         pads.clear();
         ships.clear();
         shown_ships.clear();
+        figures.clear();
     }
 
     void load_base(const Vfs& vfs, const std::string& b) {
@@ -366,6 +445,7 @@ struct RoomView {
         if (!info || iequals(info->nickname, current)) return;
         current = info->nickname;
         models.clear();
+        figures.clear();
         pads.clear();
         ships.clear();
         shown_ships.clear();
@@ -440,6 +520,81 @@ struct RoomView {
             return len > 0 ? (d.x * f.x + d.y * f.y + d.z * f.z) / len : -1.f;
         };
         std::stable_sort(pads.begin(), pads.end(), [&](const Pad& a, const Pad& b) { return facing(a) > facing(b); });
+        if (chars && have_cam) place_fixtures(vfs, r, markers);
+    }
+
+    // The fixed characters of this room, each on its marker with its idle animation.
+    void place_fixtures(const Vfs& vfs, Renderer& r, const std::vector<Pad>& markers) {
+        chars->load(vfs);
+        const BaseCrowd* crowd = chars->base(base);
+        const BaseRoomCrowd* here = crowd ? crowd->room(current) : nullptr;
+        if (!here) return;
+        for (auto& fx : here->fixtures) {
+            const Pad* spot = nullptr;
+            for (auto& m : markers)
+                if (iequals(m.name, fx.spot)) spot = &m;
+            const BaseNpc* npc = crowd->npc(fx.npc);
+            if (!spot || !npc) continue;
+            Figure f;
+            f.spot.r = spot->orient;
+            f.spot.t = spot->pos;
+            auto part = [&](const std::string& nick, const char* hardpoint) {
+                Figure::Part p;
+                std::string path;
+                p.model = nick.empty() ? nullptr : chars->mesh(vfs, nick, &path);
+                if (!p.model) return p;
+                try {
+                    p.mesh = r.load_character(path, {}, "fig" + std::to_string(++figure_serial));
+                } catch (const std::exception& e) {
+                    SDL_Log("character %s: %s", path.c_str(), e.what());
+                }
+                p.hardpoint = hardpoint;
+                return p;
+            };
+            f.body = part(npc->body, "");
+            if (!f.body.mesh) continue;
+            for (auto [nick, hp] : {std::pair{&npc->head, "hp_neck"}, std::pair{&npc->left_hand, "hp_left b"},
+                                    std::pair{&npc->right_hand, "hp_right b"}})
+                if (auto p = part(*nick, hp); p.mesh) f.parts.push_back(std::move(p));
+            // The idle script's looping motion, else its first.
+            if (!fx.fidget.empty() && vfs.exists(fx.fidget)) {
+                try {
+                    ThnScript s = ThnScript::parse(vfs.read(fx.fidget));
+                    const ThnMotion* pick = nullptr;
+                    for (auto& m : s.motions)
+                        if (!pick || (m.loop && !pick->loop)) pick = &m;
+                    if (pick) {
+                        f.anim = chars->anims.script(pick->animation);
+                        f.time_scale = pick->time_scale > 0 ? pick->time_scale : 1;
+                    }
+                } catch (const std::exception& e) {
+                    SDL_Log("%s: %s", fx.fidget.c_str(), e.what());
+                }
+            }
+            {
+                // Feet relative to the spot (y up), at the start of the idle animation.
+                auto pts = game::skin_points(*f.body.model, f.body.model->levels.front(), game::pose_bones(*f.body.model, f.anim, 0));
+                float lo = 1e9f, hi = -1e9f;
+                for (auto& q : pts) {
+                    lo = std::min(lo, q.y);
+                    hi = std::max(hi, q.y);
+                }
+                SDL_Log("character on %s: %zu parts, idle %s (root height %.2f), feet %.2f, top %.2f", fx.role.c_str(),
+                        f.parts.size(), f.anim ? "found" : "none", f.anim ? f.anim->root_height : 0.f, lo, hi);
+            }
+            figures.push_back(std::move(f));
+        }
+        SDL_Log("room %s/%s: %zu characters", base.c_str(), current.c_str(), figures.size());
+    }
+
+    void update_figures(Renderer& r, float dt) {
+        for (auto& f : figures) {
+            if (f.anim) {
+                float len = std::max(f.anim->length(), 1e-3f);
+                f.time = std::fmod(f.time + dt * f.time_scale, len);
+            }
+            r.pose_character(f.body.mesh, f.anim, f.time);
+        }
     }
 
     // Puts these ships (archetype nicknames, selected first) on the dealer's pads.
@@ -460,6 +615,22 @@ struct RoomView {
     }
 
     void draw(Renderer& r) const {
+        auto put = [&](Renderer::ModelHandle h, const game::Xform& x) {
+            r.draw_model(h, {x.t.x, x.t.y, x.t.z}, Mat4::from_rows3(x.r), {});
+        };
+        for (auto& f : figures) {
+            // The idle animation says how high the root rides above the spot on the floor.
+            game::Xform lift;
+            lift.t = {0, f.anim ? f.anim->root_height : 0.f, 0};
+            game::Xform place = f.spot * lift;
+            put(f.body.mesh, place);
+            auto pose = game::pose_bones(*f.body.model, f.anim, f.time);
+            for (auto& p : f.parts) {
+                game::Xform at;
+                if (game::attach_part(*f.body.model, pose, *p.model, game::pose_bones(*p.model), p.hardpoint, at))
+                    put(p.mesh, place * at);
+            }
+        }
         for (auto& m : models) r.draw_model(m.mesh, m.pos, m.rot, {});
         for (auto& m : ships) r.draw_model(m.mesh, m.pos, m.rot, {});
     }
@@ -531,6 +702,7 @@ struct FlightSession {
     };
     Traffic traffic;
     bool traffic_on = true;  // --no-traffic turns it off
+    bool characters_on = true;  // --no-characters turns them off
     // Objects a mission puts into space ([MsnSolar] via SpawnSolar).
     struct MissionSolar {
         std::string nickname, name;
@@ -563,6 +735,7 @@ struct FlightSession {
     const Factions* factions = nullptr;
     game::PlayerState player;
     RoomView room;
+    CharacterData chars;
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
     const ShipDatabase* shipdb = nullptr;
@@ -2447,8 +2620,12 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
     renderer.set_room(nullptr);
     if (fs && fs->docked() && fs->vfs && fs->petal) {
         if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
+        fs->room.chars = fs->characters_on ? &fs->chars : nullptr;
         fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_for_tab());
         if (fs->shipdb) fs->room.set_ships(*fs->shipdb, renderer, fs->dealer_ships());
+        float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
+        fs->room.last_time = time;
+        fs->room.update_figures(renderer, dt);
     }
     bool in_room = fs && fs->docked() && fs->room.active();
     if (in_room) {
@@ -2562,6 +2739,7 @@ int run(const Args& args) {
             fs->shipdb = ships.get();
             fs->pilots = &pilots;
             fs->traffic_on = !args.no_traffic;
+            fs->characters_on = !args.no_characters;
             fs->show_map = args.show_map;
             auto fx_files = files.effects;
             fx_files.insert(fx_files.end(), files.explosions.begin(), files.explosions.end());

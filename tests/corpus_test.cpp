@@ -211,6 +211,42 @@ int main(int argc, char** argv) {
             }
             std::printf("base characters: %zu bases, %zu rooms, %zu fixed (%zu unknown), %zu characters wearing %zu parts, %zu missing\n",
                         bases.size(), rooms, fixtures, fixture_unknown, npcs, npc_refs, npc_missing);
+            // Fixed characters standing in their idle animation: how far the feet sit below
+            // the root, against the animation's root height (numbers only).
+            AnmLibrary anims;
+            for (auto& f : cp.animation_files()) {
+                std::string path = to_lower(f);
+                std::replace(path.begin(), path.end(), '\\', '/');
+                if (vfs.exists(path)) anims.add(UtfFile::parse(vfs.read(path))->root());
+            }
+            std::size_t posed = 0, no_idle = 0;
+            double feet_sum = 0, root_sum = 0, gap_worst = 0;
+            for (auto& b : bases)
+                for (auto& r : b.rooms)
+                    for (auto& fx : r.fixtures) {
+                        const BaseNpc* n = b.npc(fx.npc);
+                        const BodyPart* body = n ? cp.part(n->body) : nullptr;
+                        if (!body || fx.fidget.empty() || !vfs.exists(fx.fidget)) continue;
+                        std::string mesh = to_lower(body->mesh);
+                        std::replace(mesh.begin(), mesh.end(), '\\', '/');
+                        if (!vfs.exists(mesh)) continue;
+                        auto model = DfmModel::load(UtfFile::parse(vfs.read(mesh))->root());
+                        auto script = ThnScript::parse(vfs.read(fx.fidget));
+                        const AnmScript* a = nullptr;
+                        for (auto& m : script.motions)
+                            if ((a = anims.script(m.animation))) break;
+                        if (!a) { ++no_idle; continue; }
+                        auto pts = game::skin_points(model, model.levels.front(), game::pose_bones(model, a, 0));
+                        float lo = 1e9f;
+                        for (auto& q : pts) lo = std::min(lo, q.y);
+                        ++posed;
+                        feet_sum += lo;
+                        root_sum += a->root_height;
+                        gap_worst = std::max(gap_worst, std::abs(double(lo) + a->root_height));
+                    }
+            if (posed)
+                std::printf("fixed characters idle: %zu posed, %zu without idle; feet %.2f below root on average, root height %.2f, worst gap %.2f\n",
+                            posed, no_idle, -feet_sum / posed, root_sum / posed, gap_worst);
         }
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
