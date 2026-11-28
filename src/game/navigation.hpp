@@ -4,6 +4,7 @@
 // Pure logic on the system data, unit-tested; the client drives it.
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "game/quat.hpp"
@@ -15,18 +16,23 @@ namespace sterrenvaarder::game {
 // next_ring when the entry ring has one, else prev_ring (the lane's other side).
 class LaneTrip {
 public:
-    static std::optional<LaneTrip> start(const StarSystem& sys, const SystemObject& entry, float speed = 2000.f);
+    // From the entry ring along the lane: toward the ring named `toward` (its next or previous
+    // ring), or else toward its next ring if it has one.
+    static std::optional<LaneTrip> start(const StarSystem& sys, const SystemObject& entry, float speed = 2000.f,
+                                         std::string_view toward = {});
 
     // Advances by dt; returns false once the last ring has been passed.
     bool update(double dt);
     DVec3 position() const { return pos_; }
     Vec3 direction() const { return dir_; }
     const std::vector<DVec3>& rings() const { return rings_; }
+    const std::vector<std::string>& ring_names() const { return names_; }  // nicknames, in travel order
     std::size_t next_index() const { return next_; }
     float speed() const { return speed_; }
 
 private:
     std::vector<DVec3> rings_;
+    std::vector<std::string> names_;
     std::size_t next_ = 1;
     DVec3 pos_;
     Vec3 dir_{0, 0, -1};

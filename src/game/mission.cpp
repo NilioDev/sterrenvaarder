@@ -40,6 +40,7 @@ void MissionRunner::activate(std::string_view trigger) {
     s.active = true;
     s.since = clock_;
     s.events_from = events_.size();
+    s.closest = -1;
 }
 
 MissionRunner::Progress MissionRunner::progress() const {
@@ -87,6 +88,12 @@ void MissionRunner::ship_spawned(std::string_view nickname) {
         for (auto& l : it->second) ++spawned_labels_[l];
 }
 
+void MissionRunner::ship_left(std::string_view nickname) {
+    if (auto it = ship_labels_.find(to_lower(nickname)); it != ship_labels_.end())
+        for (auto& l : it->second)
+            if (auto c = spawned_labels_.find(l); c != spawned_labels_.end() && c->second > 0) --c->second;
+}
+
 int MissionRunner::label_size(std::string_view label) const {
     auto it = spawned_labels_.find(to_lower(label));
     return it == spawned_labels_.end() ? 0 : it->second;
@@ -121,7 +128,7 @@ bool MissionRunner::knows_condition(std::string_view n) {
                                   "DistShip",   "DistVec",      "HealthDec",    "SpaceEnter",   "SpaceExit",
                                   "BaseEnter",  "BaseExit",     "SystemEnter",  "SystemExit",   "PlayerLaunch",
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
-                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect"};
+                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect",   "PlayerManeuver"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -167,7 +174,17 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
             b = {c.num(2), c.num(3), c.num(4)};
             r = c.num(5);
         }
-        bool in = (*a - b).length() <= r;
+        double d = (*a - b).length();
+        bool in = d <= r;
+        // "outside ..., tick, TICK_AWAY": outside and moving away, i.e. farther than the
+        // nearest seen since the trigger was switched on by more than the tick (our reading).
+        bool tick_away = false;
+        for (auto& v : c.args) tick_away = tick_away || iequals(v.as_string(), "TICK_AWAY");
+        if (tick_away && !inside) {
+            double tick = iequals(n, "DistShip") ? c.num(4) : c.num(6);
+            if (s.closest < 0 || d < s.closest) s.closest = d;
+            return !in && d > s.closest + tick;
+        }
         return inside ? in : !in;
     }
     if (iequals(n, "HealthDec")) return w.position(c.arg(0)) && w.health(c.arg(0)) <= c.num(1);
@@ -200,6 +217,8 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return any_event(T::LocExit, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "RTCDone"))
         return any_event(T::RTCDone, [&](const MissionEvent& e) { return same_data_path(e.a, c.arg(0)); });
+    if (iequals(n, "PlayerManeuver"))
+        return any_event(T::PlayerManeuver, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "CharSelect"))
         return any_event(T::CharSelect, [&](const MissionEvent& e) {
             return iequals(e.a, c.arg(0)) && is(e.b, c.arg(1)) && is(e.c, c.arg(2));

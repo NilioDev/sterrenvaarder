@@ -37,6 +37,7 @@ struct MissionEvent {
         RTCDone,        // a = the cutscene's file (as AddRTC named it)
         PopUpDialog,    // a = the button the player pressed (CLOSE, ...)
         CharSelect,     // a = the character talked to, b = room, c = base
+        PlayerManeuver, // a = Dock / Formation, b = the object or ship
     } type;
     std::string a, b, c;
 };
@@ -64,6 +65,7 @@ public:
     void start();                       // activates the InitState = ACTIVE triggers
     void event(MissionEvent e);
     void ship_spawned(std::string_view nickname);  // counts it in its labels
+    void ship_left(std::string_view nickname);     // left the scene without being destroyed: no longer counted
     // Checks every active trigger once and runs the actions of those that fire.
     void update(float dt, const MissionWorld& world, const ActionFn& act);
 
@@ -94,6 +96,7 @@ private:
         int fired = 0;
         double since = 0;          // clock when it was activated
         std::size_t events_from = 0;  // first event it may react to
+        mutable double closest = -1;  // DistShip ... TICK_AWAY: the nearest it has seen (-1: none yet)
     };
     bool holds(const MsnTrigger& t, const MsnCommand& c, const State& s, const MissionWorld& w) const;
     void activate(std::string_view trigger);
