@@ -127,6 +127,24 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             if (m->values.size() >= 2) shield_mods_[weapon + "|" + to_lower(m->values[0].as_string())] = m->values[1].as_float();
     });
     each_section(vfs, files.equipment, [&](const IniSection& sec) {
+        if (std::string look = str(sec, "loot_appearance"); !look.empty()) {
+            std::string n = str(sec, "nickname");
+            if (!n.empty()) loot_appearance_[to_lower(n)] = look;
+        }
+        if (iequals(sec.name, "LootCrate")) {
+            LootLook l;
+            l.crate = str(sec, "nickname");
+            l.model = str(sec, "DA_archetype");
+            for (auto* m : sec.find_all("material_library"))
+                if (!m->values.empty()) l.material_libraries.push_back(m->values[0].as_string());
+            if (!l.crate.empty()) crates_[to_lower(l.crate)] = std::move(l);
+            return;
+        }
+        if (iequals(sec.name, "Tractor")) {
+            std::string n = str(sec, "nickname");
+            if (!n.empty()) tractors_[to_lower(n)] = num(sec, "max_length", 0);
+            return;
+        }
         if (iequals(sec.name, "Gun")) {
             GunArchetype g;
             g.nickname = str(sec, "nickname");
@@ -267,6 +285,19 @@ const ShieldArchetype* ShipDatabase::shield_of(const Loadout& l) const {
     for (auto& e : l.equip)
         if (auto* s = shield(e.item)) return s;
     return nullptr;
+}
+
+const LootLook* ShipDatabase::loot_look(std::string_view equipment) const {
+    auto a = loot_appearance_.find(to_lower(equipment));
+    if (a == loot_appearance_.end()) return nullptr;
+    auto c = crates_.find(to_lower(a->second));
+    return c == crates_.end() ? nullptr : &c->second;
+}
+
+float ShipDatabase::tractor_range_of(const Loadout& l) const {
+    for (auto& e : l.equip)
+        if (auto it = tractors_.find(to_lower(e.item)); it != tractors_.end()) return it->second;
+    return 0;
 }
 
 }  // namespace sterrenvaarder

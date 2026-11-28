@@ -39,6 +39,7 @@ struct MissionEvent {
         CharSelect,     // a = the character talked to, b = room, c = base
         PlayerManeuver, // a = Dock / Formation, b = the object or ship
         JumpInComplete, // a = the system arrived in
+        LootAcquired,   // a = the loot, b = who took it in ("Player")
     } type;
     std::string a, b, c;
 };

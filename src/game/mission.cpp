@@ -131,7 +131,7 @@ bool MissionRunner::knows_condition(std::string_view n) {
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
                                   "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect",   "PlayerManeuver",
                                   "DistVecLbL",  "ProjHitShipToLbl", "InTradelane", "JumpInComplete", "DistCircle",
-                                  "NPCSystemEnter", "TetherBroke"};
+                                  "NPCSystemEnter", "TetherBroke", "LootAcquired"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -248,6 +248,8 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return hits >= need;
     }
     if (iequals(n, "InTradelane")) return w.in_tradelane(c.arg(1)) == c.args[0].as_bool();
+    if (iequals(n, "LootAcquired"))
+        return any_event(T::LootAcquired, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "JumpInComplete"))
         return any_event(T::JumpInComplete, [&](const MissionEvent& e) { return is(e.a, c.arg(0)); });
     if (iequals(n, "DistCircle")) {

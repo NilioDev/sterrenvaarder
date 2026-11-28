@@ -16,8 +16,8 @@ namespace sterrenvaarder::game {
 // next_ring when the entry ring has one, else prev_ring (the lane's other side).
 class LaneTrip {
 public:
-    // From the entry ring along the lane: toward the ring named `toward` (its next or previous
-    // ring), or else toward its next ring if it has one.
+    // From the entry ring along the lane: the way the ring named `toward` lies, stopping
+    // there, or else toward its next ring if it has one, to the end of the lane.
     static std::optional<LaneTrip> start(const StarSystem& sys, const SystemObject& entry, float speed = 2000.f,
                                          std::string_view toward = {});
 

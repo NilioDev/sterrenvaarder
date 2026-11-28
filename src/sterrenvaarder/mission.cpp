@@ -49,6 +49,7 @@ const MsnShipDef* MissionScript::ship(std::string_view n) const { return find_ni
 const MsnNpcDef* MissionScript::npc(std::string_view n) const { return find_nick(npcs, n); }
 const MsnObjList* MissionScript::obj_list(std::string_view n) const { return find_nick(obj_lists, n); }
 const MsnDialog* MissionScript::dialog(std::string_view n) const { return find_nick(dialogs, n); }
+const MsnLootDef* MissionScript::loot(std::string_view n) const { return find_nick(loots, n); }
 
 MissionScript parse_mission(const IniFile& ini) {
     MissionScript m;
@@ -117,6 +118,20 @@ MissionScript parse_mission(const IniFile& ini) {
                 else if (iequals(e.key, "string_id") && !e.values.empty()) s.string_id = e.values[0].as_int();
             }
             m.solars.push_back(std::move(s));
+        } else if (iequals(sec.name, "MsnLoot")) {
+            MsnLootDef l;
+            for (auto& e : sec.entries) {
+                if (iequals(e.key, "nickname")) l.nickname = first(e);
+                else if (iequals(e.key, "archetype")) l.archetype = first(e);
+                else if (iequals(e.key, "system")) l.system = first(e);
+                else if (iequals(e.key, "string_id") && !e.values.empty()) l.string_id = e.values[0].as_int();
+                else if (iequals(e.key, "equip_amount") && !e.values.empty()) l.amount = e.values[0].as_int();
+                else if (iequals(e.key, "rel_pos_obj")) l.rel_obj = first(e);
+                else if (iequals(e.key, "rel_pos_offset")) read_vec(e, l.offset, 3);
+                else if (iequals(e.key, "position")) read_vec(e, l.position, 3);
+                else if (iequals(e.key, "velocity")) read_vec(e, l.velocity, 3);
+            }
+            m.loots.push_back(std::move(l));
         } else if (iequals(sec.name, "MsnFormation")) {
             MsnFormationDef f;
             for (auto& e : sec.entries) {

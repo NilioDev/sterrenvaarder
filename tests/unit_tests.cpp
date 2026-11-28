@@ -223,6 +223,11 @@ void test_combat() {
     CHECK(tough.hull == 950);
     tough.damage(500, 0);
     CHECK(tough.hull == 900 && tough.alive());
+    tough.player_floor = 1;  // the player's hits go past the floor, but cannot destroy it
+    tough.damage(500, 0, 1, true);
+    CHECK(tough.hull == 400);
+    tough.damage(5000, 0, 1, true);
+    CHECK(tough.hull == 1 && tough.alive());
     tough.hull_floor = 0;
     tough.damage(5000, 0);
     CHECK(!tough.alive());
@@ -314,6 +319,13 @@ void test_lanes() {
     CHECK(steps == 69 && std::fabs(t->position().z + 14000) < 1e-6);  // 14 km at 2 km/s
     auto back = LaneTrip::start(sys, sys.objects[2], 2000);  // far end runs the other way
     CHECK(back && back->rings().size() == 3 && back->direction().z > 0.99f);
+    // Toward a ring two along, from the middle: that way, stopping there.
+    auto mid = LaneTrip::start(sys, sys.objects[1], 2000, "r1");
+    CHECK(mid && mid->rings().size() == 2 && mid->ring_names().back() == "r1" && mid->direction().z > 0.99f);
+    auto far = LaneTrip::start(sys, sys.objects[0], 2000, "r3");
+    CHECK(far && far->rings().size() == 3 && far->ring_names().back() == "r3");
+    auto stop = LaneTrip::start(sys, sys.objects[0], 2000, "r2");
+    CHECK(stop && stop->rings().size() == 2 && stop->ring_names().back() == "r2");
     SystemObject gate;
     gate.pos = {100, 0, 0};
     gate.rotate_deg = {0, 180, 0};
@@ -738,6 +750,12 @@ static void test_pilots_and_ai() {
     hurt.update(me, tgt, 0.1f, true, w, 0.1f);
     CHECK(hurt.state() == game::FighterAi::State::Flee);
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
+    // Once well clear it turns back, and does not run again.
+    game::AiBody far_away{{0, 0, 5000}, {}, {}};
+    hurt.update(far_away, tgt, 0.1f, true, w, 0.1f);
+    CHECK(hurt.state() != game::FighterAi::State::Flee);
+    hurt.update(me, tgt, 0.05f, true, w, 0.1f);
+    CHECK(hurt.state() != game::FighterAi::State::Flee);
 }
 
 static void test_costumes() {
@@ -1232,6 +1250,7 @@ static void test_mission_start() {
 static void test_vibes() {
     CHECK(game::rep_value("REP_HOSTILE_MAXIMUM") < -0.8f && game::rep_value("REP_HOSTILE_THRESHOLD") <= -0.6f);
     CHECK(game::rep_value("REP_FRIEND_MAXIMUM") > 0.8f && game::rep_value("REP_NEUTRAL") == 0);
+    CHECK(game::rep_value("REP_NEUTRAL_HOSTILE") < 0 && game::rep_value("REP_NEUTRAL_HOSTILE") > -0.6f);
     game::Vibes v;
     v.set("lbl_raiders", "convoy_lead", game::rep_value("REP_HOSTILE_MAXIMUM"));
     // One way only: the raiders hate the convoy leader; the leader has no say yet.
@@ -1399,6 +1418,19 @@ static void test_mission_any_system() {
     r.start();
     r.update(0.1f, w, [](const MsnCommand&, const MsnTrigger&) {});
     CHECK(r.fired("t_any") && !r.fired("t_other"));
+
+    // Loot: parsed, and taking it in (LootAcquired = loot, Player) fires.
+    MissionScript l = parse_mission(parse_text_ini(
+        "[MsnLoot]\nnickname = pod\narchetype = pod_arch\nrel_pos_obj = boss\nrel_pos_offset = 50, 0, 0\nequip_amount = 1\n"
+        "[Trigger]\nnickname = t_pod\nInitState = ACTIVE\nCnd_LootAcquired = pod, Player\nAct_Ping = got\n"));
+    CHECK(l.loot("pod") && l.loot("pod")->rel_obj == "boss" && l.loot("pod")->offset[0] == 50.f);
+    MissionRunner lr(l);
+    lr.start();
+    lr.update(0.1f, w, [](const MsnCommand&, const MsnTrigger&) {});
+    CHECK(!lr.fired("t_pod"));
+    lr.event({MissionEvent::Type::LootAcquired, "pod", "Player", ""});
+    lr.update(0.1f, w, [](const MsnCommand&, const MsnTrigger&) {});
+    CHECK(lr.fired("t_pod"));
 }
 
 static void test_mission() {

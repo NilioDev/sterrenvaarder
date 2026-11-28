@@ -89,6 +89,13 @@ struct ShieldArchetype {
     const std::string& hit_effect(float damage) const;
 };
 
+// How a piece of equipment looks floating in space as loot: its loot crate's model.
+struct LootLook {
+    std::string crate;  // [LootCrate] nickname
+    std::string model;  // DA_archetype
+    std::vector<std::string> material_libraries;
+};
+
 struct Loadout {
     std::string nickname;
     std::string archetype;
@@ -143,6 +150,10 @@ public:
     float shield_mod(std::string_view weapon_type, std::string_view shield_type) const;
     // [Armor] hit_pts_scale of the loadout's armour (1 without armour).
     float armor_scale_of(const Loadout& l) const;
+    // The loot crate an equipment item (or commodity) shows as (loot_appearance), if any.
+    const LootLook* loot_look(std::string_view equipment) const;
+    // [Tractor] max_length of the loadout's tractor beam (0 without one).
+    float tractor_range_of(const Loadout& l) const;
 
     // Cruise speed: 300 m/s unless the data sets [EngineEquipConsts] CRUISING_SPEED.
     float cruise_speed() const { return cruise_speed_; }
@@ -156,6 +167,9 @@ private:
     std::unordered_map<std::string, MunitionArchetype> munitions_;
     std::unordered_map<std::string, ShieldArchetype> shields_;
     std::unordered_map<std::string, float> shield_mods_;
+    std::unordered_map<std::string, std::string> loot_appearance_;  // equipment -> crate
+    std::unordered_map<std::string, LootLook> crates_;
+    std::unordered_map<std::string, float> tractors_;               // [Tractor] max_length
     std::unordered_map<std::string, float> armor_;  // [Armor] nickname -> hit_pts_scale  // "weapon|shield", lower case
     std::unordered_map<std::string, std::string> first_loadout_;
     std::vector<std::string> ship_order_;

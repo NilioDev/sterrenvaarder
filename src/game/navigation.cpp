@@ -11,17 +11,31 @@ const SystemObject* find_object(const StarSystem& sys, std::string_view n) {
 
 std::optional<LaneTrip> LaneTrip::start(const StarSystem& sys, const SystemObject& entry, float speed, std::string_view toward) {
     if (!entry.is_tradelane()) return std::nullopt;
-    bool forward = !entry.next_ring.empty();
-    if (!toward.empty() && iequals(entry.prev_ring, toward)) forward = false;
-    else if (!toward.empty() && iequals(entry.next_ring, toward)) forward = true;
+    // The rings from the entry one way, up to `toward` if it lies that way (else to the end).
+    auto walk = [&](bool forward, bool& reached) {
+        std::vector<const SystemObject*> out;
+        reached = false;
+        const SystemObject* cur = &entry;
+        for (int guard = 0; cur && guard < 256; ++guard) {
+            out.push_back(cur);
+            if (!toward.empty() && out.size() > 1 && iequals(cur->nickname, toward)) {
+                reached = true;
+                break;
+            }
+            const std::string& nx = forward ? cur->next_ring : cur->prev_ring;
+            cur = nx.empty() ? nullptr : find_object(sys, nx);
+        }
+        return out;
+    };
+    bool fwd_hit = false, back_hit = false;
+    auto fwd = walk(true, fwd_hit);
+    auto back = walk(false, back_hit);
+    const auto& path = back_hit && !fwd_hit ? back : fwd_hit ? fwd : (!entry.next_ring.empty() ? fwd : back);
     LaneTrip t;
     t.speed_ = speed;
-    const SystemObject* cur = &entry;
-    for (int guard = 0; cur && guard < 256; ++guard) {
-        t.rings_.push_back({cur->pos.x, cur->pos.y, cur->pos.z});
-        t.names_.push_back(cur->nickname);
-        const std::string& nx = forward ? cur->next_ring : cur->prev_ring;
-        cur = nx.empty() ? nullptr : find_object(sys, nx);
+    for (auto* o : path) {
+        t.rings_.push_back({o->pos.x, o->pos.y, o->pos.z});
+        t.names_.push_back(o->nickname);
     }
     if (t.rings_.size() < 2) return std::nullopt;
     t.pos_ = t.rings_[0];

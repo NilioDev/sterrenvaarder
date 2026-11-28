@@ -8,6 +8,12 @@ namespace sterrenvaarder::game {
 float rep_value(std::string_view n) {
     std::string s = to_lower(n);
     bool max = s.find("maximum") != std::string::npos;
+    // REP_NEUTRAL_HOSTILE / REP_NEUTRAL_FRIENDLY lean one way without crossing a threshold.
+    if (s.find("neutral") != std::string::npos) {
+        if (s.find("hostile") != std::string::npos) return -0.3f;
+        if (s.find("friend") != std::string::npos) return 0.3f;
+        return 0.f;
+    }
     if (s.find("hostile") != std::string::npos) return max ? -0.9f : -0.65f;
     if (s.find("friend") != std::string::npos) return max ? 0.9f : 0.65f;
     return 0.f;
