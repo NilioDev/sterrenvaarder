@@ -30,6 +30,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/pilots.cpp
   src/sterrenvaarder/ale.cpp
   src/sterrenvaarder/effects.cpp
+  src/sterrenvaarder/postfx.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )

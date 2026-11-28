@@ -3,7 +3,7 @@
 //
 //   sterrenvaarder --data <Freelancer DATA dir> [--mod <dir>]... [--system Li01]
 //                  [--ship li_elite] [--width 2560 --height 1080] [--scale 0.77] [--msaa 4]
-//                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--fov 70] [--free]
+//                  [--lod-scale 1] [--hud-aspect 1.778] [--hud-config hud.ini] [--postfx postfx.ini] [--postfx-preset vivid] [--fov 70] [--free]
 //                  [--screenshot out.png [--sim 4 --throttle 1 --cursor 0.3,-0.1]]
 //                  [--camera x,y,z --look x,y,z]   (spawn point / free camera)
 //                  [--new-game] [--load save.ini] [--save-file save.ini] [--exe <EXE dir>]
@@ -73,6 +73,7 @@ struct Args {
     std::string ship = "li_elite";
     float hud_aspect = -1;  // < 0: from the HUD config
     std::string hud_config;
+    std::string postfx_config, postfx_preset;
     float fov = 0;
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
@@ -137,6 +138,8 @@ Args parse_args(int argc, char** argv) {
         }
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
         else if (k == "--hud-config") a.hud_config = next();
+        else if (k == "--postfx") a.postfx_config = next();
+        else if (k == "--postfx-preset") a.postfx_preset = next();
         else if (k == "--fov") a.fov = std::stof(next());
         else if (k == "--npcs") a.npcs = std::stoi(next());
         else if (k == "--npc-ship") a.npc_ship = next();
@@ -1745,6 +1748,24 @@ int run(const Args& args) {
             apply_hud(text, args.hud_config);
         }
         if (args.hud_aspect >= 0) hud_cfg.max_aspect = args.hud_aspect;
+
+        // Optional post-processing look: off unless postfx.ini or the command line turns it on.
+        auto apply_postfx = [&](std::string_view text, const std::string& from) {
+            for (auto& w : settings.post.apply_ini(text)) SDL_Log("%s: %s", from.c_str(), w.c_str());
+        };
+        if (vfs.exists("sterrenvaarder/postfx.ini")) {
+            auto b = vfs.read("sterrenvaarder/postfx.ini");
+            apply_postfx(std::string_view(reinterpret_cast<const char*>(b.data()), b.size()), "postfx.ini");
+        }
+        if (!args.postfx_config.empty()) {
+            std::ifstream f(args.postfx_config, std::ios::binary);
+            if (!f) throw std::runtime_error("cannot read " + args.postfx_config);
+            std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            apply_postfx(text, args.postfx_config);
+        }
+        if (!args.postfx_preset.empty() && !PostFx::preset(args.postfx_preset, settings.post))
+            SDL_Log("unknown look preset %s", args.postfx_preset.c_str());
+        if (settings.post.enabled) SDL_Log("post-processing look on");
 
         if (offscreen) {
             float cx = args.width * 0.5f + args.cursor_x * args.height * 0.5f;

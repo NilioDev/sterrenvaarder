@@ -13,6 +13,7 @@
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/png.hpp"
+#include "sterrenvaarder/postfx.hpp"
 #include "sterrenvaarder/texture.hpp"
 #include "sterrenvaarder/utf.hpp"
 #include "sterrenvaarder/vfs.hpp"
@@ -656,7 +657,24 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_postfx() {
+    using namespace sterrenvaarder;
+    PostFx off;
+    CHECK(!off.enabled && off.saturation == 1 && off.bloom == 0);  // original look by default
+    PostFx a;
+    auto w = a.apply_ini("[PostFx]\nenabled = true\npreset = cinematic\nvignette = 0.5\n");
+    CHECK(w.empty() && a.enabled && a.vignette == 0.5f && a.grain > 0);
+    PostFx b;
+    w = b.apply_ini("[Preset]\nnickname = mine\nsaturation = 0.5\n[PostFx]\npreset = Mine\nfoo = 1\n");
+    CHECK(b.enabled && b.saturation == 0.5f && w.size() == 1);
+    PostFx c;
+    w = c.apply_ini("[PostFx]\npreset = vivid\nenabled = false\n");
+    CHECK(!c.enabled && c.saturation > 1);
+    CHECK(!PostFx::preset("nope", c) && c.saturation > 1);
+}
+
 int main() {
+    test_postfx();
     test_thn();
     test_flight();
     test_lanes();
