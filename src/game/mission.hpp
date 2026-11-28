@@ -35,6 +35,8 @@ struct MissionEvent {
         MsnResponse,    // a = accept / reject
         ProjHit,        // a = ship hit, b = shooter
         RTCDone,        // a = the cutscene's file (as AddRTC named it)
+        PopUpDialog,    // a = the button the player pressed (CLOSE, ...)
+        CharSelect,     // a = the character talked to, b = room, c = base
     } type;
     std::string a, b, c;
 };
@@ -73,6 +75,8 @@ public:
     static bool knows_condition(std::string_view name);
     // True while an active trigger waits for a condition of this name (e.g. "MsnResponse").
     bool waiting_for(std::string_view condition) const;
+    // The conditions of that name that active triggers wait on (e.g. who to talk to).
+    std::vector<MsnCommand> waiting_on(std::string_view condition) const;
 
     // Saved progress: which triggers are active and how often each has fired. Restoring
     // sets the triggers back without running their actions.

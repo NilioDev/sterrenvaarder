@@ -2,6 +2,9 @@
 #include "sterrenvaarder/economy.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <type_traits>
 
 #include "sterrenvaarder/ini.hpp"
 
@@ -238,6 +241,65 @@ std::optional<NewGameProfile> read_new_character(const Vfs& vfs) {
         }
     if (p.base.empty() || p.ship.empty()) return std::nullopt;
     return p;
+}
+
+std::string decode_fl_file(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 4 || std::memcmp(bytes.data(), "FLS1", 4) != 0)
+        return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    static constexpr char key[4] = {'G', 'e', 'n', 'e'};
+    std::string out(bytes.size() - 4, '\0');
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = static_cast<char>(bytes[i + 4] ^ (((static_cast<unsigned>(key[i % 4]) + i) & 0xFFu) | 0x80u));
+    return out;
+}
+
+std::optional<StoryStart> read_new_player(std::string_view text) {
+    // Read line by line: these files hold placeholders that are not valid INI values.
+    StoryStart s;
+    std::string section;
+    auto trim = [](std::string_view v) {
+        auto b = v.find_first_not_of(" \t\r"), e = v.find_last_not_of(" \t\r");
+        return b == std::string_view::npos ? std::string_view() : v.substr(b, e - b + 1);
+    };
+    auto numbers = [](std::string_view v, auto* out, int n) {
+        std::string t(v);
+        const char* p = t.c_str();
+        for (int i = 0; i < n; ++i) {
+            char* end = nullptr;
+            out[i] = static_cast<std::remove_reference_t<decltype(out[0])>>(std::strtod(p, &end));
+            if (end == p) return;
+            p = end;
+            while (*p == ',' || *p == ' ' || *p == '\t') ++p;
+        }
+    };
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string_view::npos) end = text.size();
+        std::string_view line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (auto c = line.find(';'); c != std::string_view::npos) line = line.substr(0, c);
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line.front() == '[') {
+            section = std::string(trim(line.substr(1, line.find(']') - 1)));
+            continue;
+        }
+        auto eq = line.find('=');
+        if (eq == std::string_view::npos) continue;
+        auto key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
+        if (iequals(section, "Player")) {
+            if (iequals(key, "system")) s.system = std::string(value);
+            else if (iequals(key, "pos")) numbers(value, s.pos, 3);
+            else if (iequals(key, "rotate")) numbers(value, s.rotate, 3);
+        } else if (iequals(section, "StoryInfo") && iequals(key, "Mission")) {
+            std::string m(value);
+            if (m.size() > 8 && iequals(std::string_view(m).substr(0, 8), "Mission_")) m = "M" + m.substr(8);
+            s.mission = m;
+        }
+    }
+    if (s.system.empty()) return std::nullopt;
+    return s;
 }
 
 }  // namespace sterrenvaarder

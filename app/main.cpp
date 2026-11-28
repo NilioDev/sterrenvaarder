@@ -114,7 +114,9 @@ struct Args {
     std::string load, save_file, exe;
     std::vector<std::pair<std::string, float>> reps;  // testing: --rep group,value
     std::vector<std::pair<std::string, int>> buys;  // screenshot runs: trades once docked
-    int tab = 0;                                      // screenshot runs: base screen tab (0-2)
+    int tab = 0;                                      // screenshot runs: base screen tab (0-3)
+    double tab_at = -1;                               // ... opened at this time (--tab N@T), else at the start
+    std::vector<std::pair<int, double>> later_tabs;   // more steps: --tab 3@250,room@500 (room = back to the start room)
     long long credits = -1;                           // testing: override credits
     int rank = -1;                                    // testing: override level
     double sim = 0;
@@ -149,7 +151,23 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--load") a.load = next();
         else if (k == "--save-file") a.save_file = next();
         else if (k == "--exe") a.exe = next();
-        else if (k == "--tab") a.tab = std::stoi(next());
+        else if (k == "--tab") {
+            std::string v = next();
+            // N, N@T, or a list of steps N@T,room@T (room: leave the dealer for the start room)
+            bool first = true;
+            for (std::size_t from = 0; from <= v.size();) {
+                auto comma = v.find(',', from);
+                std::string step = v.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+                from = comma == std::string::npos ? v.size() + 1 : comma + 1;
+                auto at = step.find('@');
+                std::string what = step.substr(0, at);
+                int n = what == "room" ? -1 : std::stoi(what);
+                double when = at == std::string::npos ? -1 : std::stod(step.substr(at + 1));
+                if (first) a.tab = n, a.tab_at = when;
+                else a.later_tabs.emplace_back(n, when);
+                first = false;
+            }
+        }
         else if (k == "--credits") a.credits = std::stoll(next());
         else if (k == "--rank") a.rank = std::stoi(next());
         else if (k == "--rep") {
@@ -806,6 +824,9 @@ struct FlightSession {
         bool seen = false;
         int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
         float next_in = -1;     // after success: seconds until the next story mission
+        // A message box the mission put up (title and text ids, its buttons), until closed.
+        struct Popup { std::uint32_t title = 0, text = 0; std::vector<std::string> buttons; };
+        std::optional<Popup> popup;
     };
     // Handled by the main loop: the next story mission to start, and a base (and room)
     // to move the player to, in another system if need be.
@@ -1190,6 +1211,8 @@ struct FlightSession {
     bool at_dealer = false;
     std::string base_room;  // empty: the base's start_room
     bool refit_needed = false;  // ship or guns changed: the main loop rebuilds them
+    // A ship and loadout a mission gives the player (SetShipAndLoadout), fitted by the main loop.
+    std::optional<std::pair<std::string, std::string>> pending_ship;
 
     std::string good_name(std::string_view good) const {
         return strings && econ ? strings->name(econ->name_id(good), good) : std::string(good);
@@ -2319,6 +2342,51 @@ struct FlightSession {
         }
         return mission ? mission->offer : std::string();
     }
+    // The room the player stands in, as missions name it ("Bar", "Cityscape").
+    std::string mission_room() const {
+        std::string r = docked() ? room_view_name() : std::string();
+        if (auto u = r.rfind('_'); u != std::string::npos) r = r.substr(u + 1);
+        return r;
+    }
+    // Who the mission waits for the player to talk to here (mission character nicknames).
+    std::vector<std::string> talk_partners() const {
+        std::vector<std::string> out;
+        if (!mission || !mission->runner || !docked()) return out;
+        for (auto& c : mission->runner->waiting_on("CharSelect"))
+            if (iequals(c.arg(1), mission_room()) && iequals(c.arg(2), player.base) &&
+                std::find_if(out.begin(), out.end(), [&](auto& o) { return iequals(o, c.arg(0)); }) == out.end())
+                out.push_back(c.arg(0));
+        return out;
+    }
+    std::string talk_partner_name(const std::string& who) const {
+        if (mission)
+            if (auto* npc = mission->script.npc(who)) return npc_display_name(npc);
+        return who;
+    }
+    // Talks to the first person the mission waits for here, as clicking them in the room.
+    void talk() {
+        auto who = talk_partners();
+        if (who.empty()) return;
+        mission->runner->event({game::MissionEvent::Type::CharSelect, who.front(), mission_room(), player.base});
+    }
+    bool popup_open() const { return mission && mission->popup.has_value(); }
+    // Closes the mission's message box with its first button, as the player clicking it.
+    void close_popup() {
+        if (!popup_open()) return;
+        std::string button = mission->popup->buttons.front();
+        mission->popup.reset();
+        if (mission->runner) mission->runner->event({game::MissionEvent::Type::PopUpDialog, button, "", ""});
+    }
+    std::string popup_title() const {
+        if (!popup_open() || !strings) return {};
+        return strings->name(mission->popup->title, "");
+    }
+    std::string popup_text() const {
+        if (!popup_open() || !strings) return {};
+        auto id = mission->popup->text;
+        if (auto t = strings->infocard(id)) return rdl_to_text(*t);
+        return strings->name(id, "");
+    }
     void answer_offer(bool accept) {
         if (!offer_open()) return;
         mission->runner->event({game::MissionEvent::Type::MsnResponse, accept ? "accept" : "reject", "", ""});
@@ -2336,11 +2404,7 @@ struct FlightSession {
             return nullptr;
         }
         std::optional<DVec3> position(std::string_view o) const override { return fs.where(o); }
-        std::string room() const override {
-            std::string r = fs.docked() ? fs.room_view_name() : std::string();
-            if (auto u = r.rfind('_'); u != std::string::npos) r = r.substr(u + 1);
-            return r;
-        }
+        std::string room() const override { return fs.mission_room(); }
         float health(std::string_view o) const override {
             if (iequals(o, "Player")) return fs.body.hull / std::max(1.f, fs.body.max_hull);
             if (auto* n = npc(o)) return n->body.hull / std::max(1.f, n->body.max_hull);
@@ -3038,6 +3102,19 @@ struct FlightSession {
                         if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
                         m.comms.push_back({who, l.line, 4.f, comm_voice(l.source)});
                     }
+            } else if (iequals(a.name, "PopUpDialog") || iequals(a.name, "Popupdialog")) {
+                // PopUpDialog = title id, text id, buttons (CLOSE, ...)
+                Mission::Popup p{static_cast<std::uint32_t>(a.num(0)), static_cast<std::uint32_t>(a.num(1)), {}};
+                for (std::size_t i = 2; i < a.args.size(); ++i) p.buttons.push_back(a.arg(i));
+                if (p.buttons.empty()) p.buttons.push_back("CLOSE");
+                m.popup = std::move(p);
+            } else if (iequals(a.name, "SetShipAndLoadout")) {
+                // SetShipAndLoadout = ship, loadout; "none" takes the ship away (between
+                // scenes), which we leave to the next one given.
+                if (!iequals(a.arg(0), "none")) pending_ship = {a.arg(0), iequals(a.arg(1), "none") ? std::string() : a.arg(1)};
+            } else if (iequals(a.name, "ForceLand")) {
+                // ForceLand = base: the player lands there at once, in another system if need be.
+                pending_relocation = Relocation{a.arg(0), "", solar_with_base(m, a.arg(0))};
             } else if (iequals(a.name, "MovePlayer")) {
                 // MovePlayer = x, y, z, radius: puts the player there (scene changes).
                 ship.pos = {a.num(0), a.num(1), a.num(2)};
@@ -3315,6 +3392,19 @@ void set_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Rendere
     refit(fs, db, vfs, r, args, spawn_npcs);
 }
 
+// Fits the ship a mission gave the player, if any.
+void apply_pending_ship(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& r, const Args& args) {
+    if (!fs.pending_ship) return;
+    auto [ship, loadout] = *fs.pending_ship;
+    fs.pending_ship.reset();
+    if (!db.ship(ship)) {
+        SDL_Log("mission ship %s not found", ship.c_str());
+        return;
+    }
+    set_ship(fs, db, vfs, r, args, ship, loadout, false);
+    SDL_Log("mission gives the player %s (%s)", ship.c_str(), fs.player.loadout.c_str());
+}
+
 // The game's EXE folder (Freelancer.ini and the text DLLs): --exe, or EXE next to DATA.
 std::filesystem::path find_ci(const std::filesystem::path& dir, std::string_view name) {
     std::error_code ec;
@@ -3510,24 +3600,30 @@ void handle_story(FlightSession& fs, Renderer& renderer, Camera& cam) {
     SDL_Log("moved to %s in %s%s%s", r.base.c_str(), sys.c_str(), r.room.empty() ? "" : ", ", r.room.c_str());
 }
 
+// Loads the room the docked player is in and moves its people and cutscene on to `time`.
+// Runs every frame, and in runs without a window too, so cutscenes end and missions go on.
+void advance_room(FlightSession& fs_, Renderer& renderer, double time) {
+    FlightSession* fs = &fs_;
+    if (!(fs->docked() && fs->vfs && fs->petal)) return;
+    if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
+    fs->room.chars = fs->characters_on ? &fs->chars : nullptr;
+    fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_view_name());
+    if (fs->shipdb) fs->room.set_ships(*fs->shipdb, renderer, fs->dealer_ships());
+    float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
+    fs->room.last_time = time;
+    fs->room.update_figures(renderer, dt);
+    fs->room.renderer_for_scene = &renderer;
+    if (!fs->room.pending_scene.empty() && fs->room.active()) fs->room.start_scene(*fs->vfs);
+    fs->room.update_scene(dt);
+}
+
 void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, Uint32 w, Uint32 h,
                   const Camera& cam, const RenderSettings& settings, double time, FlightSession* fs, const game::HudConfig& hud_cfg,
                   float cursor_x, float cursor_y, HudBatch& hud) {
     (void)gpu;
     const Camera* view = &cam;
     renderer.set_room(nullptr);
-    if (fs && fs->docked() && fs->vfs && fs->petal) {
-        if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
-        fs->room.chars = fs->characters_on ? &fs->chars : nullptr;
-        fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_view_name());
-        if (fs->shipdb) fs->room.set_ships(*fs->shipdb, renderer, fs->dealer_ships());
-        float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
-        fs->room.last_time = time;
-        fs->room.update_figures(renderer, dt);
-        fs->room.renderer_for_scene = &renderer;
-        if (!fs->room.pending_scene.empty() && fs->room.active()) fs->room.start_scene(*fs->vfs);
-        fs->room.update_scene(dt);
-    }
+    if (fs) advance_room(*fs, renderer, time);
     bool in_room = fs && fs->docked() && fs->room.active();
     if (in_room) {
         renderer.set_room(&fs->room.lighting);
@@ -3548,6 +3644,9 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
                 if (!m.objective.empty()) hud.text(cx, 70 * s, 16 * s, m.objective, {0.55f, 0.85f, 1.f, 0.95f}, TextAlign::Center);
                 if (!m.comms.empty())
                     hud.text(cx, 100 * s, 15 * s, m.comms.front().speaker + "  (talking)", {0.9f, 0.9f, 0.6f, 0.95f}, TextAlign::Center);
+                if (auto who = fs->talk_partners(); !who.empty() && !fs->offer_open() && !fs->room.scene)
+                    hud.text(cx, 130 * s, 16 * s, "T = TALK TO " + fs->talk_partner_name(who.front()), {1, 0.85f, 0.4f, 1},
+                             TextAlign::Center);
                 if (fs->offer_open()) {
                     // The offer: its title and text in a panel, and the question.
                     float pw = 760 * s, px = cx - pw * 0.5f, py = static_cast<float>(h) * 0.22f, ts = 14 * s, lh = 22 * s;
@@ -3579,6 +3678,24 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             if (!m.objective.empty()) hud.text(cx, 70 * s, 16 * s, m.objective, text, TextAlign::Center);
             if (!m.comms.empty()) hud.text(cx, 100 * s, 15 * s, m.comms.front().speaker + "  (radio)", call, TextAlign::Center);
             if (!m.result.empty()) hud.text(cx, static_cast<float>(h) * 0.35f, 26 * s, m.result, {1, 0.85f, 0.4f, 1}, TextAlign::Center);
+        }
+        if (fs->popup_open() && !fs->space_scene && !(fs->docked() && fs->room.scene)) {
+            // The mission's message box, centred, with its button.
+            float s = static_cast<float>(h) / 1080.f, cx = static_cast<float>(w) * 0.5f;
+            float pw = 620 * s, px = cx - pw * 0.5f, py = static_cast<float>(h) * 0.3f, ts = 14 * s, lh = 22 * s;
+            auto lines = HudBatch::wrap_text(ts, fs->popup_text(), pw - 40 * s);
+            if (lines.size() > 16) lines.resize(16);
+            float ph = 110 * s + static_cast<float>(lines.size()) * lh;
+            hud.rect(px, py, pw, ph, {0.02f, 0.06f, 0.12f, 0.9f});
+            hud.rect_outline(px, py, pw, ph, 1.5f * s, {0.35f, 0.6f, 0.85f, 0.9f});
+            hud.text(cx, py + 18 * s, 18 * s, fs->popup_title(), {0.9f, 0.95f, 1, 1}, TextAlign::Center);
+            float y = py + 56 * s;
+            for (auto& l : lines) {
+                hud.text(px + 20 * s, y, ts, l, {0.75f, 0.85f, 0.95f, 0.95f});
+                y += lh;
+            }
+            hud.text(cx, py + ph - 34 * s, 18 * s, fs->mission->popup->buttons.front() + "  (ENTER)", {1, 0.85f, 0.4f, 1},
+                     TextAlign::Center);
         }
         renderer.set_hud(&hud);
         if (!base_screen && !fs->show_map && !fs->space_scene && hud_cfg.style == game::HudStyle::Classic)
@@ -3687,7 +3804,17 @@ int run(const Args& args) {
             fs->universe = &universe;
             fs->spawn(renderer.system(), args);
             set_ship(*fs, *ships, vfs, renderer, args, args.ship, {}, true);
+            // A new game without --mission begins as the original's does: in space where
+            // EXE/NewPlayer.FL puts the player, with its first story mission.
+            std::optional<StoryStart> story;
+            if (args.new_game && args.mission.empty() && args.load.empty() && !args.system_given && !exe_dir.empty())
+                if (auto f = find_ci(exe_dir, "newplayer.fl"); !f.empty()) {
+                    auto b = read_file(f);
+                    story = read_new_player(decode_fl_file(b));
+                    if (story && story->mission.empty()) story.reset();
+                }
             if (!args.mission.empty()) fs->start_mission(vfs, args.mission);
+            else if (story && !fs->start_mission(vfs, story->mission)) story.reset();
             fs->player.system = renderer.system().nickname;
             if (!args.load.empty()) {
                 auto p = read_save_file(args.load);
@@ -3710,7 +3837,13 @@ int run(const Args& args) {
                 p.rep = start_rep;
                 // --mission on its own: begin where the mission does (the original carries
                 // the player over from the mission before).
-                if (fs->mission && !args.system_given) {
+                if (story) {
+                    p.system = story->system;
+                    p.base.clear();
+                    p.position = Vec3{static_cast<float>(story->pos[0]), static_cast<float>(story->pos[1]),
+                                      static_cast<float>(story->pos[2])};
+                    SDL_Log("new game: %s begins in %s", fs->mission->name.c_str(), p.system.c_str());
+                } else if (fs->mission && !args.system_given) {
                     if (auto pl = fs->mission_place(*fs->mission)) {
                         msn_base = pl->base;
                         msn_room = pl->room;
@@ -3723,6 +3856,11 @@ int run(const Args& args) {
                             msn_base.empty() ? "" : " at ", msn_base.c_str(), msn_room.empty() ? "" : ", ", msn_room.c_str());
                 }
                 apply_player(*fs, p, *ships, vfs, renderer, cam, args);
+                if (story) {
+                    Mat4 m = Mat4::euler_deg({story->rotate[0], story->rotate[1], story->rotate[2]});
+                    fs->ship.orient = game::Quat::look({-m.at(0, 2), -m.at(1, 2), -m.at(2, 2)}, {m.at(0, 1), m.at(1, 1), m.at(2, 1)});
+                    fs->cam_orient = fs->ship.orient;
+                }
                 if (!msn_solar.empty()) {
                     fs->spawn_solar(*fs->mission, msn_solar);
                     if (!fs->dock_at_base(renderer.system(), msn_base)) SDL_Log("cannot dock aboard %s", msn_solar.c_str());
@@ -3829,12 +3967,21 @@ int run(const Args& args) {
                 };
                 try_dock();
                 // Docked runs start on the chosen base screen tab (and its room).
-                if (fs->docked() && args.tab > 0) fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
+                if (fs->docked() && args.tab > 0 && args.tab_at < 0) fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
                 for (double t = 0; t < args.sim; t += 1.0 / 60) {
+                    auto steps = args.later_tabs;
+                    steps.insert(steps.begin(), {args.tab, args.tab_at});
+                    for (auto [n, when] : steps)
+                        if (when >= 0 && t < when && t + 1.0 / 60 >= when && fs->docked()) {
+                            if (n < 0) fs->leave_dealer();
+                            else fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(n, 0, 3)));
+                        }
+                    advance_room(*fs, renderer, t);
                     bool nav_owns = fs->update_nav(renderer.system(), 1.0 / 60);
                     if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
                     handle_jump(*fs, renderer, cam);
                     handle_story(*fs, renderer, cam);
+                    apply_pending_ship(*fs, *ships, vfs, renderer, args);
                     fs->pending_save.clear();  // runs without a window keep the player's saves as they are
                     if (args.win >= 0 && t < args.win && t + 1.0 / 60 >= args.win && fs->mission) {
                         SDL_Log("--win: %s succeeds", fs->mission->name.c_str());
@@ -3846,6 +3993,8 @@ int run(const Args& args) {
                         for (auto& n : fs->npcs) n.body.hull = 0;
                     fs->update_combat(1.0 / 60);
                     if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
+                    if (!args.answer.empty() && fs->docked() && !fs->room.scene && !fs->talk_partners().empty()) fs->talk();
+                    if (!args.answer.empty() && fs->popup_open() && !(fs->docked() && fs->room.scene)) fs->close_popup();
                     if (args.launch >= 0 && t < args.launch && t + 1.0 / 60 >= args.launch && fs->docked())
                         fs->dock_request(renderer.system());
                     if (!fs->docked()) try_dock();
@@ -3873,7 +4022,7 @@ int run(const Args& args) {
                     fs->trade_msg = game::trade_message(res);
                     SDL_Log("trade %s %d: %s, credits %lld", good.c_str(), n, fs->trade_msg.c_str(), static_cast<long long>(fs->player.credits));
                 }
-                if (fs->docked() && args.tab > 0) {
+                if (fs->docked() && args.tab > 0 && args.tab_at < 0) {
                     std::string msg = fs->trade_msg;
                     fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
                     fs->trade_msg = msg;
@@ -3949,6 +4098,7 @@ int run(const Args& args) {
                     else if (fs && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                         if (e.key.key == SDLK_SPACE) fs->mouse_flight = !fs->mouse_flight;
                         else if (e.key.key == SDLK_RETURN && fs->space_scene) fs->space_scene.reset();
+                        else if (e.key.key == SDLK_RETURN && fs->popup_open()) fs->close_popup();
                         else if (e.key.key == SDLK_T) fs->next_target();
                         else if (e.key.key == SDLK_M && !fs->docked()) fs->show_map = !fs->show_map;
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
@@ -3960,6 +4110,8 @@ int run(const Args& args) {
                             }
                         } else if (fs->docked() && (e.key.key == SDLK_UP || e.key.key == SDLK_DOWN)) {
                             fs->select_row(e.key.key == SDLK_UP ? -1 : 1);
+                        } else if (fs->docked() && e.key.key == SDLK_T && !fs->room.scene) {
+                            fs->talk();
                         } else if (fs->docked() && fs->offer_open() && (e.key.key == SDLK_Y || e.key.key == SDLK_N)) {
                             fs->answer_offer(e.key.key == SDLK_Y);
                         } else if (fs->docked() && e.key.key >= SDLK_1 && e.key.key <= SDLK_4) {
@@ -4013,6 +4165,7 @@ int run(const Args& args) {
                     if (!nav_owns) fs->model.update(fs->ship, in, dt);
                     handle_jump(*fs, renderer, cam);
                     handle_story(*fs, renderer, cam);
+                    apply_pending_ship(*fs, *ships, vfs, renderer, args);
                     if (!fs->pending_save.empty()) {  // the mission's autosave, next to the quick save
                         std::string q = save_path(args);
                         std::string dir = q.substr(0, q.find_last_of("/\\") + 1);
