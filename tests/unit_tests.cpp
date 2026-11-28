@@ -223,6 +223,47 @@ void test_combat() {
     for (int i = 0; i < 60; ++i) w.update(1.f / 60, ts, [&](Combatant&, const Projectile&) { ++hits; });
     CHECK(hits == 2 && std::fabs(target.hull - (100 - 2 * 16.3f)) < 0.01f);
     CHECK(w.projectiles().empty());
+
+    // WeaponModDB: a weapon type hits each shield type with its own multiplier.
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "sv_moddb_test";
+    fs::remove_all(root);
+    fs::create_directories(root / "equipment");
+    std::ofstream(root / "equipment/weaponmoddb.ini")
+        << "[WeaponType]\nnickname = W_Laser01\nshield_mod = S_Graviton01, 0.8\nshield_mod = S_Positron01, 1.2\n";
+    std::ofstream(root / "equipment/st_equip.ini") << "[ShieldGenerator]\nnickname = sh1\nshield_type = S_Positron01\nmax_capacity = 100\n";
+    std::ofstream(root / "equipment/weapon_equip.ini") << "[Gun]\nnickname = g1\nweapon_type = W_Laser01\n";
+    std::ofstream(root / "equipment/select_equip.ini") << "[Armor]\nnickname = armor_scale_3\nhit_pts_scale = 1.6\n";
+    {
+        Vfs vfs;
+        vfs.mount(root, "base");
+        ShipDatabase db(vfs, DataFiles{});
+        CHECK(db.shield_mod("w_laser01", "S_GRAVITON01") == 0.8f && db.shield_mod("W_Laser01", "S_Molecular01") == 1.f);
+        const ShieldArchetype* s1 = db.shield("sh1");
+        const GunArchetype* g1 = db.gun("g1");
+        CHECK(s1 && s1->shield_type == "S_Positron01" && g1 && g1->weapon_type == "W_Laser01");
+        Loadout lo;
+        lo.equip.push_back({"Armor_Scale_3", ""});
+        CHECK(db.armor_scale_of(lo) == 1.6f && db.armor_scale_of(Loadout{}) == 1.f);
+        if (s1 && g1) {
+            Combatant t2;
+            t2.id = 3;
+            t2.pos = {0, 0, -100};
+            t2.radius = 5;
+            t2.set_shield(s1);
+            MunitionArchetype m2;
+            m2.hull_damage = 10;
+            m2.lifetime = 1;
+            std::vector<Gun> g{{g1, &m2, {0, 0, 0}, 0}};
+            CombatWorld w2;
+            w2.set_shield_mods(&db);
+            w2.fire(g, 1, {0, 0, 0}, q, {0, 0, 0}, {0, 0, -1});
+            std::vector<Combatant*> t2s{&t2};
+            for (int i = 0; i < 30; ++i) w2.update(1.f / 60, t2s);
+            CHECK(std::fabs(t2.shield - (100 - 12)) < 0.01f);
+        }
+    }
+    fs::remove_all(root);
 }
 
 void test_lanes() {

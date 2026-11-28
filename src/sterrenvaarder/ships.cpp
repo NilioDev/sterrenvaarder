@@ -65,6 +65,7 @@ void DataFiles::read_freelancer_ini(std::string_view text) {
             else if (iequals(entry.key, "effects")) fx.push_back(v);
             else if (iequals(entry.key, "explosions")) ex.push_back(v);
             else if (iequals(entry.key, "fuses")) fu.push_back(v);
+            else if (iequals(entry.key, "WeaponModDB")) weapon_moddb = v;
         }
     }
     if (!s.empty()) ships = s;
@@ -119,6 +120,12 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
         if (!ships_.count(key)) ship_order_.push_back(key);
         ships_[key] = std::move(a);
     });
+    each_section(vfs, {files.weapon_moddb}, [&](const IniSection& sec) {
+        if (!iequals(sec.name, "WeaponType")) return;
+        std::string weapon = to_lower(str(sec, "nickname"));
+        for (auto* m : sec.find_all("shield_mod"))
+            if (m->values.size() >= 2) shield_mods_[weapon + "|" + to_lower(m->values[0].as_string())] = m->values[1].as_float();
+    });
     each_section(vfs, files.equipment, [&](const IniSection& sec) {
         if (iequals(sec.name, "Gun")) {
             GunArchetype g;
@@ -132,7 +139,13 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             g.muzzle_velocity = num(sec, "muzzle_velocity", g.muzzle_velocity);
             g.power_usage = num(sec, "power_usage", g.power_usage);
             g.flash_effect = str(sec, "flash_particle_name");
+            g.weapon_type = str(sec, "weapon_type");
             guns_[to_lower(g.nickname)] = std::move(g);
+            return;
+        }
+        if (iequals(sec.name, "Armor")) {
+            std::string n = str(sec, "nickname");
+            if (!n.empty()) armor_[to_lower(n)] = num(sec, "hit_pts_scale", 1);
             return;
         }
         if (iequals(sec.name, "Munition")) {
@@ -155,6 +168,7 @@ ShipDatabase::ShipDatabase(const Vfs& vfs, const DataFiles& files) {
             sh.regeneration_rate = num(sec, "regeneration_rate", 0);
             sh.offline_rebuild_time = num(sec, "offline_rebuild_time", 0);
             sh.offline_threshold = num(sec, "offline_threshold", 0);
+            sh.shield_type = str(sec, "shield_type");
             for (auto* e : sec.find_all("shield_hit_effects"))
                 if (e->values.size() >= 2) sh.hit_effects.emplace_back(e->values[0].as_float(), e->values[1].as_string());
             std::sort(sh.hit_effects.begin(), sh.hit_effects.end(),
@@ -228,6 +242,18 @@ const ShieldArchetype* ShipDatabase::shield(std::string_view n) const {
     auto it = shields_.find(to_lower(n));
     return it == shields_.end() ? nullptr : &it->second;
 }
+float ShipDatabase::shield_mod(std::string_view weapon_type, std::string_view shield_type) const {
+    if (weapon_type.empty() || shield_type.empty()) return 1;
+    auto it = shield_mods_.find(to_lower(weapon_type) + "|" + to_lower(shield_type));
+    return it != shield_mods_.end() ? it->second : 1.f;
+}
+
+float ShipDatabase::armor_scale_of(const Loadout& l) const {
+    for (auto& e : l.equip)
+        if (auto it = armor_.find(to_lower(e.item)); it != armor_.end()) return it->second;
+    return 1;
+}
+
 const ShieldArchetype* ShipDatabase::shield_of(const Loadout& l) const {
     for (auto& e : l.equip)
         if (auto* s = shield(e.item)) return s;

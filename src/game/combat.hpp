@@ -36,7 +36,8 @@ struct Combatant {
     void set_shield(const ShieldArchetype* s);
     // Applies one hit. Shields take both damage types while up; once down, the hull
     // takes hull damage only (energy damage has nothing to drain).
-    void damage(float hull_damage, float energy_damage);
+    // `shield_mod` scales what the shield takes (WeaponModDB: weapon type vs shield type).
+    void damage(float hull_damage, float energy_damage, float shield_mod = 1);
     void update(float dt);
 };
 
@@ -60,8 +61,11 @@ public:
                 const std::function<void(Combatant&, const Projectile&)>& on_hit = {});
 
     const std::vector<Projectile>& projectiles() const { return projectiles_; }
+    // WeaponModDB lookups for shield hits (none = every weapon hits every shield at 1x).
+    void set_shield_mods(const ShipDatabase* db) { mods_ = db; }
 
 private:
+    const ShipDatabase* mods_ = nullptr;
     std::vector<Projectile> projectiles_;
 };
 

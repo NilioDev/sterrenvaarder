@@ -15,10 +15,10 @@ void Combatant::set_shield(const ShieldArchetype* s) {
     shield_rebuild_level = s->offline_threshold;
 }
 
-void Combatant::damage(float hull_damage, float energy_damage) {
+void Combatant::damage(float hull_damage, float energy_damage, float shield_mod) {
     if (!alive()) return;
     if (shield > 0 && shield_offline <= 0) {
-        shield -= hull_damage + energy_damage;
+        shield -= (hull_damage + energy_damage) * shield_mod;
         if (shield <= 0) {
             shield = 0;
             shield_offline = shield_rebuild_time;
@@ -74,7 +74,8 @@ void CombatWorld::update(float dt, std::vector<Combatant*>& targets,
             DVec3 c = a + d * u - t->pos;
             if (c.x * c.x + c.y * c.y + c.z * c.z <= double(t->radius) * t->radius) {
                 if (on_hit) on_hit(*t, p);
-                t->damage(p.hull_damage, p.energy_damage);
+                float mod = mods_ && p.gun && t->shield_arch ? mods_->shield_mod(p.gun->weapon_type, t->shield_arch->shield_type) : 1.f;
+                t->damage(p.hull_damage, p.energy_damage, mod);
                 p.life = 0;
                 break;
             }

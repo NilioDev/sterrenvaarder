@@ -101,7 +101,9 @@ from `sterrenvaarder/postfx.ini` in the data layers, then `--postfx <file>`, and
 
 Combat test: `--npcs 3 [--npc-ship pi_fighter]` spawns hostile ships with their own
 loadouts. Guns, munitions and shields come from the equipment INIs; shields absorb both
-damage types and rebuild after collapsing. `--fire` holds the trigger in screenshot runs.
+damage types and rebuild after collapsing. Each weapon type hits each shield type with
+the multiplier in `equipment/WeaponModDB.ini` (`shield_mod`), and a loadout's `[Armor]`
+scales the hull's hit points (`hit_pts_scale`). `--fire` holds the trigger in screenshot runs.
 
 NPC pilots fly by the original pilot data (`missions/pilots_population.ini` and
 `pilots_story.ini`, with `inherit`): head-on buzz runs that pass the target and turn
