@@ -839,6 +839,7 @@ struct FlightSession {
     RoomView room;
     CharacterData chars;
     game::Mixer* mixer = nullptr;  // sound output (music, voices, effects)
+    const EngineArchetype* engine = nullptr;  // the player's engine (its sounds)
     // Music: the system's space track, looping, switched when the system changes.
     struct Music {
         bool loaded = false;
@@ -955,8 +956,15 @@ struct FlightSession {
         std::size_t before = world.projectiles().size();
         world.fire(g, owner, s.pos, s.orient, s.vel, aim);
         auto& ps = world.projectiles();
-        for (std::size_t i = before; i < ps.size(); ++i)
+        const MunitionArchetype* sounded[4] = {};  // one shot sound per munition kind and volley
+        int n_sounded = 0;
+        for (std::size_t i = before; i < ps.size(); ++i) {
             if (ps[i].gun) spawn_fx(ps[i].gun->flash_effect, ps[i].pos, s.vel, Quat::look(aim));
+            const MunitionArchetype* m = ps[i].munition;
+            if (!m || m->fire_sound.empty() || std::find(sounded, sounded + n_sounded, m) != sounded + n_sounded) continue;
+            if (n_sounded < 4) sounded[n_sounded++] = m;
+            play_at(m->fire_sound, s.pos);
+        }
     }
 
     void update_damage(DamageFx& d, const ShipArchetype* arch, const game::Combatant& b, const game::ShipState& s, double dt) {
@@ -1659,6 +1667,7 @@ struct FlightSession {
         update_traffic(dt);
         update_music();
         update_scene_sound(dt);
+        update_ship_sound();
     }
 
     // ---- navigation map (M)
@@ -1893,6 +1902,60 @@ struct FlightSession {
             if (ss.left <= 0) mixer->fade(ss.handle, 0, 0.25f, true);
         }
         std::erase_if(m.scene_sounds, [this](const Music::SceneSound& ss) { return !mixer->playing(ss.handle); });
+    }
+    // A one-shot sound at a place in space, as loud as its distance to the player allows.
+    void play_at(const std::string& nickname, DVec3 pos) {
+        if (!mixer || !vfs || docked()) return;
+        const SoundDef* d = music.db.find(nickname);
+        if (!d) return;
+        float g = d->gain() * d->gain_at(static_cast<float>((pos - ship.pos).length()));
+        if (g < 0.01f) return;
+        if (auto snd = sound(*d)) {
+            mixer->play(snd, g, false);
+            ++space_sounds;
+        }
+    }
+    int space_sounds = 0;  // one-shot sounds played in space (reported by screenshot runs)
+    void play_here(const std::string& nickname) { play_at(nickname, ship.pos); }
+
+    // The player's engine and shield: the engine hum loops in space, cruise starts, runs and
+    // stops with its own sounds, and the shield sounds as it collapses and comes back.
+    struct ShipSound {
+        game::Mixer::Handle rumble = 0, cruise = 0;
+        bool cruising = false, charging = false, shield_down = false;
+    } ship_sound;
+    void update_ship_sound() {
+        if (!mixer || !vfs) return;
+        auto& ss = ship_sound;
+        auto loop = [&](game::Mixer::Handle& h, const std::string& nick, bool on) {
+            if (!on || nick.empty()) {
+                if (h) mixer->fade(h, 0, 0.3f, true);
+                h = 0;
+                return;
+            }
+            if (h && mixer->playing(h)) return;
+            const SoundDef* d = music.db.find(nick);
+            auto snd = d ? sound(*d) : nullptr;
+            if (!snd) return;
+            h = mixer->play(snd, 0, true);
+            mixer->fade(h, d->gain(), 0.3f);
+        };
+        bool in_space = !docked() && body.alive();
+        const auto& st = ship;
+        bool charging = in_space && st.cruise_charge > 0 && !st.cruising;
+        bool cruising = in_space && st.cruising;
+        if (engine) {
+            loop(ss.rumble, engine->rumble_sound, in_space);
+            if (charging && !ss.charging) play_here(engine->cruise_start_sound);
+            if (ss.cruising && !cruising && in_space) play_here(engine->cruise_stop_sound);
+            loop(ss.cruise, engine->cruise_loop_sound, cruising);
+        }
+        ss.charging = charging;
+        ss.cruising = cruising;
+        bool down = in_space && body.shield_arch && body.shield_offline > 0;
+        if (body.shield_arch && in_space && down != ss.shield_down)
+            play_here(down ? body.shield_arch->collapse_sound : body.shield_arch->rebuilt_sound);
+        ss.shield_down = down;
     }
     // A sound file decoded once and kept (music, ambience, scene sounds).
     std::shared_ptr<Sound> sound(const SoundDef& d) {
@@ -2678,6 +2741,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
         fs.mesh = r.load_model(arch->model, arch->material_libraries);
     }
     fs.model = game::FlightModel(game::FlightParams::from(*arch, db.engine_of(lo), db.cruise_speed()));
+    fs.engine = db.engine_of(lo);
     if (fs.fxdb) {
         fs.engine_fx = engine_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), fs.fx_seed += 16, fs.pending_textures);
         fs.trail_fx = trail_fx_for(*fs.fxdb, vfs, *arch, db.engine_of(lo), true, fs.fx_seed += 16, fs.pending_textures);
@@ -3220,6 +3284,7 @@ int run(const Args& args) {
                     for (auto& [k, v] : names) list += k + " x" + std::to_string(v) + ", ";
                     if (live || gone) SDL_Log("traffic: %d ships around, %d gone: %s", live, gone, list.c_str());
                 }
+                if (fs->mixer) SDL_Log("space sounds: %d one-shots, engine hum %s", fs->space_sounds, fs->ship_sound.rumble ? "on" : "off");
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)
                     SDL_Log("  %s: %s, hull %.0f / %.0f, %.0f m away", n.name.c_str(),

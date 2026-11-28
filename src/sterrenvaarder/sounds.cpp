@@ -14,6 +14,13 @@ std::string str(const IniEntry& e) { return e.at(0) ? e.at(0)->as_string() : std
 
 float SoundDef::gain() const { return std::pow(10.f, attenuation / 20.f); }
 
+float SoundDef::gain_at(float distance) const {
+    if (range_max <= 0 || distance <= range_min) return 1;
+    if (distance >= range_max) return 0;
+    float near = range_min > 0 ? range_min / distance : 1;
+    return near * (range_max - distance) / (range_max - range_min);
+}
+
 void SoundDb::add(const IniFile& ini) {
     for (auto& sec : ini) {
         if (!iequals(sec.name, "Sound")) continue;
@@ -23,7 +30,11 @@ void SoundDb::add(const IniFile& ini) {
             else if (iequals(e.key, "file")) d.file = str(e);
             else if (iequals(e.key, "type")) d.type = str(e);
             else if (iequals(e.key, "attenuation")) d.attenuation = e.at(0) ? e.at(0)->as_float() : 0;
-            else if (iequals(e.key, "streamer")) d.streamer = !e.at(0) || iequals(str(e), "true") || e.at(0)->as_float() != 0;
+            else if (iequals(e.key, "range")) {
+                d.range_min = e.at(0) ? e.at(0)->as_float() : 0;
+                d.range_max = e.at(1) ? e.at(1)->as_float() : 0;
+                if (d.range_max < d.range_min) d.range_max = 0;  // a lone value: no falloff we can trust
+            } else if (iequals(e.key, "streamer")) d.streamer = !e.at(0) || iequals(str(e), "true") || e.at(0)->as_float() != 0;
         }
         if (!d.nickname.empty()) sounds_[to_lower(d.nickname)] = std::move(d);
     }

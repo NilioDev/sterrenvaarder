@@ -362,6 +362,25 @@ int main(int argc, char** argv) {
         for (auto& n : scene_sounds) scene_found += sounds.find(n) != nullptr;
         std::printf("scene sound: %zu of %zu sound entities in the sound lists, %zu sound events (%zu on no sound entity)\n",
                     scene_found, scene_sounds.size(), thn_sound_events, thn_bad_sound_events);
+        // Equipment sounds: gun shots, engine hum and cruise, shield collapse and rebuild.
+        std::size_t equip_refs = 0, equip_bad = 0;
+        for (const char* f : {"equipment/weapon_equip.ini", "equipment/engine_equip.ini", "equipment/st_equip.ini",
+                              "equipment/misc_equip.ini", "equipment/select_equip.ini"}) {
+            if (!vfs.exists(f)) continue;
+            for (auto& sec : parse_ini(vfs.read(f)))
+                for (auto& e : sec.entries) {
+                    if (!(iequals(e.key, "one_shot_sound") || iequals(e.key, "rumble_sound") || iequals(e.key, "cruise_start_sound") ||
+                          iequals(e.key, "cruise_loop_sound") || iequals(e.key, "cruise_stop_sound") ||
+                          iequals(e.key, "shield_collapse_sound") || iequals(e.key, "shield_rebuilt_sound")) || !e.at(0))
+                        continue;
+                    ++equip_refs;
+                    const SoundDef* d = sounds.find(e.at(0)->as_string());
+                    std::string path = d ? to_lower(d->file) : std::string();
+                    std::replace(path.begin(), path.end(), '\\', '/');
+                    equip_bad += !d || !vfs.exists(path);
+                }
+        }
+        std::printf("equipment sound: %zu sounds named (%zu unresolved)\n", equip_refs, equip_bad);
         std::printf("room sound: %zu rooms, %zu with music, %zu with ambience (%zu unresolved)\n", rooms, with_music, with_ambient,
                     unresolved);
     }
