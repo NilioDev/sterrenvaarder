@@ -199,6 +199,34 @@ float HudBatch::text_width(float size, std::string_view s) {
     return (static_cast<float>(s.size()) * kAdvance - (kAdvance - 4.f)) * u;
 }
 
+std::vector<std::string> HudBatch::wrap_text(float size, std::string_view s, float max_width) {
+    std::vector<std::string> lines;
+    std::size_t start = 0;
+    while (start <= s.size()) {
+        auto nl = s.find('\n', start);
+        std::string_view para = s.substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
+        std::string line;
+        std::size_t i = 0;
+        while (i < para.size()) {
+            auto sp = para.find(' ', i);
+            std::string_view word = para.substr(i, sp == std::string_view::npos ? std::string_view::npos : sp - i);
+            i = sp == std::string_view::npos ? para.size() : sp + 1;
+            if (word.empty()) continue;
+            std::string next = line.empty() ? std::string(word) : line + " " + std::string(word);
+            if (!line.empty() && text_width(size, next) > max_width) {
+                lines.push_back(line);
+                line = std::string(word);
+            } else {
+                line = std::move(next);
+            }
+        }
+        lines.push_back(line);
+        if (nl == std::string_view::npos) break;
+        start = nl + 1;
+    }
+    return lines;
+}
+
 float HudBatch::text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align) {
     if (g_font) return font_text(x, y, size, s, c, align);
     float u = size / 6.f;

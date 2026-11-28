@@ -164,6 +164,42 @@ std::vector<FormationShape> parse_formations(const IniFile& ini) {
     return out;
 }
 
+MsnRtc parse_rtc(const IniFile& ini) {
+    MsnRtc r;
+    for (auto& sec : ini) {
+        if (iequals(sec.name, "CharacterEncounter")) {
+            for (auto& e : sec.entries) {
+                auto v = [&](std::size_t i) { return e.at(i) ? e.at(i)->as_string() : std::string(); };
+                if (iequals(e.key, "Location")) {
+                    r.base = v(0);
+                    r.room = v(1);
+                } else if (iequals(e.key, "offer")) r.offer = v(0);
+                else if (iequals(e.key, "decision")) r.decision = v(0);
+                else if (iequals(e.key, "accept")) r.accept = v(0);
+                else if (iequals(e.key, "reject")) r.reject = v(0);
+                else if (iequals(e.key, "action")) r.action = v(0);
+                else if (iequals(e.key, "mission_text_id")) r.mission_text_id = e.at(0) ? e.at(0)->as_int() : 0;
+                else if (iequals(e.key, "nooffer_text_id")) r.nooffer_text_id = e.at(0) ? e.at(0)->as_int() : 0;
+                else if (iequals(e.key, "autoplay")) r.autoplay = true;
+                else if (iequals(e.key, "relocate_player")) r.relocate_player = v(0);
+            }
+        } else if (iequals(sec.name, "Reserve")) {
+            for (auto* e : sec.find_all("spot"))
+                if (e->at(0)) r.spots.push_back(e->at(0)->as_string());
+        } else if (iequals(sec.name, "Char")) {
+            MsnRtc::Char c;
+            for (auto& e : sec.entries) {
+                std::string v = e.at(0) ? e.at(0)->as_string() : std::string();
+                if (iequals(e.key, "npc")) c.npc = v;
+                else if (iequals(e.key, "actor")) c.actor = v;
+                else if (iequals(e.key, "fidget")) c.fidget = v;
+            }
+            r.chars.push_back(std::move(c));
+        }
+    }
+    return r;
+}
+
 std::vector<NpcShipArch> parse_npc_ship_archs(const IniFile& ini) {
     std::vector<NpcShipArch> out;
     for (auto& sec : ini) {

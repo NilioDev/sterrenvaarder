@@ -181,7 +181,9 @@ script and lists the conditions the runner doesn't evaluate yet.
 - `SpawnFormation` places a formation's ships in the slots from `missions/formations.ini`. The first ship leads and the others follow it.
 - Docking, launching, changing rooms and leaving a system are reported to the script (SpaceExit, BaseExit, PlayerLaunch, LaunchComplete, LocEnter/LocExit, SystemExit).
 - On a base, tab 4 (key `4`) opens the bar. Entering a room counts for the script (`LocEnter`) for as long as you stay in it.
-- A mission offer shows its text with "ACCEPT MISSION?". `Y` accepts and `N` declines (`MsnResponse`). For screenshot runs, `--answer accept|reject` answers it.
+- A mission offer shows a panel with its title and text (from the offer scene's `mission_text_id`, or `SetTitle`/`SetOffer`) and "ACCEPT MISSION?". `Y` accepts and `N` declines (`MsnResponse`). For screenshot runs, `--answer accept|reject` answers it and `--launch T` launches from the base at T seconds.
+- Navigation objectives (`navmarker`, `rep_inst`) and `NNPath` put a waypoint on the HUD: a marker with its name and distance, or an arrow at the edge of the view. `NNIds ..., HISTORY` and `SetNNObj ..., OBJECTIVE_HISTORY` write the mission log.
+- `AddRTC`/`RemoveRTC` queue the room cutscenes from `[CharacterEncounter]` files. They count as played when you enter their room; the scenes themselves follow later.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 

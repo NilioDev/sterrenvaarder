@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+#include <cctype>
 #include "sterrenvaarder/resources.hpp"
 
 #include <algorithm>
@@ -158,6 +159,44 @@ std::string GameStrings::name(std::uint32_t id, std::string_view fallback) const
         if (it != strings_.end() && it->second.find_first_not_of(" \t\r\n") != std::string::npos) return it->second;
     }
     return std::string(fallback);
+}
+
+std::string rdl_to_text(std::string_view rdl) {
+    std::string out;
+    bool in_text = rdl.find("<TEXT") == std::string_view::npos;  // no markup: all of it is text
+    std::size_t i = 0;
+    while (i < rdl.size()) {
+        char c = rdl[i];
+        if (c == '<') {
+            auto end = rdl.find('>', i);
+            if (end == std::string_view::npos) break;
+            std::string tag;
+            for (auto ch : rdl.substr(i + 1, end - i - 1)) tag += static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (tag.rfind("TEXT", 0) == 0) in_text = true;
+            else if (tag == "/TEXT") in_text = false;
+            else if (tag.rfind("PARA", 0) == 0) out += '\n';
+            i = end + 1;
+            continue;
+        }
+        if (c == '&') {
+            static const std::pair<std::string_view, char> entities[] = {
+                {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}};
+            bool done = false;
+            for (auto& [e, ch] : entities)
+                if (rdl.substr(i, e.size()) == e) {
+                    if (in_text) out += ch;
+                    i += e.size();
+                    done = true;
+                    break;
+                }
+            if (done) continue;
+        }
+        if (in_text && c != '\r') out += c;
+        ++i;
+    }
+    // Trim trailing breaks and spaces.
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    return out;
 }
 
 std::vector<std::string> resource_dlls(std::string_view freelancer_ini) {

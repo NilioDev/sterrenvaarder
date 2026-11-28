@@ -84,6 +84,7 @@ struct Args {
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
     std::string mission;    // --mission M01a: run that story mission's script
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
+    double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
@@ -152,6 +153,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--npc-pilot") a.npc_pilot = next();
         else if (k == "--mission") a.mission = next();
         else if (k == "--answer") a.answer = next();
+        else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
@@ -485,6 +487,13 @@ struct FlightSession {
         std::vector<Comm> comms;  // radio calls: one plays at a time
         std::string result;       // shown when the mission ends
         std::vector<std::string> unhandled;  // action names logged once
+        std::string title, offer;            // the offer (SetTitle, SetOffer), shown in the bar
+        std::vector<std::string> history;    // NNIds HISTORY: the mission log
+        struct Waypoint { std::string system, object, label; std::optional<DVec3> pos; };
+        std::optional<Waypoint> waypoint;    // where the objective leads (NNPath, navmarker)
+        struct Rtc { std::string path; MsnRtc def; bool repeatable = false, played = false; };
+        std::vector<Rtc> rtcs;               // queued room cutscenes (AddRTC), played in rooms
+        bool random_pop = true;              // RandomPop: random traffic on or off
         // What the player did last frame, to report changes as events.
         bool was_docked = false;
         std::string last_room, last_system, last_base;
@@ -1321,6 +1330,22 @@ struct FlightSession {
 
     // ---- story missions
     bool offer_open() const { return mission && mission->runner && mission->runner->waiting_for("MsnResponse"); }
+    // The queued cutscene for the room the player is in, if any.
+    const Mission::Rtc* room_rtc() const {
+        if (!mission || !docked()) return nullptr;
+        for (auto& r : mission->rtcs)
+            if (iequals(r.def.base, player.base) && iequals(r.def.room, room_view_name()) && (!r.played || r.repeatable)) return &r;
+        return nullptr;
+    }
+    // The offer text: from the offer scene in this room, else the last SetOffer.
+    std::string offer_text() const {
+        if (auto* r = room_rtc(); r && r->def.mission_text_id && strings) {
+            auto id = static_cast<std::uint32_t>(r->def.mission_text_id);
+            if (auto t = strings->infocard(id)) return rdl_to_text(*t);
+            return strings->name(id, "");
+        }
+        return mission ? mission->offer : std::string();
+    }
     void answer_offer(bool accept) {
         if (!offer_open()) return;
         mission->runner->event({game::MissionEvent::Type::MsnResponse, accept ? "accept" : "reject", "", ""});
@@ -1592,6 +1617,13 @@ struct FlightSession {
             m.was_docked = docked();
             m.last_room = room;
             m.last_system = sys;
+            // Cutscenes queued for this room play on entry (the scene itself comes later;
+            // for now the entry is logged and the scene counts as played).
+            for (auto& r : m.rtcs)
+                if (!r.played && docked() && iequals(r.def.base, player.base) && iequals(r.def.room, room) && !r.def.is_offer()) {
+                    SDL_Log("mission: cutscene %s in %s", r.def.action.c_str(), room.c_str());
+                    r.played = true;
+                }
             if (docked()) m.last_base = player.base;
         }
         MissionView view(*this, rend ? rend->system().nickname : std::string());
@@ -1671,10 +1703,62 @@ struct FlightSession {
                 ship.pos = {a.num(0), a.num(1), a.num(2)};
                 ship.vel = {};
             } else if (iequals(a.name, "SetNNObj")) {
-                for (auto& o : m.script.objectives)
-                    if (iequals(o.nickname, a.arg(0)) && iequals(o.type.name, "type") && !o.type.args.empty() &&
-                        iequals(o.type.arg(0), "ids") && strings)
-                        m.objective = strings->name(static_cast<std::uint32_t>(o.type.num(1)), o.nickname);
+                // ids, text | navmarker, system, name, text, x, y, z | rep_inst, ..., object
+                // A second argument OBJECTIVE_HISTORY only writes to the mission log: the
+                // current objective stays.
+                if (iequals(a.arg(1), "OBJECTIVE_HISTORY")) {
+                    if (!m.objective.empty() && (m.history.empty() || m.history.back() != m.objective)) m.history.push_back(m.objective);
+                    return;
+                }
+                if (iequals(a.arg(0), "null")) {
+                    m.objective.clear();
+                    m.waypoint.reset();
+                }
+                for (auto& o : m.script.objectives) {
+                    if (!iequals(o.nickname, a.arg(0)) || !iequals(o.type.name, "type") || o.type.args.empty()) continue;
+                    auto ids = [&](std::size_t i) {
+                        return strings ? strings->name(static_cast<std::uint32_t>(o.type.num(i)), o.nickname) : o.nickname;
+                    };
+                    if (iequals(o.type.arg(0), "ids")) {
+                        m.objective = ids(1);
+                        m.waypoint.reset();
+                    } else if (iequals(o.type.arg(0), "navmarker") || iequals(o.type.arg(0), "rep_inst")) {
+                        m.objective = ids(3);
+                        Mission::Waypoint wp{o.type.arg(1), o.type.args.size() > 7 ? o.type.arg(7) : std::string(), ids(2),
+                                             DVec3{o.type.num(4), o.type.num(5), o.type.num(6)}};
+                        m.waypoint = wp;
+                    }
+                }
+            } else if (iequals(a.name, "NNPath")) {
+                // NNPath = name ids, text ids, object, system: a waypoint at an object.
+                std::string label = strings ? strings->name(static_cast<std::uint32_t>(a.num(0)), a.arg(2)) : a.arg(2);
+                m.waypoint = Mission::Waypoint{a.arg(3), a.arg(2), label, std::nullopt};
+            } else if (iequals(a.name, "NNIds")) {
+                if (iequals(a.arg(1), "HISTORY") && strings)
+                    if (auto t = strings->infocard(static_cast<std::uint32_t>(a.num(0))))
+                        m.history.push_back(rdl_to_text(*t));
+            } else if (iequals(a.name, "SetTitle") || iequals(a.name, "SetOffer")) {
+                std::string text;
+                if (strings) {
+                    auto id = static_cast<std::uint32_t>(a.num(0));
+                    if (auto t = strings->infocard(id)) text = rdl_to_text(*t);
+                    else text = strings->name(id, "");
+                }
+                (iequals(a.name, "SetTitle") ? m.title : m.offer) = text;
+            } else if (iequals(a.name, "AddRTC")) {
+                Mission::Rtc rtc{a.arg(0), {}, iequals(a.arg(1), "repeatable")};
+                std::string path = to_lower(a.arg(0));
+                std::replace(path.begin(), path.end(), '\\', '/');
+                try {
+                    if (vfs && vfs->exists(path)) rtc.def = parse_rtc(parse_ini(vfs->read(path)));
+                } catch (const std::exception& e) {
+                    SDL_Log("mission: cutscene %s: %s", path.c_str(), e.what());
+                }
+                m.rtcs.push_back(std::move(rtc));
+            } else if (iequals(a.name, "RemoveRTC")) {
+                std::erase_if(m.rtcs, [&](const Mission::Rtc& r) { return iequals(r.path, a.arg(0)); });
+            } else if (iequals(a.name, "RandomPop")) {
+                m.random_pop = !iequals(a.arg(0), "false");
             } else if (iequals(a.name, "ChangeState")) {
                 bool won = iequals(a.arg(0), "SUCCEED");
                 m.result = won ? "MISSION COMPLETE" : "MISSION FAILED";
@@ -1849,6 +1933,16 @@ struct FlightSession {
         h.hull = body.max_hull > 0 ? body.hull / body.max_hull : 1;
         h.shield = body.max_shield > 0 ? body.shield / body.max_shield : 0;
         h.contacts = contacts;
+        if (mission && mission->waypoint && iequals(mission->waypoint->system, sys.nickname)) {
+            auto& wp = *mission->waypoint;
+            auto pos = wp.object.empty() ? wp.pos : where(wp.object);
+            if (!pos) pos = wp.pos;
+            if (pos) {
+                h.has_waypoint = true;
+                h.waypoint = *pos;
+                h.waypoint_label = wp.label;
+            }
+        }
         return h;
     }
 };
@@ -2078,9 +2172,24 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
                 if (!m.objective.empty()) hud.text(cx, 70 * s, 16 * s, m.objective, {0.55f, 0.85f, 1.f, 0.95f}, TextAlign::Center);
                 if (!m.comms.empty())
                     hud.text(cx, 100 * s, 15 * s, m.comms.front().speaker + "  (talking)", {0.9f, 0.9f, 0.6f, 0.95f}, TextAlign::Center);
-                if (fs->offer_open())
-                    hud.text(cx, static_cast<float>(h) * 0.3f, 22 * s, "ACCEPT MISSION?  Y = YES   N = NO", {1, 0.85f, 0.4f, 1},
+                if (fs->offer_open()) {
+                    // The offer: its title and text in a panel, and the question.
+                    float pw = 760 * s, px = cx - pw * 0.5f, py = static_cast<float>(h) * 0.22f, ts = 14 * s, lh = 22 * s;
+                    auto lines = HudBatch::wrap_text(ts, fs->offer_text(), pw - 40 * s);
+                    if (lines.size() > 14) lines.resize(14);
+                    float ph = 110 * s + static_cast<float>(lines.size()) * lh;
+                    hud.rect(px, py, pw, ph, {0.02f, 0.06f, 0.12f, 0.85f});
+                    hud.rect_outline(px, py, pw, ph, 1.5f * s, {0.35f, 0.6f, 0.85f, 0.9f});
+                    hud.text(cx, py + 18 * s, 18 * s, m.title.empty() ? std::string("MISSION OFFER") : m.title, {0.9f, 0.95f, 1, 1},
                              TextAlign::Center);
+                    float y = py + 56 * s;
+                    for (auto& l : lines) {
+                        hud.text(px + 20 * s, y, ts, l, {0.75f, 0.85f, 0.95f, 0.95f});
+                        y += lh;
+                    }
+                    hud.text(cx, py + ph - 34 * s, 20 * s, "ACCEPT MISSION?  Y = YES   N = NO", {1, 0.85f, 0.4f, 1},
+                             TextAlign::Center);
+                }
             }
         }
         else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
@@ -2300,6 +2409,8 @@ int run(const Args& args) {
                         for (auto& n : fs->npcs) n.body.hull = 0;
                     fs->update_combat(1.0 / 60);
                     if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
+                    if (args.launch >= 0 && t < args.launch && t + 1.0 / 60 >= args.launch && fs->docked())
+                        fs->dock_request(renderer.system());
                 }
                 for (auto& [good, n] : args.buys) {
                     const Good* g = econ->good(good);

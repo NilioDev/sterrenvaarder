@@ -94,6 +94,10 @@ struct HudState {
     std::string system_name;
     std::string status;  // navigation state ("TRADE LANE", "DOCKED: ...", prompts)
     std::vector<HudContact> contacts;  // nearest first
+    // Mission waypoint (NNPath): where the current objective leads, in this system.
+    bool has_waypoint = false;
+    DVec3 waypoint;
+    std::string waypoint_label;
 };
 
 // One original interface model to draw (classic style), loaded from the player's data.
