@@ -103,6 +103,7 @@ struct GpuModel {
     std::vector<GpuPart> parts;
     std::vector<GpuMaterial> materials;
     std::uint32_t triangles = 0;
+    float radius = 0;               // farthest vertex from the model's origin
     std::unique_ptr<GpuSkin> skin;  // character meshes loaded for posing
 };
 
@@ -653,6 +654,13 @@ struct Renderer::Impl {
                             vx.pos[0] = vm->positions[v].x;
                             vx.pos[1] = vm->positions[v].y;
                             vx.pos[2] = vm->positions[v].z;
+                            {
+                                const Mat4& m = gp.local;
+                                float wx = m.at(0, 0) * vx.pos[0] + m.at(0, 1) * vx.pos[1] + m.at(0, 2) * vx.pos[2] + m.at(0, 3);
+                                float wy = m.at(1, 0) * vx.pos[0] + m.at(1, 1) * vx.pos[1] + m.at(1, 2) * vx.pos[2] + m.at(1, 3);
+                                float wz = m.at(2, 0) * vx.pos[0] + m.at(2, 1) * vx.pos[1] + m.at(2, 2) * vx.pos[2] + m.at(2, 3);
+                                gm->radius = std::max(gm->radius, std::sqrt(wx * wx + wy * wy + wz * wz));
+                            }
                             if (!vm->normals.empty()) {
                                 vx.normal[0] = vm->normals[v].x;
                                 vx.normal[1] = vm->normals[v].y;
@@ -1549,6 +1557,10 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, std::ui
 
 Renderer::ModelHandle Renderer::load_model(const std::string& path, const std::vector<std::string>& libs) {
     return ModelHandle{impl_->load_model(path, libs, false)};
+}
+
+float Renderer::model_radius(ModelHandle m) const {
+    return m ? static_cast<const GpuModel*>(m.p)->radius : 0.f;
 }
 
 Renderer::ModelHandle Renderer::load_character(const std::string& path, const std::vector<std::string>& libs,

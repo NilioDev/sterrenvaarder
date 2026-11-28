@@ -26,6 +26,9 @@ MissionRunner::MissionRunner(const MissionScript& script) : script_(script), sta
     for (std::size_t i = 0; i < script.triggers.size(); ++i) index_.emplace(to_lower(script.triggers[i].nickname), i);
     for (auto& s : script.ships)
         for (auto& l : s.labels) ship_labels_[to_lower(s.nickname)].push_back(to_lower(l));
+    // Mission solars count in their labels too (M09: "Destroyed = generators' label, 4").
+    for (auto& s : script.solars)
+        for (auto& l : s.labels) ship_labels_[to_lower(s.nickname)].push_back(to_lower(l));
 }
 
 void MissionRunner::start() {

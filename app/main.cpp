@@ -841,6 +841,7 @@ struct FlightSession {
         int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
         float next_in = -1;     // after success: seconds until the next story mission
         std::set<std::string> maneuver_off;  // EnableManeuver = name, false: maneuvers switched off (lower case)
+        bool maneuvers_locked = false;       // LockManeuvers = true: until switched off, or the player docks
         // A message box the mission put up (title and text ids, its buttons), until closed.
         struct Popup { std::uint32_t title = 0, text = 0; std::vector<std::string> buttons; };
         std::optional<Popup> popup;
@@ -1291,6 +1292,12 @@ struct FlightSession {
     }
 
     void on_docked(const SystemObject& o) {
+        // A lock on the maneuvers (LockManeuvers, set as the player asks to dock) ends with
+        // the docking (our reading: M09 never switches the one before its base off).
+        if (mission && mission->maneuvers_locked) {
+            mission->maneuvers_locked = false;
+            for (const char* k : {"dock", "formation"}) mission->maneuver_off.erase(k);
+        }
         nav = Nav::Docked;
         nav_target = o.nickname;
         ship.vel = {};
@@ -1627,11 +1634,21 @@ struct FlightSession {
         std::optional<float> vibe = vibes.between({o->nickname}, {"Player"});
         if (vibe ? attitude_of(*vibe) == Attitude::Hostile
                  : !o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
+            // The mission may answer the request by making the base friendly (M09: the
+            // Tekagi base after its shields are down): ask again once it has had its turn.
+            if (mission && mission->runner && pending_dock_time <= 0) {
+                pending_dock = o->nickname;
+                pending_dock_time = 1.f;
+                return;
+            }
+            pending_dock.clear();
             notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
             notice_time = 4.f;
             if (base) radio_call(voice, game::dock_reply_lines(base_nick, false));
             return;
         }
+        pending_dock.clear();
+        pending_dock_time = 0;
         nav_target = o->nickname;
         nav = Nav::Approach;
         if (base) radio_call(voice, game::dock_reply_lines(base_nick, true));
@@ -1695,10 +1712,16 @@ struct FlightSession {
                 go_to(r);
                 return;
             }
-        // In a room the mission waits for the player to leave: step back out to the start room.
+        // In a room the mission waits for the player to leave: step back out to the start room,
+        // or, in the start room itself (M09 ends on leaving the Cityscape), launch.
         for (auto& r : leave)
-            if (iequals(r, mission_room()) && room.rooms && !iequals(room.rooms->start_room, r)) {
-                go_to(room.rooms->start_room);
+            if (iequals(r, mission_room()) && room.rooms) {
+                if (!iequals(room.rooms->start_room, r)) {
+                    go_to(room.rooms->start_room);
+                } else {
+                    dock_request(sys);
+                    autoplay_doing = "launches";
+                }
                 return;
             }
         if (!leave.empty()) return;  // the mission is not done with this base yet
@@ -1748,6 +1771,34 @@ struct FlightSession {
     std::string autoplay_doing;
     int autoplay_reform = -1;  // the formation leader left for a fight, to rejoin after it
     float autoplay_leader_still = 0;  // seconds the formation leader has not moved
+    // A mission solar or big ship whose hit sphere lies on the line from `a` to `b` (but not
+    // the one with id `skip`): shots that way would hit it first.
+    const game::Combatant* line_blocker(DVec3 a, DVec3 b, int skip) const {
+        DVec3 ab = b - a;
+        double len = ab.length();
+        if (len < 1) return nullptr;
+        auto in_way = [&](const game::Combatant& c) {
+            if (!c.alive() || c.id == skip) return false;
+            DVec3 ac = c.pos - a;
+            double t = (ac.x * ab.x + ac.y * ab.y + ac.z * ab.z) / (len * len);
+            if (t <= 0 || t >= 1) return false;
+            return (a + ab * t - c.pos).length() < c.radius;
+        };
+        for (auto& ms : msn_solars)
+            if (ms.destructible && solar_here(ms) && in_way(ms.body)) return &ms.body;
+        for (auto& n : npcs)
+            if (is_big_ship(n) && in_way(n.body)) return &n.body;
+        return nullptr;
+    }
+    // Whether firing this trigger fails the mission within `depth` steps of ActTrig.
+    bool leads_to_fail(const MsnTrigger& t, int depth) const {
+        for (auto& a : t.actions) {
+            if (iequals(a.name, "ChangeState") && iequals(a.arg(0), "FAIL")) return true;
+            if (depth > 0 && iequals(a.name, "ActTrig"))
+                if (auto* next = mission->script.trigger(a.arg(0)); next && leads_to_fail(*next, depth - 1)) return true;
+        }
+        return false;
+    }
     void autoplay(const StarSystem& sys) {
         input.steer = {};
         firing = false;
@@ -1768,9 +1819,9 @@ struct FlightSession {
             };
             for (auto& t : mission->script.triggers) {
                 if (!mission->runner->active(t.nickname)) continue;
-                bool fails = false;  // only a leash that fails the mission
-                for (auto& a : t.actions) fails = fails || (iequals(a.name, "ChangeState") && iequals(a.arg(0), "FAIL"));
-                if (!fails) continue;
+                // Only a leash that fails the mission, at once or after a few nags (M09: away from
+                // Ozu, then 30 s, 30 s more, and the mission fails).
+                if (!leads_to_fail(t, 3)) continue;
                 for (auto& c : t.conditions) {
                     if (!iequals(c.arg(0), "outside")) continue;
                     if (iequals(c.name, "DistShip")) {
@@ -1862,8 +1913,25 @@ struct FlightSession {
         // The mission waits for the player to dock somewhere close by: leave any formation and dock.
         if (mission && mission->runner && (nav == Nav::Free || nav == Nav::Formation))
             for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
-                if (iequals(c.arg(0), "Dock") && !mission->maneuver_off.count("dock"))
-                    if (auto* o = object_named(sys, c.arg(1)); o && (DVec3{o->pos.x, o->pos.y, o->pos.z} - ship.pos).length() < 3000) {
+                if (iequals(c.arg(0), "Dock") && !mission->maneuver_off.count("dock")) {
+                    // No target named: docking anywhere will do; the objective's object it is
+                    // (M09: dock with the base once its shield generators are down).
+                    std::string at = c.arg(1);
+                    bool any = at.empty() && mission->waypoint && !mission->waypoint->object.empty();
+                    if (any) at = mission->waypoint->object;
+                    auto* o = object_named(sys, at);
+                    if (!o) continue;
+                    DVec3 to = DVec3{o->pos.x, o->pos.y, o->pos.z} - ship.pos;
+                    if (to.length() >= 3000) {
+                        if (!any || nav != Nav::Free) continue;
+                        Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                        input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                        input.throttle = 1.f;
+                        input.cruise = game::dot(ship.orient.forward(), dir) > 0.95f;
+                        autoplay_doing = "heads to dock at " + o->nickname;
+                        return;
+                    }
+                    {
                         if (nav == Nav::Formation) formation_request();
                         contacts.push_back({o->nickname, {}, 0, true});
                         target = static_cast<int>(contacts.size() - 1);
@@ -1871,6 +1939,7 @@ struct FlightSession {
                         autoplay_doing = "docks at " + o->nickname;
                         return;
                     }
+                }
         // A leader that has stopped for a while has nowhere to take us: go our own way.
         if (nav == Nav::Formation) {
             for (auto& n : npcs)
@@ -1921,6 +1990,7 @@ struct FlightSession {
         // (a fighter's guns barely scratch a cruiser, and the fight is usually with its escort).
         const NpcShip* foe = nullptr;
         double best = 3000;
+        int foe_rank = 4;
         {
             decltype(mission->runner->waiting_on("")) waited;
             if (mission && mission->runner) waited = mission->runner->waiting_on("Destroyed");
@@ -1947,7 +2017,7 @@ struct FlightSession {
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
                         // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
                         if (r == 3 && mission && mission->waypoint) continue;
-                        if (r < best_rank || (r == best_rank && d < best)) best_rank = r, best = d, foe = &n;
+                        if (r < best_rank || (r == best_rank && d < best)) best_rank = foe_rank = r, best = d, foe = &n;
                     }
         }
         // Solars: those the mission wants destroyed (by nickname or label), else any hostile one.
@@ -1968,21 +2038,52 @@ struct FlightSession {
         };
         bool any_wanted = false;
         for (auto& ms : msn_solars) any_wanted = any_wanted || (ms.destructible && ms.body.alive() && solar_here(ms) && wanted(ms));
-        if (!foe)
+        // A solar the mission waits on goes before fighters it doesn't, and one marked on the HUD
+        // before unmarked fighters (M09: waves the mission counts keep coming until the marked
+        // generators are down).
+        bool marked_wanted = false, foe_marked = false;
+        for (auto& ms : msn_solars)
+            if (ms.destructible && ms.body.alive() && solar_here(ms) && wanted(ms))
+                for (auto& nm : ms.names) marked_wanted = marked_wanted || is_marked(nm);
+        if (foe)
+            for (auto& nm : foe->names) foe_marked = foe_marked || is_marked(nm);
+        if (!foe || (any_wanted && (foe_rank > 0 || (marked_wanted && !foe_marked))))
+        {
+            // Of those in reach, one with a clear line of fire first (M09: the battleship by the
+            // generators takes the shots); else fly round to the far side of the nearest.
+            const MissionSolar* pick = nullptr;
+            const game::Combatant* blocker = nullptr;
+            double pick_d = 0;
+            bool pick_clear = false;
             for (auto& ms : msn_solars)
                 if (ms.destructible && ms.body.alive() && solar_here(ms) && (any_wanted ? wanted(ms) : solar_hostile(ms))) {
-                    DVec3 to = ms.pos - ship.pos;
-                    double d = to.length();
-                    if (d > 4000) continue;
-                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
-                    input.steer = game::steer_towards(ship.orient, dir, 1.f);
-                    input.cruise = false;
-                    input.throttle = d > 700 ? 1.f : 0.f;
-                    aim_dir = dir;
-                    firing = game::dot(ship.orient.forward(), dir) > 0.97f && d < 900;
-                    autoplay_doing = "attacks " + ms.nickname;
-                    return;
+                    double d = (ms.pos - ship.pos).length();
+                    if (d > (any_wanted ? 8000 : 4000)) continue;
+                    const game::Combatant* in_way = line_blocker(ship.pos, ms.pos, ms.body.id);
+                    bool clear = !in_way;
+                    if (!pick || (clear && !pick_clear) || (clear == pick_clear && d < pick_d))
+                        pick = &ms, pick_d = d, pick_clear = clear, blocker = in_way;
                 }
+            if (pick) {
+                DVec3 goal = pick->pos;
+                if (blocker) {  // round the blocker, to the target's far side from it
+                    DVec3 away = pick->pos - blocker->pos;
+                    double l = std::max(1.0, away.length());
+                    goal = pick->pos + away * (600.0 / l);
+                }
+                DVec3 to = (blocker ? goal : pick->pos) - ship.pos;
+                double d = to.length();
+                Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                input.cruise = false;
+                // Close in to well within the guns' reach (about 600 m for most) before firing.
+                input.throttle = blocker ? 1.f : d > 400 ? 1.f : 0.f;
+                aim_dir = dir;
+                firing = !blocker && game::dot(ship.orient.forward(), dir) > 0.97f && d < 650;
+                autoplay_doing = (blocker ? "goes round to " : "attacks ") + pick->nickname;
+                return;
+            }
+        }
         if (foe) {
             DVec3 to = foe->body.pos - ship.pos;
             Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
@@ -2142,6 +2243,12 @@ struct FlightSession {
                         // "outside" is a leash, not a goal; and it must be about the player.
                         bool player = iequals(k, "PlayerManeuver") || iequals(k, "JumpInComplete");
                         for (auto& v : c.args) player = player || iequals(v.as_string(), "Player");
+                        // About an object that isn't here (left behind in another system).
+                        if (iequals(k, "DistShip") || iequals(k, "DistCircle")) {
+                            std::string other = iequals(c.arg(iequals(k, "DistShip") ? 1 : 0), "Player") ? c.arg(iequals(k, "DistShip") ? 2 : 1)
+                                                                                                         : c.arg(iequals(k, "DistShip") ? 1 : 0);
+                            if (!where(other)) continue;
+                        }
                         // A race's rings while the objective is elsewhere: the race is over.
                         if (iequals(k, "DistCircle") && mission->waypoint && !mission->waypoint->object.empty() &&
                             !iequals(mission->waypoint->object, c.arg(1)))
@@ -2183,8 +2290,36 @@ struct FlightSession {
         autoplay_doing = "flies to the objective";
     }
 
+    std::string pending_dock;      // a dock request refused as hostile, asked again shortly
+    float pending_dock_time = 0;
+    // Asks once more for docking the mission may have just allowed (see dock_request).
+    void retry_dock(const StarSystem& sys, float dt) {
+        if (pending_dock.empty()) return;
+        pending_dock_time -= dt;
+        if (pending_dock_time > 0.5f) return;  // let the mission update first
+        const SystemObject* o = object_named(sys, pending_dock);
+        if (!o || nav != Nav::Free) { pending_dock.clear(); pending_dock_time = 0; return; }
+        std::optional<float> vibe = vibes.between({o->nickname}, {"Player"});
+        bool hostile = vibe ? attitude_of(*vibe) == Attitude::Hostile
+                            : !o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile;
+        bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
+        std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = radio_voice(sys, *o);
+        if (hostile) {
+            notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
+            notice_time = 4.f;
+            if (base) radio_call(voice, game::dock_reply_lines(base_nick, false));
+        } else if (may_use(*o)) {
+            nav_target = o->nickname;
+            nav = Nav::Approach;
+            if (base) radio_call(voice, game::dock_reply_lines(base_nick, true));
+        }
+        pending_dock.clear();
+        pending_dock_time = 0;
+    }
+
     bool update_nav(const StarSystem& sys, double dt) {
         notice_time = std::max(0.f, notice_time - static_cast<float>(dt));
+        retry_dock(sys, static_cast<float>(dt));
         if (nav == Nav::Free) return false;
         if (nav == Nav::Docked) { ship.vel = {}; return true; }
         if (nav == Nav::Formation) {
@@ -3771,12 +3906,17 @@ struct FlightSession {
                 ms.faction = d.faction;
                 ms.names = {d.nickname};
                 for (auto& l : d.labels) ms.names.push_back(l);
+                if (mission && mission->runner) mission->runner->ship_spawned(d.nickname);
                 if (sa->destructible && sa->hit_pts > 0) {
                     ms.destructible = true;
                     ms.body.id = next_body_id++;
                     ms.body.pos = ms.pos;
                     ms.body.hull = ms.body.max_hull = sa->hit_pts;
-                    ms.body.radius = std::max(20.f, sa->solar_radius * 0.3f);  // its hit sphere (our estimate)
+                    // Its hit sphere: the model's reach where known (a battleship's solar_radius
+                    // would swallow what lies around it), else our estimate from the archetype.
+                    float reach = rend && ms.mesh ? rend->model_radius(ms.mesh) : 0.f;
+                    ms.body.radius = reach > 0 ? std::max(20.f, reach * 0.8f) : std::max(20.f, sa->solar_radius * 0.3f);
+                    if (SDL_getenv("SV_TRACE_HITS")) SDL_Log("solar %s: hit sphere %.0f m", ms.nickname.c_str(), ms.body.radius);
                     if (db)
                         if (const Loadout* lo = db->loadout(d.loadout.empty() ? sa->loadout : d.loadout))
                             for (auto& e : lo->equip)
@@ -3889,6 +4029,12 @@ struct FlightSession {
                 if (steer_to(n, spot, 30, 1.f, true)) {  // far behind: cruise to catch up
                     n.ship.orient = lead->orient;
                     n.input.throttle = 0.8f;
+                }
+                // A leader in cruise takes the wing along into cruise (else it falls behind for
+                // good: M09 fails when Ozu is left 3 km back).
+                if (lead->vel.length() > 150) {
+                    n.input.cruise = true;
+                    n.input.throttle = 1.f;
                 }
                 return true;  // follows until given new orders
             }
@@ -4323,6 +4469,7 @@ struct FlightSession {
                 // LockManeuvers = true | false: the player's maneuvers (dock, formation) all off or on.
                 bool lock = a.args.empty() || a.args[0].as_bool();
                 for (const char* k : {"dock", "formation"}) lock ? (void)m.maneuver_off.insert(k) : (void)m.maneuver_off.erase(k);
+                m.maneuvers_locked = lock;
             } else if (iequals(a.name, "EnableManeuver")) {
                 // EnableManeuver = Dock | formation | ..., true / false
                 if (!a.args.empty() && a.args.size() > 1 && !a.args[1].as_bool()) m.maneuver_off.insert(to_lower(a.arg(0)));

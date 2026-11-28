@@ -73,6 +73,8 @@ public:
     // Models outside the static system (ships, loot). Loaded once and cached.
     struct ModelHandle { void* p = nullptr; explicit operator bool() const { return p; } };
     ModelHandle load_model(const std::string& path, const std::vector<std::string>& material_libraries);
+    // How far the model reaches from its origin (its farthest vertex); 0 when not known.
+    float model_radius(ModelHandle m) const;
     // A character mesh (.dfm) of its own for each instance, so that each can be posed apart.
     ModelHandle load_character(const std::string& path, const std::vector<std::string>& material_libraries,
                                const std::string& instance);
