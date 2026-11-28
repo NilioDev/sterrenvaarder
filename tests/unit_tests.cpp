@@ -1125,6 +1125,33 @@ static void test_mission_start() {
     CHECK(w.places.size() == 1 && w.places[0].base == "Sys01_02_Base" && w.places[0].room == "Bar");
     CHECK(game::next_story_mission("m01a") == "M01b" && game::next_story_mission("M12") == "M13");
     CHECK(game::next_story_mission("M13").empty() && game::next_story_mission("x").empty());
+
+    // RTCDone matches the cutscene file however its path is written.
+    CHECK(game::same_data_path("Missions\\\\A\\\\b.ini", "//missions//a//B.ini"));
+    CHECK(!game::same_data_path("missions/a/b.ini", "missions/a/c.ini"));
+    MissionScript rs = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_done\nInitState = ACTIVE\nCnd_RTCDone = scenes\\one.ini\nAct_Ping = x\n"));
+    struct DockedWorld : game::MissionWorld {
+        std::string system() const override { return "Sys01"; }
+        bool in_space() const override { return false; }
+        std::string base() const override { return "Sys01_01_Base"; }
+        std::optional<game::DVec3> position(std::string_view) const override { return std::nullopt; }
+        float health(std::string_view) const override { return 1; }
+    } dw;
+    game::MissionRunner rr(rs);
+    int pings = 0;
+    auto act = [&](const MsnCommand& c, const MsnTrigger&) { pings += c.name == "Ping"; };
+    rr.start();
+    rr.update(0.1f, dw, act);
+    CHECK(pings == 0);
+    rr.event({game::MissionEvent::Type::RTCDone, "scenes/two.ini", "", ""});
+    rr.update(0.1f, dw, act);
+    CHECK(pings == 0);
+    rr.event({game::MissionEvent::Type::RTCDone, "SCENES/one.ini", "", ""});
+    rr.update(0.1f, dw, act);
+    CHECK(pings == 1);
+    auto rel = parse_rtc(parse_text_ini("[CharacterEncounter]\nLocation = b1, Bar\nrelocate_player = Deck2, b2\n"));
+    CHECK(rel.relocate_player == "Deck2" && rel.relocate_base == "b2");
 }
 
 static void test_euler_degrees() {

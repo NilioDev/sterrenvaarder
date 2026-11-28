@@ -2,10 +2,25 @@
 #include "game/mission.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 #include "sterrenvaarder/bytes.hpp"
 
 namespace sterrenvaarder::game {
+
+// Scripts write data paths with \\, / or // and in any case.
+bool same_data_path(std::string_view a, std::string_view b) {
+    auto norm = [](std::string_view p) {
+        std::string out;
+        for (char ch : p) {
+            char c = ch == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (c == '/' && (out.empty() || out.back() == '/')) continue;
+            out += c;
+        }
+        return out;
+    };
+    return norm(a) == norm(b);
+}
 
 MissionRunner::MissionRunner(const MissionScript& script) : script_(script), states_(script.triggers.size()) {
     for (std::size_t i = 0; i < script.triggers.size(); ++i) index_.emplace(to_lower(script.triggers[i].nickname), i);
@@ -97,7 +112,7 @@ bool MissionRunner::knows_condition(std::string_view n) {
                                   "DistShip",   "DistVec",      "HealthDec",    "SpaceEnter",   "SpaceExit",
                                   "BaseEnter",  "BaseExit",     "SystemEnter",  "SystemExit",   "PlayerLaunch",
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
-                                  "MsnResponse", "ProjHit",     "InSpace"};
+                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -174,6 +189,8 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
     }
     if (iequals(n, "LocExit"))
         return any_event(T::LocExit, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
+    if (iequals(n, "RTCDone"))
+        return any_event(T::RTCDone, [&](const MissionEvent& e) { return same_data_path(e.a, c.arg(0)); });
     if (iequals(n, "MsnResponse"))
         return any_event(T::MsnResponse, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)); });
     if (iequals(n, "ProjHit")) {
