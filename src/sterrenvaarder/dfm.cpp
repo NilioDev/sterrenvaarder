@@ -88,6 +88,17 @@ DfmModel DfmModel::load(const UtfNode& root) {
         b.index = static_cast<int>(d.bones.size());
         if (auto* tr = n.child("Bone to root"); tr && tr->data.size() >= 48)
             for (int k = 0; k < 12; ++k) b.to_root[k] = read_le<float>(tr->data, k * 4);
+        if (const UtfNode* hps = n.find("Hardpoints/Fixed"))
+            for (auto& h : hps->children) {
+                if (h.leaf) continue;
+                DfmBone::Hardpoint hp;
+                hp.name = h.name;
+                if (auto* pos = h.child("Position"); pos && pos->data.size() >= 12)
+                    hp.pos = {read_le<float>(pos->data, 0), read_le<float>(pos->data, 4), read_le<float>(pos->data, 8)};
+                if (auto* o = h.child("Orientation"); o && o->data.size() >= 36)
+                    for (int k = 0; k < 9; ++k) hp.orient[k] = read_le<float>(o->data, k * 4);
+                b.hardpoints.push_back(std::move(hp));
+            }
         d.bones.push_back(std::move(b));
     }
     // Parts give the bones their names ("Part_L Palm" -> "L Palm").

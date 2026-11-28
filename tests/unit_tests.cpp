@@ -39,6 +39,7 @@ static int failures = 0;
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
+#include "sterrenvaarder/mbases.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/pilots.hpp"
@@ -794,6 +795,37 @@ static void test_skinning() {
     CHECK(near(bent[1], Vec3{0, 1, 0}));  // on the joint itself: does not move
     auto half = game::pose_bones(m, &anim, 0.5f);  // halfway: 45 degrees
     CHECK(near(half[1].rotate(Vec3{0, 1, 0}), Vec3{-h, h, 0}));
+
+    // A hand hangs on the arm's hardpoint: the hand's own hardpoint lands on it.
+    m.bones[1].hardpoints.push_back({"hp_hand", {0, 1, 0}, kIdentity3});
+    DfmModel hand;
+    hand.bones.resize(1);
+    hand.bones[0].name = "Root";
+    hand.bones[0].hardpoints.push_back({"HP_HAND", {0, -0.25f, 0}, kIdentity3});
+    Xform at;
+    auto bent_pose = game::pose_bones(m, &anim, 1);
+    CHECK(game::attach_part(m, bent_pose, hand, game::pose_bones(hand), "hp_hand", at));
+    CHECK(near(at.apply(Vec3{0, -0.25f, 0}), Vec3{-1, 1, 0}));  // the hand's hardpoint at the arm's tip
+    CHECK(!game::attach_part(m, bent_pose, hand, game::pose_bones(hand), "hp_none", at));
+}
+
+static void test_mbases() {
+    // Self-written: one base with a bar and a fixed bartender, one guest, then a second base.
+    auto bases = parse_mbases(parse_text_ini(
+        "[MBase]\nnickname = Tst01_01_Base\nlocal_faction = grp_a\n"
+        "[MRoom]\nnickname = bar\ncharacter_density = 4\nfixture = tst_barkeep, Zs/NPC/Bar/01/Stand, scripts\\idle.thn, bartender\n"
+        "[GF_NPC]\nnickname = tst_guest\nbody = body_a\nhead = head_a\nlefthand = hand_l\nrighthand = hand_r\n"
+        "accessory = hat_a\nindividual_name = 123\naffiliation = grp_a\nvoice = v1\nroom = bar\n"
+        "[MBase]\nnickname = Tst01_02_Base\n"));
+    CHECK(bases.size() == 2);
+    auto& b = bases[0];
+    CHECK(b.local_faction == "grp_a" && b.rooms.size() == 1 && b.npcs.size() == 1);
+    const BaseRoomCrowd* bar = b.room("BAR");
+    CHECK(bar && bar->density == 4 && bar->fixtures.size() == 1);
+    CHECK(bar->fixtures[0].spot == "Zs/NPC/Bar/01/Stand" && bar->fixtures[0].role == "bartender");
+    const BaseNpc* g = b.npc("tst_guest");
+    CHECK(g && g->head == "head_a" && g->right_hand == "hand_r" && g->accessories.size() == 1 && g->name_id == 123);
+    CHECK(g->room == "bar" && bases[1].npcs.empty());
 }
 
 static void test_population() {
@@ -1007,6 +1039,7 @@ int main() {
     test_population();
     test_dfm_strips();
     test_skinning();
+    test_mbases();
     test_anm_frames();
     test_costumes();
     test_fonts();

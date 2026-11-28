@@ -12,6 +12,7 @@
 #include "render/gpu.hpp"
 #include "render/hud_batch.hpp"
 #include "render/mat.hpp"
+#include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/fonts.hpp"
 #include "sterrenvaarder/postfx.hpp"
@@ -72,6 +73,11 @@ public:
     // Models outside the static system (ships, loot). Loaded once and cached.
     struct ModelHandle { void* p = nullptr; explicit operator bool() const { return p; } };
     ModelHandle load_model(const std::string& path, const std::vector<std::string>& material_libraries);
+    // A character mesh (.dfm) of its own for each instance, so that each can be posed apart.
+    ModelHandle load_character(const std::string& path, const std::vector<std::string>& material_libraries,
+                               const std::string& instance);
+    // Poses a character from load_character: the animation at `time` (nullptr = rest pose).
+    void pose_character(ModelHandle m, const AnmScript* anim, float time);
     // Shared mesh files (.vms) that models may reference, e.g. interface/interface.generic.vms.
     void add_mesh_library(const std::string& path);
     // Queues one instance for the next render() call. lod_ranges as in the archetype.

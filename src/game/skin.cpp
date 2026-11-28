@@ -133,29 +133,66 @@ std::vector<Xform> pose_bones(const DfmModel& model, const AnmScript* anim, floa
     return out;
 }
 
-std::vector<Vec3> skin_points(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose) {
+namespace {
+
+// Each value moved by its point's bones: sum of weight * f(skin of the bone, value).
+template <class F>
+std::vector<Vec3> blend(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose,
+                        const std::vector<Vec3>& values, F f) {
     std::vector<Xform> skin(model.bones.size());
     for (std::size_t i = 0; i < model.bones.size() && i < pose.size(); ++i)
         skin[i] = pose[i] * Xform::from_bone(model.bones[i].to_root).inverse();
-    std::vector<Vec3> out(mesh.points.size());
-    for (std::size_t p = 0; p < mesh.points.size(); ++p) {
+    std::vector<Vec3> out(values.size());
+    for (std::size_t p = 0; p < values.size(); ++p) {
         std::uint32_t first = p < mesh.bone_first.size() ? mesh.bone_first[p] : 0;
         std::uint32_t count = p < mesh.bone_count.size() ? mesh.bone_count[p] : 0;
-        if (count == 0) {
-            out[p] = mesh.points[p];
-            continue;
-        }
         Vec3 acc{};
         float total = 0;
         for (std::uint32_t k = first; k < first + count && k < mesh.bone_ids.size() && k < mesh.bone_weights.size(); ++k) {
             std::uint32_t b = mesh.bone_ids[k];
             if (b >= skin.size()) continue;
             float w = mesh.bone_weights[k];
-            Vec3 q = skin[b].apply(mesh.points[p]);
+            Vec3 q = f(skin[b], values[p]);
             acc = {acc.x + q.x * w, acc.y + q.y * w, acc.z + q.z * w};
             total += w;
         }
-        out[p] = total > 0 ? Vec3{acc.x / total, acc.y / total, acc.z / total} : mesh.points[p];
+        out[p] = total > 0 ? Vec3{acc.x / total, acc.y / total, acc.z / total} : values[p];
+    }
+    return out;
+}
+
+}  // namespace
+
+std::vector<Vec3> skin_points(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose) {
+    return blend(model, mesh, pose, mesh.points, [](const Xform& x, Vec3 v) { return x.apply(v); });
+}
+
+bool find_hardpoint(const DfmModel& model, const std::vector<Xform>& pose, std::string_view name, Xform& out) {
+    for (std::size_t i = 0; i < model.bones.size() && i < pose.size(); ++i)
+        for (auto& h : model.bones[i].hardpoints)
+            if (iequals(h.name, name)) {
+                Xform local;
+                local.r = h.orient;
+                local.t = h.pos;
+                out = pose[i] * local;
+                return true;
+            }
+    return false;
+}
+
+bool attach_part(const DfmModel& body, const std::vector<Xform>& body_pose, const DfmModel& part,
+                 const std::vector<Xform>& part_pose, std::string_view name, Xform& out) {
+    Xform on_body, on_part;
+    if (!find_hardpoint(body, body_pose, name, on_body) || !find_hardpoint(part, part_pose, name, on_part)) return false;
+    out = on_body * on_part.inverse();
+    return true;
+}
+
+std::vector<Vec3> skin_normals(const DfmModel& model, const DfmMesh& mesh, const std::vector<Xform>& pose) {
+    auto out = blend(model, mesh, pose, mesh.normals, [](const Xform& x, Vec3 v) { return x.rotate(v); });
+    for (auto& n : out) {
+        float l = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (l > 0) n = {n.x / l, n.y / l, n.z / l};
     }
     return out;
 }
