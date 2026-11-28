@@ -64,6 +64,14 @@ int MissionRunner::destroyed_count(std::string_view name) const {
     return 0;
 }
 
+bool MissionRunner::waiting_for(std::string_view condition) const {
+    for (std::size_t i = 0; i < states_.size(); ++i)
+        if (states_[i].active)
+            for (auto& c : script_.triggers[i].conditions)
+                if (iequals(c.name, condition)) return true;
+    return false;
+}
+
 bool MissionRunner::knows_condition(std::string_view n) {
     static const char* known[] = {"True",       "Timer",        "CommComplete", "Destroyed",    "WatchTrigger",
                                   "DistShip",   "DistVec",      "HealthDec",    "SpaceEnter",   "SpaceExit",
@@ -138,8 +146,12 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return any_event(T::TLEntered, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "TLExited"))
         return any_event(T::TLExited, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
-    if (iequals(n, "LocEnter"))
+    if (iequals(n, "LocEnter")) {
+        // Being in the room counts, as with BaseEnter: a trigger switched on while the
+        // player already stands there fires too.
+        if (!w.in_space() && is(w.room(), c.arg(0)) && is(w.base(), c.arg(1)) && !w.room().empty()) return true;
         return any_event(T::LocEnter, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
+    }
     if (iequals(n, "LocExit"))
         return any_event(T::LocExit, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "MsnResponse"))

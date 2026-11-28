@@ -83,6 +83,7 @@ struct Args {
     bool cruise = false;    // screenshot runs: hold cruise (it charges first)
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
     std::string mission;    // --mission M01a: run that story mission's script
+    std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
@@ -150,6 +151,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--npc-ship") a.npc_ship = next();
         else if (k == "--npc-pilot") a.npc_pilot = next();
         else if (k == "--mission") a.mission = next();
+        else if (k == "--answer") a.answer = next();
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
@@ -748,6 +750,7 @@ struct FlightSession {
             case Tab::Commodities: return "Trader";
             case Tab::Equipment: return "Equipment";
             case Tab::Ships: return "ShipDealer";
+            case Tab::Bar: return "Bar";
         }
         return {};
     }
@@ -781,7 +784,7 @@ struct FlightSession {
     }
 
     // Base screen tabs: commodity trader, equipment dealer, ship dealer.
-    enum class Tab { Commodities, Equipment, Ships };
+    enum class Tab { Commodities, Equipment, Ships, Bar };
     Tab trade_tab = Tab::Commodities;
     bool refit_needed = false;  // ship or guns changed: the main loop rebuilds them
 
@@ -977,16 +980,18 @@ struct FlightSession {
         b.credits = player.credits;
         b.hold_used = econ ? game::cargo_used(*econ, player) : 0;
         b.hold_size = player.hold_size;
-        b.tabs = {"COMMODITIES", "EQUIPMENT", "SHIPS"};
+        b.tabs = {"COMMODITIES", "EQUIPMENT", "SHIPS", "BAR"};
         b.tab = static_cast<int>(trade_tab);
-        static const char* cols[3][4] = {{"COMMODITY", "PRICE", "IN HOLD", "CAN BUY"},
+        static const char* cols[4][4] = {{"COMMODITY", "PRICE", "IN HOLD", "CAN BUY"},
                                          {"EQUIPMENT", "PRICE", "HARDPOINT", ""},
-                                         {"SHIP", "PRICE", "CARGO", "WITH TRADE-IN"}};
+                                         {"SHIP", "PRICE", "CARGO", "WITH TRADE-IN"},
+                                         {"", "", "", ""}};
         for (int i = 0; i < 4; ++i) b.columns[i] = cols[b.tab][i];
         for (auto& r : trade_rows()) b.rows.push_back(r.row);
         b.selected = std::clamp(trade_sel, 0, std::max(0, static_cast<int>(b.rows.size()) - 1));
         b.message = trade_msg;
-        b.help = trade_tab == Tab::Commodities ? "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH"
+        b.help = trade_tab == Tab::Bar ? "1-3 DEALER   4 BAR   F3 LAUNCH   F5 SAVE"
+               : trade_tab == Tab::Commodities ? "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH"
                                                : "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   F3 LAUNCH   F5 SAVE";
         return b;
     }
@@ -1315,6 +1320,11 @@ struct FlightSession {
     }
 
     // ---- story missions
+    bool offer_open() const { return mission && mission->runner && mission->runner->waiting_for("MsnResponse"); }
+    void answer_offer(bool accept) {
+        if (!offer_open()) return;
+        mission->runner->event({game::MissionEvent::Type::MsnResponse, accept ? "accept" : "reject", "", ""});
+    }
     struct MissionView : game::MissionWorld {
         const FlightSession& fs;
         std::string sys;
@@ -1328,6 +1338,11 @@ struct FlightSession {
             return nullptr;
         }
         std::optional<DVec3> position(std::string_view o) const override { return fs.where(o); }
+        std::string room() const override {
+            std::string r = fs.docked() ? fs.room_view_name() : std::string();
+            if (auto u = r.rfind('_'); u != std::string::npos) r = r.substr(u + 1);
+            return r;
+        }
         float health(std::string_view o) const override {
             if (iequals(o, "Player")) return fs.body.hull / std::max(1.f, fs.body.max_hull);
             if (auto* n = npc(o)) return n->body.hull / std::max(1.f, n->body.max_hull);
@@ -1524,7 +1539,8 @@ struct FlightSession {
         return false;
     }
 
-    std::string room_view_name() const { return room.current; }
+    // The room the player is in: the one the base screen shows.
+    std::string room_view_name() const { return room_for_tab(); }
 
     // Every live mission ship with this nickname or label.
     template <class F>
@@ -2054,7 +2070,19 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         auto layout = game::HudLayout::make(static_cast<float>(w), static_cast<float>(h), hud_cfg.max_aspect, hud_cfg.scale);
         // Docked: only the base screen, as the original hides the flight HUD at bases.
         bool base_screen = fs->docked() && fs->econ;
-        if (base_screen) game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
+        if (base_screen) {
+            game::build_base_screen(hud, layout, fs->base_screen(renderer.system()));
+            if (fs->mission) {
+                float s = static_cast<float>(h) / 1080.f, cx = static_cast<float>(w) * 0.5f;
+                auto& m = *fs->mission;
+                if (!m.objective.empty()) hud.text(cx, 70 * s, 16 * s, m.objective, {0.55f, 0.85f, 1.f, 0.95f}, TextAlign::Center);
+                if (!m.comms.empty())
+                    hud.text(cx, 100 * s, 15 * s, m.comms.front().speaker + "  (talking)", {0.9f, 0.9f, 0.6f, 0.95f}, TextAlign::Center);
+                if (fs->offer_open())
+                    hud.text(cx, static_cast<float>(h) * 0.3f, 22 * s, "ACCEPT MISSION?  Y = YES   N = NO", {1, 0.85f, 0.4f, 1},
+                             TextAlign::Center);
+            }
+        }
         else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
         if (!base_screen && fs->mission) {
             // Mission lines: the current objective, who is on the radio, and the outcome.
@@ -2260,6 +2288,8 @@ int run(const Args& args) {
                     fs->dock_request(renderer.system());
                     SDL_Log("autopilot to %s: %s", args.dock.c_str(), fs->nav_status().c_str());
                 }
+                // Docked runs start on the chosen base screen tab (and its room).
+                if (fs->docked() && args.tab > 0) fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
                 for (double t = 0; t < args.sim; t += 1.0 / 60) {
                     bool nav_owns = fs->update_nav(renderer.system(), 1.0 / 60);
                     if (!nav_owns) fs->model.update(fs->ship, fs->input, 1.0 / 60);
@@ -2269,6 +2299,7 @@ int run(const Args& args) {
                     if (args.npc_die >= 0 && t < args.npc_die && t + 1.0 / 60 >= args.npc_die)
                         for (auto& n : fs->npcs) n.body.hull = 0;
                     fs->update_combat(1.0 / 60);
+                    if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
                 }
                 for (auto& [good, n] : args.buys) {
                     const Good* g = econ->good(good);
@@ -2290,7 +2321,7 @@ int run(const Args& args) {
                 }
                 if (fs->docked() && args.tab > 0) {
                     std::string msg = fs->trade_msg;
-                    fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 2)));
+                    fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
                     fs->trade_msg = msg;
                 }
                 if (!args.save_file.empty()) save_game(*fs, renderer, args.save_file);
@@ -2358,7 +2389,9 @@ int run(const Args& args) {
                             }
                         } else if (fs->docked() && (e.key.key == SDLK_UP || e.key.key == SDLK_DOWN)) {
                             fs->select_row(e.key.key == SDLK_UP ? -1 : 1);
-                        } else if (fs->docked() && e.key.key >= SDLK_1 && e.key.key <= SDLK_3) {
+                        } else if (fs->docked() && fs->offer_open() && (e.key.key == SDLK_Y || e.key.key == SDLK_N)) {
+                            fs->answer_offer(e.key.key == SDLK_Y);
+                        } else if (fs->docked() && e.key.key >= SDLK_1 && e.key.key <= SDLK_4) {
                             fs->set_tab(static_cast<FlightSession::Tab>(e.key.key - SDLK_1));
                         } else if (fs->docked() && (e.key.key == SDLK_RIGHT || e.key.key == SDLK_LEFT)) {
                             fs->trade(e.key.key == SDLK_RIGHT ? 1 : -1, (e.key.mod & SDL_KMOD_SHIFT) != 0);

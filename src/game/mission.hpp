@@ -48,6 +48,7 @@ public:
     // A ship, solar or "Player" by nickname; nothing when it isn't there.
     virtual std::optional<DVec3> position(std::string_view object) const = 0;
     virtual float health(std::string_view object) const = 0;  // fraction of hull left
+    virtual std::string room() const { return {}; }  // room part ("Bar") while docked
 };
 
 class MissionRunner {
@@ -69,6 +70,8 @@ public:
     int outcome_ids() const { return outcome_ids_; }
     // Conditions this runner can't evaluate yet (they never hold); for reports.
     static bool knows_condition(std::string_view name);
+    // True while an active trigger waits for a condition of this name (e.g. "MsnResponse").
+    bool waiting_for(std::string_view condition) const;
 
 private:
     struct State {
