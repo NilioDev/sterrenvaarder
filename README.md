@@ -160,6 +160,19 @@ material's emissive colour adding to the light on the texture, clamped to full b
 At the ship dealer the ships for sale stand on the room's own pads (`[ForSaleShipPlacement]`),
 the selected one on the pad the room camera looks at. The dealer screen itself is still our own until the original base interface is in.
 
+## Missions (phase 6, in progress)
+
+The story missions run from the player's own scripts in `DATA/MISSIONS/Mxx/mxx.ini`.
+`parse_mission` reads the mission header, ships, NPCs, solars, formations, objective
+lists, dialogs, objectives and triggers. `game::MissionRunner` runs the triggers. Each
+active trigger waits for its condition (timers, comms finishing, ships destroyed by name
+or label, distances, health, entering space, a base, a system or a trade lane, watching
+another trigger, the player's answer to an offer, hits). Then it runs its actions.
+The runner itself handles activating and deactivating triggers and the mission's success
+or failure. Every other action goes to the game. The corpus test checks every story
+script and lists the conditions the runner doesn't evaluate yet. Nothing from the scripts
+is stored in this repository: the unit tests use their own small scripts.
+
 ## Tools
 
 ```sh
