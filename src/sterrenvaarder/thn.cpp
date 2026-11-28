@@ -25,6 +25,66 @@ std::string str(const IniSection& s, std::string_view key) {
     return (e && !e->values.empty()) ? e->values[0].as_string() : std::string();
 }
 
+// Some compiled scripts hold the engine's constants as numbers rather than names. The
+// numbers are our reading: each kind always carries the same props table as the named one.
+std::string entity_type(const LuaValue& v) {
+    if (!v.is_number()) return v.str();
+    switch (static_cast<int>(v.number)) {
+        case 1: return "COMPOUND";
+        case 2: return "DEFORMABLE";
+        case 3: return "CAMERA";
+        case 4: return "MONITOR";
+        case 5: return "LIGHT";
+        case 6: return "SOUND";
+        case 7: return "MARKER";
+        case 9: return "SCENE";
+        case 11: return "MOTION_PATH";
+        case 13: return "PSYS";
+        default: return {};
+    }
+}
+std::string event_kind(const LuaValue& v) {
+    if (!v.is_number()) return v.str();
+    switch (static_cast<int>(v.number)) {
+        case 2: return "SET_CAMERA";
+        case 3: return "START_SOUND";
+        case 4: return "START_LIGHT_PROP_ANIM";
+        case 5: return "START_CAMERA_PROP_ANIM";
+        case 6: return "START_PATH_ANIMATION";
+        case 7: return "START_SPATIAL_PROP_ANIM";
+        case 8: return "ATTACH_ENTITY";
+        case 9: return "CONNECT_HARDPOINTS";
+        case 10: return "START_MOTION";
+        case 11: return "START_IK";
+        case 13: return "START_PSYS";
+        case 14: return "START_PSYS_PROP_ANIM";
+        case 15: return "START_AUDIO_PROP_ANIM";
+        case 16: return "START_FOG_PROP_ANIM";
+        case 18: return "START_FLR_HEIGHT_ANIM";
+        default: return {};
+    }
+}
+// Light types as Direct3D numbers them (point 1, spot 2, directional 3).
+std::string light_type(const LuaValue& v) {
+    if (!v.is_number()) return v.str();
+    switch (static_cast<int>(v.number)) {
+        case 1: return "L_POINT";
+        case 2: return "L_SPOT";
+        case 3: return "L_DIRECT";
+        default: return {};
+    }
+}
+// Entity flags as bits: 1 REFERENCE, 2 LIT_AMBIENT, 4 LIT_DYNAMIC, 16 HIDDEN (from the
+// combinations the named form shows).
+std::string entity_flags(const LuaValue& v) {
+    if (!v.is_number()) return v.str();
+    int bits = static_cast<int>(v.number);
+    std::string out;
+    for (auto [bit, name] : {std::pair{1, "REFERENCE"}, {16, "HIDDEN"}, {4, "LIT_DYNAMIC"}, {2, "LIT_AMBIENT"}})
+        if (bits & bit) out += (out.empty() ? "" : "+") + std::string(name);
+    return out;
+}
+
 }  // namespace
 
 ThnPath ThnPath::parse(std::string_view data) {
@@ -89,7 +149,7 @@ ThnScript ThnScript::parse(Bytes data) {
     for (std::size_t i = 1; i <= out.events.size(); ++i) {
         const LuaValue& e = out.events[i];
         if (!e.is_table()) continue;
-        const std::string& kind = e[2].str();
+        const std::string kind = event_kind(e[2]);
         auto target_of = [](const LuaValue& who) { return who.is_table() ? who[1].str() : who.str(); };
         if (kind == "SET_CAMERA") {
             // Targets: the monitor, then the camera.
@@ -200,9 +260,9 @@ ThnScript ThnScript::parse(Bytes data) {
         if (!e.is_table()) continue;
         ThnEntity t;
         t.name = e["entity_name"].str();
-        t.type = e["type"].str();
+        t.type = entity_type(e["type"]);
         t.template_name = e["template_name"].str();
-        t.flags = e["flags"].str();
+        t.flags = entity_flags(e["flags"]);
         t.category = e["userprops"]["category"].str();
         if (t.type == "MOTION_PATH")
             if (const LuaValue& pp = e["pathprops"]; pp.is_table() && !pp["path_data"].str().empty())
@@ -222,8 +282,8 @@ ThnScript ThnScript::parse(Bytes data) {
             t.far_plane = static_cast<float>(cp["farplane"].num());
         }
         if (const LuaValue& lp = e["lightprops"]; lp.is_table()) {
-            t.light_on = lp["on"].str() != "N";
-            t.light_type = lp["type"].str();
+            t.light_on = lp["on"].is_number() ? lp["on"].number != 0 : lp["on"].str() != "N";
+            t.light_type = light_type(lp["type"]);
             t.diffuse = color(lp["diffuse"], {1, 1, 1}, 1.f);
             t.light_ambient = color(lp["ambient"], {}, 1.f);
             t.range = static_cast<float>(lp["range"].num());
