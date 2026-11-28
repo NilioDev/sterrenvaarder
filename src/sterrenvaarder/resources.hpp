@@ -39,6 +39,10 @@ private:
     std::unordered_map<std::uint32_t, std::string> strings_, infocards_;
 };
 
+// Plain text from an infocard's RDL markup: the text of each <TEXT>, a line break for each
+// <PARA/>, and the XML entities decoded. Other tags are dropped.
+std::string rdl_to_text(std::string_view rdl);
+
 // DLL names from the [Resources] section of Freelancer.ini, in order.
 std::vector<std::string> resource_dlls(std::string_view freelancer_ini);
 

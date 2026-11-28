@@ -288,6 +288,38 @@ void build_flight_hud(HudBatch& h, const HudLayout& L, const HudConfig& cfg, con
         h.line(mx, my + r, mx - r, my, lw, kLine);
     }
 
+    // ---- mission waypoint: a marker with its name and distance, or an arrow when off-screen
+    if (st.has_waypoint) {
+        const HudColor wc{0.55f, 0.85f, 1.f, 0.95f};
+        float px, py;
+        bool front = cam.project(st.waypoint, L.screen_w, L.screen_h, px, py);
+        double dist = (st.waypoint - player_pos).length();
+        if (front && px > 0 && px < L.screen_w && py > 0 && py < L.screen_h) {
+            float r = 11 * s;
+            h.line(px - r, py, px, py - r, 2 * s, wc);
+            h.line(px, py - r, px + r, py, 2 * s, wc);
+            h.line(px + r, py, px, py + r, 2 * s, wc);
+            h.line(px, py + r, px - r, py, 2 * s, wc);
+            h.circle(px, py, r * 1.6f, 1.2f * s, wc.with_alpha(0.6f));
+            h.text(px, py + r * 1.6f + 8 * s, 12 * s, st.waypoint_label, wc, TextAlign::Center);
+            h.text(px, py + r * 1.6f + 26 * s, 11 * s, fmt_distance(dist), wc.with_alpha(0.8f), TextAlign::Center);
+        } else {
+            Vec3 d{static_cast<float>(st.waypoint.x - cam.pos.x), static_cast<float>(st.waypoint.y - cam.pos.y),
+                   static_cast<float>(st.waypoint.z - cam.pos.z)};
+            Vec3 r = cam.right(), u = cam.up();
+            float ax = d.x * r.x + d.y * r.y + d.z * r.z, ay = -(d.x * u.x + d.y * u.y + d.z * u.z);
+            float len = std::sqrt(ax * ax + ay * ay);
+            if (len > 0) {
+                ax /= len;
+                ay /= len;
+                float rr = L.canvas_h * 0.34f, tx = cx + ax * rr, ty = cy + ay * rr, k = 10 * s;
+                h.line(tx - ay * k, ty + ax * k, tx + ax * k, ty + ay * k, 2 * s, wc);
+                h.line(tx + ay * k, ty - ax * k, tx + ax * k, ty + ay * k, 2 * s, wc);
+                h.line(tx - ay * k, ty + ax * k, tx + ay * k, ty - ax * k, 2 * s, wc);
+            }
+        }
+    }
+
     // ---- contacts in the world: small markers, brackets on the selected one
     for (auto& c : st.contacts) {
         float px, py;

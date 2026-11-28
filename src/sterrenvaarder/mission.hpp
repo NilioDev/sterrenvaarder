@@ -116,4 +116,20 @@ struct FormationShape {
 };
 std::vector<FormationShape> parse_formations(const IniFile& ini);
 
+// A room cutscene a mission queues with AddRTC ([CharacterEncounter]): it plays when the
+// player enters its room. Offer scenes carry the offer text and the scenes for the offer,
+// the decision, accepting and declining; others play one `action` scene.
+struct MsnRtc {
+    std::string base, room;  // Location
+    std::string offer, decision, accept, reject, action;  // .thn scene paths
+    int mission_text_id = 0, nooffer_text_id = 0;
+    bool autoplay = false;
+    std::string relocate_player;  // room the player is moved to
+    struct Char { std::string npc, actor, fidget; };
+    std::vector<Char> chars;
+    std::vector<std::string> spots;  // reserved standing spots
+    bool is_offer() const { return !offer.empty(); }
+};
+MsnRtc parse_rtc(const IniFile& ini);
+
 }  // namespace sterrenvaarder

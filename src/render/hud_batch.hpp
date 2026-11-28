@@ -4,6 +4,7 @@
 // upscaling and sharpening, so it stays crisp at every render scale and resolution.
 // Text uses the interface font when one is set (set_font), else a built-in stroke font.
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -44,6 +45,8 @@ public:
     // `size` is the cap height in pixels. Returns the text width.
     float text(float x, float y, float size, std::string_view s, HudColor c, TextAlign align = TextAlign::Left);
     static float text_width(float size, std::string_view s);
+    // Breaks text into lines no wider than max_width, at spaces and at '\n'.
+    static std::vector<std::string> wrap_text(float size, std::string_view s, float max_width);
     // The interface font for all HUD text (nullptr = stroke font). Text is Latin-1 or UTF-8.
     static void set_font(const FontAtlas* font);
     static const FontAtlas* font();

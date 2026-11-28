@@ -300,6 +300,10 @@ static void put32(std::vector<std::uint8_t>& b, std::size_t o, std::uint32_t v) 
 
 // A minimal PE32 with one string block (ids 16..31) in a .rsrc section.
 static void test_resources() {
+    // Infocard markup to plain text.
+    CHECK(rdl_to_text("<?xml version=\"1.0\"?><RDL><PUSH/><TEXT>Fly to the &amp; point.</TEXT><PARA/>"
+                      "<TEXT>Then &lt;dock&gt;.</TEXT><PARA/><POP/></RDL>") == "Fly to the & point.\nThen <dock>.");
+    CHECK(rdl_to_text("plain words") == "plain words");
     std::vector<std::uint8_t> pe(0x200 + 0x100, 0);
     pe[0] = 'M'; pe[1] = 'Z';
     put32(pe, 0x3C, 0x40);
@@ -722,6 +726,13 @@ static void test_mission() {
     CHECK(archs.size() == 1 && archs[0].ship_archetype == "ship_a" && archs[0].npc_class.size() == 2);
     auto forms = parse_formations(parse_text_ini("[Formation]\nnickname = vee\npos = 0, 0, 0\npos = -20, 0, 20\npos = 20, 0, 20\n"));
     CHECK(forms.size() == 1 && forms[0].slots.size() == 3 && forms[0].slots[1][0] == -20.f);
+    auto rtc = parse_rtc(parse_text_ini(
+        "[CharacterEncounter]\nLocation = base_a, bar\noffer = scene_offer.thn\naccept = scene_yes.thn\nmission_text_id = 77\n"
+        "[Reserve]\nspot = spot/1\nspot = spot/2\n[Char]\nnpc = npc_a\nactor = actor_a\n"));
+    CHECK(rtc.base == "base_a" && rtc.room == "bar" && rtc.is_offer() && rtc.mission_text_id == 77);
+    CHECK(rtc.spots.size() == 2 && rtc.chars.size() == 1 && rtc.chars[0].actor == "actor_a");
+    auto rtc2 = parse_rtc(parse_text_ini("[CharacterEncounter]\nLocation = base_b, Cityscape\naction = s.thn\nautoplay\n"));
+    CHECK(!rtc2.is_offer() && rtc2.autoplay && rtc2.action == "s.thn");
     CHECK(m.title_ids == 10 && m.reward == 500 && m.triggers.size() == 7 && m.ships.size() == 2);
     CHECK(m.trigger("t_wait") && m.trigger("t_wait")->conditions[0].name == "Timer" && m.trigger("t_start")->initially_active);
 
