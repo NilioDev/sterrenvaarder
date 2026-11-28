@@ -25,7 +25,8 @@ void Combatant::damage(float hull_damage, float energy_damage, float shield_mod)
         }
         return;
     }
-    hull = std::max(0.f, hull - hull_damage);
+    hull = std::max(std::min(hull, hull_floor), hull - hull_damage);
+    hull = std::max(0.f, hull);
 }
 
 void Combatant::update(float dt) {
