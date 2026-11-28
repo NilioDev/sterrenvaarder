@@ -67,6 +67,7 @@ ThnPlayer::ThnPlayer(const ThnScript& script) : script_(script) {
     duration_ = static_cast<float>(script.duration);
     for (auto& m : script.moves) duration_ = std::max(duration_, m.time + m.duration);
     for (auto& c : script.cuts) duration_ = std::max(duration_, c.time);
+    for (auto& a : script.path_anims) duration_ = std::max(duration_, a.time + a.duration);
     seek(0);
 }
 
@@ -74,16 +75,29 @@ void ThnPlayer::seek(float t) {
     now_ = start_;
     // Moves and camera changes in the order they start; each blends from where the
     // entity was when it began.
-    struct Step { float time, duration; const ThnMove* move; const ThnCameraProp* cam; };
+    struct Step { float time, duration; const ThnMove* move; const ThnCameraProp* cam; const ThnPathAnim* path = nullptr; };
     std::vector<Step> steps;
     for (auto& m : script_.moves)
         if (m.time <= t) steps.push_back({m.time, m.duration, &m, nullptr});
     for (auto& c : script_.camera_props)
         if (c.time <= t) steps.push_back({c.time, c.duration, nullptr, &c});
+    for (auto& a : script_.path_anims)
+        if (a.time <= t) steps.push_back({a.time, a.duration, nullptr, nullptr, &a});
     std::stable_sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) { return a.time < b.time; });
     for (auto& s : steps) {
         float f = s.duration > 0 ? std::clamp((t - s.time) / s.duration, 0.f, 1.f) : 1.f;
-        if (s.move) {
+        if (s.path) {
+            // Along the path, in the path entity's frame as it stands now.
+            auto it = script_.paths.find(to_lower(s.path->path));
+            if (it == script_.paths.end()) continue;
+            const State& frame = now_[to_lower(s.path->path)];
+            Vec3 local = it->second.at(s.path->start + (s.path->stop - s.path->start) * f);
+            const Mat3& r = frame.orient;
+            State& st = now_[to_lower(s.path->target)];
+            st.pos = {frame.pos.x + r[0] * local.x + r[1] * local.y + r[2] * local.z + s.path->offset.x,
+                      frame.pos.y + r[3] * local.x + r[4] * local.y + r[5] * local.z + s.path->offset.y,
+                      frame.pos.z + r[6] * local.x + r[7] * local.y + r[8] * local.z + s.path->offset.z};
+        } else if (s.move) {
             State& st = now_[to_lower(s.move->target)];
             if (s.move->has_pos)
                 st.pos = {st.pos.x + (s.move->pos.x - st.pos.x) * f, st.pos.y + (s.move->pos.y - st.pos.y) * f,
