@@ -1054,9 +1054,10 @@ struct FlightSession {
     }
 
     void setup_combat(const ShipDatabase& db, const Vfs& vfs, const Loadout* lo, Renderer& r, const Args& args) {
+        world.set_shield_mods(&db);
         body.id = 0;
         body.radius = 8;
-        body.hull = body.max_hull = arch->hit_pts;
+        body.hull = body.max_hull = arch->hit_pts * (lo ? db.armor_scale_of(*lo) : 1.f);
         if (lo) body.set_shield(db.shield_of(*lo));
         guns = guns_for(db, vfs, *arch, lo);
         if (args.npcs <= 0) return;
@@ -1080,7 +1081,7 @@ struct FlightSession {
             n.ship.orient = Quat::look({-f.x, -f.y, -f.z});  // head-on
             n.body.id = i + 1;
             n.body.radius = 8;
-            n.body.hull = n.body.max_hull = na->hit_pts;
+            n.body.hull = n.body.max_hull = na->hit_pts * (nlo ? db.armor_scale_of(*nlo) : 1.f);
             if (nlo) n.body.set_shield(db.shield_of(*nlo));
             n.guns = nguns;
             n.mesh = mesh;

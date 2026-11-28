@@ -69,6 +69,7 @@ struct GunArchetype {
     float muzzle_velocity = 600;
     float power_usage = 0;
     std::string flash_effect;  // flash_particle_name: muzzle flash
+    std::string weapon_type;   // WeaponModDB entry: how hard it hits each shield type
 };
 
 struct ShieldArchetype {
@@ -77,6 +78,7 @@ struct ShieldArchetype {
     float regeneration_rate = 0;
     float offline_rebuild_time = 0;
     float offline_threshold = 0;
+    std::string shield_type;  // S_Graviton01 etc., for WeaponModDB
     // shield_hit_effects = damage, effect: the strongest entry at or below a hit's damage plays.
     std::vector<std::pair<float, std::string>> hit_effects;
     const std::string& hit_effect(float damage) const;
@@ -92,6 +94,7 @@ struct Loadout {
 // Default data file lists, as given in an unmodified Freelancer.ini. Freelancer.ini
 // itself lives next to the executable, so it is read when the user points us at it.
 struct DataFiles {
+    std::string weapon_moddb = "equipment/weaponmoddb.ini";
     std::vector<std::string> ships{"ships/shiparch.ini", "ships/rtc_shiparch.ini"};
     std::vector<std::string> equipment{"equipment/light_equip.ini", "equipment/select_equip.ini",
                                        "equipment/misc_equip.ini",  "equipment/engine_equip.ini",
@@ -131,6 +134,10 @@ public:
     const MunitionArchetype* munition(std::string_view nickname) const;
     const ShieldArchetype* shield(std::string_view nickname) const;
     const ShieldArchetype* shield_of(const Loadout& l) const;
+    // WeaponModDB: damage multiplier for a weapon type hitting a shield type (1 if unlisted).
+    float shield_mod(std::string_view weapon_type, std::string_view shield_type) const;
+    // [Armor] hit_pts_scale of the loadout's armour (1 without armour).
+    float armor_scale_of(const Loadout& l) const;
 
     // Cruise speed: 300 m/s unless the data sets [EngineEquipConsts] CRUISING_SPEED.
     float cruise_speed() const { return cruise_speed_; }
@@ -143,6 +150,8 @@ private:
     std::unordered_map<std::string, GunArchetype> guns_;
     std::unordered_map<std::string, MunitionArchetype> munitions_;
     std::unordered_map<std::string, ShieldArchetype> shields_;
+    std::unordered_map<std::string, float> shield_mods_;
+    std::unordered_map<std::string, float> armor_;  // [Armor] nickname -> hit_pts_scale  // "weapon|shield", lower case
     std::unordered_map<std::string, std::string> first_loadout_;
     std::vector<std::string> ship_order_;
     float cruise_speed_ = 300;
