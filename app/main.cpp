@@ -1622,7 +1622,11 @@ struct FlightSession {
         }
         bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
         std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = radio_voice(sys, *o);
-        if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
+        // A mission's SetVibe toward the player (M07: the outcast base takes the player in)
+        // goes before the faction's standing.
+        std::optional<float> vibe = vibes.between({o->nickname}, {"Player"});
+        if (vibe ? attitude_of(*vibe) == Attitude::Hostile
+                 : !o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
             notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
             notice_time = 4.f;
             if (base) radio_call(voice, game::dock_reply_lines(base_nick, false));
@@ -1935,8 +1939,10 @@ struct FlightSession {
             };
             int best_rank = 4;
             for (auto& n : npcs)
-                if (n.body.alive() && n.hostile)
+                if (n.body.alive() && n.hostile && !n.cloaked)
                     if (double d = (n.body.pos - ship.pos).length(); d < 25000) {
+                        // Worn down as far as the player's guns go (Invulnerable): nothing left to do.
+                        if (n.body.player_floor > 0 && n.body.hull <= n.body.player_floor + 1.f) continue;
                         int r = rank(n);
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
                         // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
