@@ -13,7 +13,7 @@
 // Flight controls: mouse = steer (Space toggles mouse flight), W/S = throttle,
 //   Shift+W = cruise, A/D = strafe, Q/E = roll, Z = stop engines, T = next target,
 //   F3 = autopilot to the target (dock, trade lane, jump gate) / launch when docked,
-//   F5 = quick save, F9 = quick load, F11 = fullscreen, Esc = quit.
+//   M = navigation map, F5 = quick save, F9 = quick load, F11 = fullscreen, Esc = quit.
 // Docked: Up/Down = select, Right = buy, Left = sell (Shift = as many as possible).
 // Free camera (--free): right mouse = look, WASD/QE = move, Shift = boost, wheel = speed.
 #include <SDL3/SDL.h>
@@ -88,6 +88,7 @@ struct Args {
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     bool no_traffic = false;  // no random traffic
+    bool show_map = false;    // open the navigation map
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
@@ -158,6 +159,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--answer") a.answer = next();
         else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--no-traffic") a.no_traffic = true;
+        else if (k == "--map") a.show_map = true;
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
@@ -1358,6 +1360,50 @@ struct FlightSession {
         update_traffic(dt);
     }
 
+    // ---- navigation map (M)
+    bool show_map = false;
+    game::NavMap nav_map(const StarSystem& sys) const {
+        game::NavMap m;
+        m.title = sys.nickname;
+        for (auto& o : sys.objects) {
+            DVec3 p{o.pos.x, o.pos.y, o.pos.z};
+            if (o.is_tradelane()) {
+                if (!o.next_ring.empty())
+                    if (auto* n = game::find_object(sys, o.next_ring)) m.lanes.emplace_back(p, DVec3{n->pos.x, n->pos.y, n->pos.z});
+                continue;
+            }
+            const SolarArchetype* sa = universe ? universe->solar(o.archetype) : nullptr;
+            game::NavMapItem it;
+            it.pos = p;
+            it.radius = sa ? sa->solar_radius : 0;
+            std::string type = sa ? sa->type : std::string();
+            if (!o.star.empty() || iequals(type, "SUN")) it.kind = game::NavMapItem::Kind::Star;
+            else if (iequals(type, "PLANET")) it.kind = game::NavMapItem::Kind::Planet;
+            else if (o.is_jump()) it.kind = game::NavMapItem::Kind::Gate;
+            else if (!o.base.empty()) it.kind = game::NavMapItem::Kind::Base;
+            else if (o.ids_name) it.kind = game::NavMapItem::Kind::Other;
+            else continue;  // unnamed props, rings, buoys
+            if (iequals(type, "DOCKING_RING")) continue;  // the planet already stands for it
+            if (o.ids_name && strings) it.label = strings->name(static_cast<std::uint32_t>(o.ids_name), "");
+            m.items.push_back(std::move(it));
+        }
+        m.extent = game::nav_map_extent(m.items);
+        m.player = ship.pos;
+        Vec3 f = ship.orient.rotate({0, 0, -1});
+        m.player_heading = std::atan2(f.x, -f.z);
+        if (mission && mission->waypoint && iequals(mission->waypoint->system, sys.nickname)) {
+            auto& wp = *mission->waypoint;
+            auto pos = wp.object.empty() ? wp.pos : where(wp.object);
+            if (!pos) pos = wp.pos;
+            if (pos) {
+                m.has_waypoint = true;
+                m.waypoint = *pos;
+                m.waypoint_label = wp.label;
+            }
+        }
+        return m;
+    }
+
     // ---- random traffic
     void load_traffic_data() {
         auto& t = traffic;
@@ -2444,8 +2490,9 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
                 }
             }
         }
+        else if (fs->show_map) game::build_nav_map(hud, layout, fs->nav_map(renderer.system()));
         else game::build_flight_hud(hud, layout, hud_cfg, cam, fs->ship.pos, fs->hud_state(renderer.system(), cursor_x, cursor_y));
-        if (!base_screen && fs->mission) {
+        if (!base_screen && !fs->show_map && fs->mission) {
             // Mission lines: the current objective, who is on the radio, and the outcome.
             auto& m = *fs->mission;
             float s = static_cast<float>(h) / 1080.f, cx = static_cast<float>(w) * 0.5f;
@@ -2455,7 +2502,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
             if (!m.result.empty()) hud.text(cx, static_cast<float>(h) * 0.35f, 26 * s, m.result, {1, 0.85f, 0.4f, 1}, TextAlign::Center);
         }
         renderer.set_hud(&hud);
-        if (!base_screen && hud_cfg.style == game::HudStyle::Classic)
+        if (!base_screen && !fs->show_map && hud_cfg.style == game::HudStyle::Classic)
             for (auto& d : game::classic_hud_models(layout, hud_cfg, fs->win_fovx))
                 renderer.draw_hud_model(fs->hud_model(renderer, d.model), d.px, d.py, d.ppu, d.tint);
     }
@@ -2515,6 +2562,7 @@ int run(const Args& args) {
             fs->shipdb = ships.get();
             fs->pilots = &pilots;
             fs->traffic_on = !args.no_traffic;
+            fs->show_map = args.show_map;
             auto fx_files = files.effects;
             fx_files.insert(fx_files.end(), files.explosions.begin(), files.explosions.end());
             fx_db = std::make_unique<EffectDb>(vfs, fx_files);
@@ -2759,6 +2807,7 @@ int run(const Args& args) {
                     else if (fs && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
                         if (e.key.key == SDLK_SPACE) fs->mouse_flight = !fs->mouse_flight;
                         else if (e.key.key == SDLK_T) fs->next_target();
+                        else if (e.key.key == SDLK_M && !fs->docked()) fs->show_map = !fs->show_map;
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
                         else if (e.key.key == SDLK_F5) save_game(*fs, renderer, save_path(args));
                         else if (e.key.key == SDLK_F9) {

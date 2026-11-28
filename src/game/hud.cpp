@@ -458,6 +458,135 @@ std::string format_money(std::int64_t v) {
     return (v < 0 ? "-$" : "$") + out;
 }
 
+double nav_map_extent(const std::vector<NavMapItem>& items) {
+    double e = 0;
+    for (auto& i : items) e = std::max({e, std::abs(i.pos.x), std::abs(i.pos.z)});
+    e *= 1.08;  // a margin round the edge
+    return std::max(20000.0, std::ceil(e / 10000.0) * 10000.0);
+}
+
+std::string nav_map_cell(const NavMap& m, const DVec3& p) {
+    auto cell = [&](double v) { return std::clamp(static_cast<int>(std::floor((v + m.extent) / (2 * m.extent) * 8)), 0, 7); };
+    std::string out;
+    out += static_cast<char>('A' + cell(p.x));
+    out += static_cast<char>('1' + cell(p.z));
+    return out;
+}
+
+void build_nav_map(HudBatch& h, const HudLayout& L, const NavMap& m) {
+    float s = L.scale;
+    float side = std::min(L.canvas_h * 0.82f, L.canvas_w - 40 * s);
+    float x0 = L.cx() - side * 0.5f, y0 = L.cy() - side * 0.5f + 10 * s;
+    h.rect(x0 - 30 * s, y0 - 54 * s, side + 60 * s, side + 84 * s, {0.01f, 0.03f, 0.07f, 0.9f});
+    panel(h, x0 - 30 * s, y0 - 54 * s, side + 60 * s, side + 84 * s, s);
+    h.text(L.cx(), y0 - 42 * s, 16 * s, m.title, kTarget, TextAlign::Center);
+    auto to_map = [&](const DVec3& p, float& mx, float& my) {
+        mx = x0 + static_cast<float>((p.x + m.extent) / (2 * m.extent)) * side;
+        my = y0 + static_cast<float>((p.z + m.extent) / (2 * m.extent)) * side;
+    };
+    // Grid with its letters and numbers.
+    float cellw = side / 8;
+    for (int i = 0; i <= 8; ++i) {
+        float t = static_cast<float>(i) * cellw;
+        h.line(x0 + t, y0, x0 + t, y0 + side, 1 * s, kDim.with_alpha(0.25f));
+        h.line(x0, y0 + t, x0 + side, y0 + t, 1 * s, kDim.with_alpha(0.25f));
+        if (i < 8) {
+            char c[2] = {static_cast<char>('A' + i), 0};
+            h.text(x0 + t + cellw * 0.5f, y0 - 16 * s, 10 * s, c, kDim, TextAlign::Center);
+            c[0] = static_cast<char>('1' + i);
+            h.text(x0 - 14 * s, y0 + t + cellw * 0.5f - 5 * s, 10 * s, c, kDim, TextAlign::Center);
+        }
+    }
+    auto inside = [&](float mx, float my) { return mx >= x0 && mx <= x0 + side && my >= y0 && my <= y0 + side; };
+    // Trade lanes as thin lines.
+    for (auto& [a, b] : m.lanes) {
+        float ax, ay, bx, by;
+        to_map(a, ax, ay);
+        to_map(b, bx, by);
+        if (inside(ax, ay) && inside(bx, by)) h.line(ax, ay, bx, by, 1.5f * s, kLine.with_alpha(0.45f));
+    }
+    // Objects: a ring sized to the object (planets, stars) or a small mark, and the name.
+    // Names that would overlap one already written are left out; bases, planets and gates
+    // go first so they keep theirs.
+    struct Box { float x0, y0, x1, y1; };
+    std::vector<Box> used;
+    auto place_label = [&](float lx, float ly, float size, const std::string& text) {
+        Box b{lx, ly - 2 * s, lx + HudBatch::text_width(size, text), ly + size + 2 * s};
+        for (auto& u : used)
+            if (b.x0 < u.x1 && u.x0 < b.x1 && b.y0 < u.y1 && u.y0 < b.y1) return false;
+        used.push_back(b);
+        return true;
+    };
+    std::vector<const NavMapItem*> order;
+    for (auto& it : m.items) order.push_back(&it);
+    auto rank = [](NavMapItem::Kind k) {
+        switch (k) {
+            case NavMapItem::Kind::Star: return 0;
+            case NavMapItem::Kind::Planet: return 1;
+            case NavMapItem::Kind::Base: return 2;
+            case NavMapItem::Kind::Gate: return 3;
+            default: return 4;
+        }
+    };
+    std::stable_sort(order.begin(), order.end(), [&](auto* a, auto* b) { return rank(a->kind) < rank(b->kind); });
+    for (auto* itp : order) {
+        auto& it = *itp;
+        float mx, my;
+        to_map(it.pos, mx, my);
+        if (!inside(mx, my)) continue;
+        float r = std::max(3.f * s, static_cast<float>(it.radius / (2 * m.extent)) * side);
+        HudColor c = kLine;
+        switch (it.kind) {
+            case NavMapItem::Kind::Star: c = {1.f, 0.85f, 0.45f, 0.9f}; h.circle(mx, my, r, 1.5f * s, c, 24); break;
+            case NavMapItem::Kind::Planet: h.circle(mx, my, r, 1.5f * s, c, 24); break;
+            case NavMapItem::Kind::Base: h.rect(mx - 3 * s, my - 3 * s, 6 * s, 6 * s, c); break;
+            case NavMapItem::Kind::Gate:
+                c = {0.75f, 0.6f, 1.f, 0.95f};
+                h.line(mx - 5 * s, my, mx, my - 5 * s, 1.5f * s, c);
+                h.line(mx, my - 5 * s, mx + 5 * s, my, 1.5f * s, c);
+                h.line(mx + 5 * s, my, mx, my + 5 * s, 1.5f * s, c);
+                h.line(mx, my + 5 * s, mx - 5 * s, my, 1.5f * s, c);
+                break;
+            default: h.rect(mx - 1.5f * s, my - 1.5f * s, 3 * s, 3 * s, kDim); break;
+        }
+        if (!it.label.empty() && place_label(mx + r + 5 * s, my - 5 * s, 10 * s, it.label))
+            h.text(mx + r + 5 * s, my - 5 * s, 10 * s, it.label, c.with_alpha(0.85f));
+    }
+    // Mission waypoint.
+    if (m.has_waypoint) {
+        float mx, my;
+        to_map(m.waypoint, mx, my);
+        if (inside(mx, my)) {
+            const HudColor wc{0.55f, 0.85f, 1.f, 0.95f};
+            h.circle(mx, my, 8 * s, 1.5f * s, wc, 20);
+            h.line(mx - 12 * s, my, mx + 12 * s, my, 1 * s, wc);
+            h.line(mx, my - 12 * s, mx, my + 12 * s, 1 * s, wc);
+            if (!m.waypoint_label.empty() && place_label(mx + 14 * s, my + 4 * s, 10 * s, m.waypoint_label))
+                h.text(mx + 14 * s, my + 4 * s, 10 * s, m.waypoint_label, wc);
+        }
+    }
+    // The player: an arrow pointing where the ship heads.
+    {
+        float mx, my;
+        to_map(m.player, mx, my);
+        mx = std::clamp(mx, x0, x0 + side);
+        my = std::clamp(my, y0, y0 + side);
+        float a = m.player_heading, k = 9 * s;
+        float fx = std::sin(a), fy = -std::cos(a);  // forward on the map
+        float rx = -fy, ry = fx;
+        float tipx = mx + fx * k, tipy = my + fy * k;
+        float lx = mx - fx * k * 0.7f + rx * k * 0.6f, ly = my - fy * k * 0.7f + ry * k * 0.6f;
+        float qx = mx - fx * k * 0.7f - rx * k * 0.6f, qy = my - fy * k * 0.7f - ry * k * 0.6f;
+        h.line(tipx, tipy, lx, ly, 2 * s, kTarget);
+        h.line(lx, ly, qx, qy, 2 * s, kTarget);
+        h.line(qx, qy, tipx, tipy, 2 * s, kTarget);
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "YOU ARE IN %s     SCALE %.0f K PER SQUARE     M = CLOSE", nav_map_cell(m, m.player).c_str(),
+                  m.extent / 4000.0);
+    h.text(L.cx(), y0 + side + 10 * s, 10 * s, buf, kDim, TextAlign::Center);
+}
+
 void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
     float s = L.scale;
     float w = std::min(L.canvas_w - 40 * s, 900 * s), ph = 560 * s;

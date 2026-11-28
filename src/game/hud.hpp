@@ -137,6 +137,31 @@ struct BaseScreen {
 std::string format_money(std::int64_t v);  // "$1,234"
 void build_base_screen(render::HudBatch& out, const HudLayout& layout, const BaseScreen& screen);
 
+// The navigation map: the system seen from above (x to the right, z down the screen) on an
+// 8 x 8 grid lettered A-H across and numbered 1-8 down.
+struct NavMapItem {
+    enum class Kind { Base, Planet, Star, Gate, Lane, Other } kind = Kind::Other;
+    std::string label;  // empty: drawn without a name
+    DVec3 pos;
+    float radius = 0;
+};
+struct NavMap {
+    std::string title;  // system name
+    double extent = 100000;  // half width of the map in metres
+    std::vector<NavMapItem> items;
+    std::vector<std::pair<DVec3, DVec3>> lanes;  // trade lane legs
+    DVec3 player;
+    float player_heading = 0;  // radians, 0 = -z (up the map), clockwise
+    bool has_waypoint = false;
+    DVec3 waypoint;
+    std::string waypoint_label;
+};
+// The half width that fits all the items, rounded up to a whole 10 km.
+double nav_map_extent(const std::vector<NavMapItem>& items);
+// Map cell of a point, e.g. "D5".
+std::string nav_map_cell(const NavMap& map, const DVec3& p);
+void build_nav_map(render::HudBatch& out, const HudLayout& layout, const NavMap& map);
+
 void build_flight_hud(render::HudBatch& out, const HudLayout& layout, const HudConfig& config,
                       const render::Camera& cam, const DVec3& player_pos, const HudState& state);
 
