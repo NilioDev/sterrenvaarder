@@ -598,7 +598,9 @@ void build_nav_map(HudBatch& h, const HudLayout& L, const NavMap& m) {
 
 void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
     float s = L.scale;
-    float w = std::min(L.canvas_w - 40 * s, 900 * s), ph = 560 * s;
+    // In the base's own room (no dealer chosen) only the header, tabs and keys show.
+    const bool room_only = b.tab < 0;
+    float w = std::min(L.canvas_w - 40 * s, 900 * s), ph = (room_only ? 170 : 560) * s;
     float x = L.cx() - w * 0.5f, y = L.canvas_y + L.canvas_h * 0.1f;
     panel(h, x, y, w, ph, s);
     float pad = 26 * s;
@@ -621,6 +623,12 @@ void build_base_screen(HudBatch& h, const HudLayout& L, const BaseScreen& b) {
         tx += tw + 34 * s;
     }
 
+    if (room_only) {
+        float fy = y + ph - 26 * s - 10 * s;
+        h.text(x + 26 * s, fy, 10 * s, b.help, kDim);
+        if (!b.message.empty()) h.text(x + w - 26 * s, fy, 11 * s, b.message, kCruise, TextAlign::Right);
+        return;
+    }
     float ty = tyy + 36 * s;
     float c_price = x + w * 0.60f, c3 = x + w * 0.78f, c4 = x + w - pad;
     h.text(x + pad + 14 * s, ty, 10 * s, b.columns[0], kDim);

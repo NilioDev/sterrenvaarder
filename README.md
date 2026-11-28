@@ -139,8 +139,10 @@ and the ship's `hold_size`; a base sells at the same price it buys, as in the or
 ./build/sterrenvaarder --data /path/to/DATA --load save.ini
 ```
 
-F3 docks at the selected base and launches again. Docked, keys 1-3 switch between the
-commodity trader, the equipment dealer and the ship dealer; Up/Down selects, Right buys,
+F3 docks at the selected base and launches again. Landing puts you in the base's start
+room (its cityscape or deck); keys 1-3 switch between the
+commodity trader, the equipment dealer and the ship dealer, 4 goes to the bar and 0 back
+to the start room; Up/Down selects, Right buys,
 Left sells (Shift: as many commodities as possible). Equipment mounts on the first free
 hardpoint of a matching class (the ship's `hp_type` lines); a new ship trades in the old
 one with everything on it and comes with its package contents. Market lines above the
@@ -173,6 +175,8 @@ or failure. Every other action goes to the game. The corpus test checks every st
 script and lists the conditions the runner doesn't evaluate yet.
 
 `--mission M01a` runs a story mission in flight:
+- Without `--system`, the mission begins where its script does: the system its starting triggers are bound to, docked at the base (and in the room) they wait for. That can be aboard a ship the mission puts into space, such as a battleship with its own base. The original carries the player over from the mission before.
+- Bases on mission objects (`[MsnSolar] base =`) can be targeted and docked at like stations.
 - Mission ships spawn with the ship, loadout and pilot from their `[NPCShipArch]`. Whether they are hostile follows your reputation with their faction.
 - Radio calls and dialogs play one after another, spoken in the speaker's voice.
 - Objectives (`SetNNObj`) show their text from your game's own resources, and the outcome is shown when the mission ends.

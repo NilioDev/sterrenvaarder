@@ -1097,6 +1097,48 @@ static void test_radio() {
     CHECK(game::launch_clear_lines(game::DockKind::Ring)[0] == "gcs_docklaunch_clear_ring_01-");
 }
 
+static IniValue str_value(const char* v) {
+    IniValue x;
+    x.s = v;
+    return x;
+}
+
+static void test_mission_start() {
+    // Self-written script: a start trigger bound to a system, which switches on a bar
+    // scene that waits for the player to enter a base.
+    MissionScript ms;
+    MsnTrigger start, bar, later;
+    start.nickname = "go";
+    start.system = "Sys01";
+    start.initially_active = true;
+    start.conditions.push_back({"True", {}});
+    start.actions.push_back({"ActTrig", {str_value("bar")}});
+    bar.nickname = "bar";
+    bar.conditions.push_back({"LocEnter", {str_value("Bar"), str_value("Sys01_02_Base")}});
+    bar.actions.push_back({"ActTrig", {str_value("go")}});  // loops back: visited once
+    later.nickname = "later";
+    later.conditions.push_back({"BaseEnter", {str_value("Sys02_01_Base")}});
+    ms.triggers = {start, bar, later};
+    auto w = game::mission_start(ms);
+    CHECK(w.system == "Sys01");
+    // "later" is never switched on
+    CHECK(w.places.size() == 1 && w.places[0].base == "Sys01_02_Base" && w.places[0].room == "Bar");
+    CHECK(game::next_story_mission("m01a") == "M01b" && game::next_story_mission("M12") == "M13");
+    CHECK(game::next_story_mission("M13").empty() && game::next_story_mission("x").empty());
+}
+
+static void test_euler_degrees() {
+    Vec3 in{20, -35, 70};
+    auto m = render::Mat4::euler_deg(in);
+    // Rebuild the quaternion from the matrix's axes and read the angles back.
+    Vec3 fwd{-m.at(0, 2), -m.at(1, 2), -m.at(2, 2)}, up{m.at(0, 1), m.at(1, 1), m.at(2, 1)};
+    auto q = game::Quat::look(fwd, up);
+    Vec3 out = game::euler_degrees(q);
+    CHECK(std::abs(out.x - in.x) < 0.05f && std::abs(out.y - in.y) < 0.05f && std::abs(out.z - in.z) < 0.05f);
+    Vec3 zero = game::euler_degrees(game::Quat{});
+    CHECK(std::abs(zero.x) + std::abs(zero.y) + std::abs(zero.z) < 1e-4f);
+}
+
 static void test_voices() {
     // Self-written voice list: a voice, its lines, and a later section extending it.
     VoiceDb db;
@@ -1332,6 +1374,8 @@ int main() {
     test_sound_db();
     test_voices();
     test_radio();
+    test_mission_start();
+    test_euler_degrees();
     test_mission_music();
     test_music_mood();
     test_anm_frames();

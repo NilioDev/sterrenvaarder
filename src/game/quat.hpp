@@ -93,4 +93,15 @@ struct Quat {
     }
 };
 
+// The system INI's "rotate" angles (degrees, Mat4::euler_deg order) of an orientation.
+inline Vec3 euler_degrees(const Quat& q) {
+    Mat4 m = q.matrix();
+    constexpr float k = 180.f / 3.14159265358979f;
+    float sy = std::clamp(-m.at(2, 0), -1.f, 1.f);
+    float y = std::asin(sy);
+    if (std::abs(sy) > 0.9999f)  // looking straight up or down: fold z into x
+        return {std::atan2(-m.at(1, 2), m.at(1, 1)) * k, y * k, 0};
+    return {std::atan2(m.at(2, 1), m.at(2, 2)) * k, y * k, std::atan2(m.at(1, 0), m.at(0, 0)) * k};
+}
+
 }  // namespace sterrenvaarder::game

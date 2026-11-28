@@ -80,6 +80,7 @@ DVec3 parse_vec(const std::string& s) {
 struct Args {
     std::vector<std::string> mounts;
     std::string system = "Li01";
+    bool system_given = false;
     int width = 1920, height = 1080;
     RenderSettings settings;
     std::string screenshot;
@@ -128,7 +129,7 @@ Args parse_args(int argc, char** argv) {
             return argv[++i];
         };
         if (k == "--data" || k == "--mod") a.mounts.push_back(next());
-        else if (k == "--system") a.system = next();
+        else if (k == "--system") { a.system = next(); a.system_given = true; }
         else if (k == "--width") a.width = std::stoi(next());
         else if (k == "--height") a.height = std::stoi(next());
         else if (k == "--scale") a.settings.render_scale = std::stof(next());
@@ -821,8 +822,16 @@ struct FlightSession {
         const SolarArchetype* arch = nullptr;
         DVec3 pos;
         Quat orient;
+        SystemObject obj;  // to target and dock at it like a station (its base, if any)
     };
     std::vector<MissionSolar> msn_solars;
+    // A system object, or a solar the mission has put into space.
+    const SystemObject* object_named(const StarSystem& sys, std::string_view n) const {
+        if (auto* o = game::find_object(sys, n)) return o;
+        for (auto& m : msn_solars)
+            if (iequals(m.obj.nickname, n)) return &m.obj;
+        return nullptr;
+    }
     const ShipDatabase* db = nullptr;
     // (vfs is set with the economy, below)
     Renderer* rend = nullptr;
@@ -1131,6 +1140,8 @@ struct FlightSession {
         player.base_faction = o.reputation;
         docked_label = player.base.empty() ? label_of(o) : base_label(player.base);
         trade_tab = Tab::Commodities;
+        at_dealer = false;
+        base_room.clear();
         trade_sel = 0;
         trade_msg.clear();
     }
@@ -1138,6 +1149,10 @@ struct FlightSession {
     // Base screen tabs: commodity trader, equipment dealer, ship dealer.
     enum class Tab { Commodities, Equipment, Ships, Bar };
     Tab trade_tab = Tab::Commodities;
+    // Landing puts the player in the base's start room (cityscape, deck, ...); a dealer
+    // tab moves them to that dealer's room. A mission may name another room to stand in.
+    bool at_dealer = false;
+    std::string base_room;  // empty: the base's start_room
     bool refit_needed = false;  // ship or guns changed: the main loop rebuilds them
 
     std::string good_name(std::string_view good) const {
@@ -1166,7 +1181,7 @@ struct FlightSession {
 
     std::vector<TradeRow> trade_rows() const {
         std::vector<TradeRow> out;
-        if (!econ || player.base.empty()) return out;
+        if (!econ || player.base.empty() || !at_dealer) return out;
         auto heading = [&](std::string t) {
             TradeRow r;
             r.row.name = std::move(t);
@@ -1280,6 +1295,7 @@ struct FlightSession {
 
     void set_tab(Tab t) {
         trade_tab = t;
+        at_dealer = true;
         trade_sel = -1;
         select_row(1);
         trade_msg.clear();
@@ -1333,18 +1349,19 @@ struct FlightSession {
         b.hold_used = econ ? game::cargo_used(*econ, player) : 0;
         b.hold_size = player.hold_size;
         b.tabs = {"COMMODITIES", "EQUIPMENT", "SHIPS", "BAR"};
-        b.tab = static_cast<int>(trade_tab);
-        static const char* cols[4][4] = {{"COMMODITY", "PRICE", "IN HOLD", "CAN BUY"},
+        b.tab = at_dealer ? static_cast<int>(trade_tab) : -1;
+        static const char* cols[5][4] = {{"COMMODITY", "PRICE", "IN HOLD", "CAN BUY"},
                                          {"EQUIPMENT", "PRICE", "HARDPOINT", ""},
                                          {"SHIP", "PRICE", "CARGO", "WITH TRADE-IN"},
+                                         {"", "", "", ""},
                                          {"", "", "", ""}};
-        for (int i = 0; i < 4; ++i) b.columns[i] = cols[b.tab][i];
+        for (int i = 0; i < 4; ++i) b.columns[i] = cols[b.tab < 0 ? 4 : b.tab][i];
         for (auto& r : trade_rows()) b.rows.push_back(r.row);
         b.selected = std::clamp(trade_sel, 0, std::max(0, static_cast<int>(b.rows.size()) - 1));
         b.message = trade_msg;
-        b.help = trade_tab == Tab::Bar ? "1-3 DEALER   4 BAR   F3 LAUNCH   F5 SAVE"
-               : trade_tab == Tab::Commodities ? "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH"
-                                               : "1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   F3 LAUNCH   F5 SAVE";
+        b.help = !at_dealer || trade_tab == Tab::Bar ? "1-3 DEALER   4 BAR   F3 LAUNCH   F5 SAVE"
+               : trade_tab == Tab::Commodities ? "0 BASE   1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   SHIFT = ALL   F3 LAUNCH"
+                                               : "0 BASE   1-3 DEALER   UP/DOWN SELECT   RIGHT BUY   LEFT SELL   F3 LAUNCH   F5 SAVE";
         return b;
     }
 
@@ -1356,6 +1373,9 @@ struct FlightSession {
         if (!best)
             for (auto& o : sys.objects)
                 if (iequals(o.dock_with, base)) { best = &o; break; }
+        if (!best)
+            for (auto& m : msn_solars)
+                if (iequals(m.obj.base, base)) { best = &m.obj; break; }
         if (!best) return false;
         auto sp = game::exit_point(*best, approach_distance(*best) + 100.f);
         ship.pos = sp.pos;
@@ -1402,7 +1422,7 @@ struct FlightSession {
     }
     void dock_request(const StarSystem& sys) {
         if (nav == Nav::Docked) {  // launch
-            if (auto* o = game::find_object(sys, nav_target)) {
+            if (auto* o = object_named(sys, nav_target)) {
                 radio_call(radio_voice(sys, *o), game::launch_clear_lines(game::dock_kind(o->archetype)));
                 float d = approach_distance(*o) + 100.f;
                 auto sp = game::exit_point(*o, d);
@@ -1419,7 +1439,7 @@ struct FlightSession {
         }
         if (nav != Nav::Free) { nav = Nav::Free; lane.reset(); return; }
         if (target < 0 || target >= static_cast<int>(contacts.size())) return;
-        const SystemObject* o = game::find_object(sys, contacts[target].name);
+        const SystemObject* o = object_named(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
         if (!may_use(*o)) {
             notice = o->is_tradelane() ? "TRADE LANE NOT AVAILABLE" : "DOCKING NOT PERMITTED: " + label_of(*o);
@@ -1469,7 +1489,7 @@ struct FlightSession {
             return true;
         }
         // Approach: fly the ship towards the target with the normal flight model.
-        const SystemObject* o = game::find_object(sys, nav_target);
+        const SystemObject* o = object_named(sys, nav_target);
         if (!o) { nav = Nav::Free; return false; }
         DVec3 tp{o->pos.x, o->pos.y, o->pos.z};
         DVec3 to = tp - ship.pos;
@@ -2401,6 +2421,32 @@ struct FlightSession {
         m.runner->ship_spawned(def->nickname);
     }
 
+    // SpawnSolar: puts a [MsnSolar] into space (once; it stays until the mission ends).
+    void spawn_solar(const Mission& m, std::string_view nickname) {
+        for (auto& s : msn_solars)
+            if (iequals(s.nickname, nickname)) return;
+        for (auto& d : m.script.solars)
+            if (iequals(d.nickname, nickname) && universe && rend) {
+                const SolarArchetype* sa = universe->solar(d.archetype);
+                if (!sa) return;
+                MissionSolar ms;
+                ms.nickname = d.nickname;
+                ms.name = d.string_id && strings ? strings->name(static_cast<std::uint32_t>(d.string_id), d.nickname) : d.nickname;
+                ms.mesh = rend->load_model(sa->model, sa->material_libraries);
+                ms.arch = sa;
+                ms.pos = {d.position[0], d.position[1], d.position[2]};
+                ms.orient = Quat{d.orientation[0], d.orientation[1], d.orientation[2], d.orientation[3]}.normalized();
+                ms.obj.nickname = d.nickname;
+                ms.obj.archetype = d.archetype;
+                ms.obj.base = d.base;
+                ms.obj.reputation = d.faction;
+                ms.obj.ids_name = d.string_id;
+                ms.obj.pos = {d.position[0], d.position[1], d.position[2]};
+                ms.obj.rotate_deg = game::euler_degrees(ms.orient);
+                msn_solars.push_back(std::move(ms));
+            }
+    }
+
     // Where a mission object is: the player, a mission ship or a solar in this system.
     std::optional<DVec3> where(std::string_view o) const {
         if (iequals(o, "Player")) return ship.pos;
@@ -2497,7 +2543,18 @@ struct FlightSession {
     }
 
     // The room the player is in: the one the base screen shows.
-    std::string room_view_name() const { return room_for_tab(); }
+    std::string room_view_name() const {
+        if (at_dealer) return room_for_tab();
+        if (!base_room.empty()) return base_room;
+        if (room.rooms && iequals(room.base, player.base)) return room.rooms->start_room;
+        return {};  // not loaded yet: the room view shows the start room
+    }
+    // Back to the base's start room (key 0).
+    void leave_dealer() {
+        at_dealer = false;
+        trade_sel = -1;
+        trade_msg.clear();
+    }
 
     // Every live mission ship with this nickname or label.
     template <class F>
@@ -2737,19 +2794,7 @@ struct FlightSession {
             } else if (iequals(a.name, "SpawnFormation")) {
                 mission_spawn_formation(a);
             } else if (iequals(a.name, "SpawnSolar")) {
-                for (auto& d : m.script.solars)
-                    if (iequals(d.nickname, a.arg(0)) && universe && rend) {
-                        const SolarArchetype* sa = universe->solar(d.archetype);
-                        if (!sa) break;
-                        MissionSolar ms;
-                        ms.nickname = d.nickname;
-                        ms.name = d.string_id && strings ? strings->name(static_cast<std::uint32_t>(d.string_id), d.nickname) : d.nickname;
-                        ms.mesh = rend->load_model(sa->model, sa->material_libraries);
-                        ms.arch = sa;
-                        ms.pos = {d.position[0], d.position[1], d.position[2]};
-                        ms.orient = Quat{d.orientation[0], d.orientation[1], d.orientation[2], d.orientation[3]}.normalized();
-                        msn_solars.push_back(std::move(ms));
-                    }
+                spawn_solar(m, a.arg(0));
             } else if (iequals(a.name, "GiveObjList")) {
                 if (auto* ol = m.script.obj_list(a.arg(1)))
                     for_mission_ships(a.arg(0), [&](NpcShip& n) {
@@ -2903,7 +2948,8 @@ struct FlightSession {
         }
         for (auto& m : msn_solars) {
             game::HudContact c;
-            c.name = m.name;
+            c.name = m.nickname;
+            c.label = m.name;
             c.pos = m.pos;
             c.radius = m.arch ? std::max(50.f, m.arch->solar_radius) : 100.f;
             c.marked = is_marked(m.nickname);
@@ -3203,7 +3249,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
     if (fs && fs->docked() && fs->vfs && fs->petal) {
         if (!iequals(fs->room.base, fs->player.base)) fs->room.load_base(*fs->vfs, fs->player.base);
         fs->room.chars = fs->characters_on ? &fs->chars : nullptr;
-        fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_for_tab());
+        fs->room.show(*fs->vfs, *fs->petal, renderer, fs->room_view_name());
         if (fs->shipdb) fs->room.set_ships(*fs->shipdb, renderer, fs->dealer_ships());
         float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
         fs->room.last_time = time;
@@ -3380,7 +3426,8 @@ int run(const Args& args) {
                 std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
                 for (auto& sec : parse_text_ini(text))
                     if (iequals(sec.name, "Mission")) fs->restore_mission(vfs, sec);
-            } else if (args.new_game) {
+            } else if (args.new_game || (fs->mission && !args.system_given)) {
+                std::string msn_base, msn_room, msn_solar;  // where --mission begins
                 if (!start) throw std::runtime_error("characters/newcharacter.ini not found");
                 game::PlayerState p;
                 p.credits = start->money;
@@ -3389,7 +3436,50 @@ int run(const Args& args) {
                 p.ship = args.ship_given ? args.ship : start->ship;
                 p.loadout = args.ship_given ? std::string() : start->loadout;
                 p.rep = start_rep;
+                // --mission on its own: begin where the mission does (the original carries
+                // the player over from the mission before).
+                if (fs->mission && !args.system_given) {
+                    auto where = game::mission_start(fs->mission->script);
+                    // A base with a station in this system, or one aboard a ship the
+                    // mission puts into space ([MsnSolar] base); else the system's first base.
+                    auto station = [&](const std::string& sys, const std::string& base) {
+                        auto ss = universe.load_system(sys);
+                        return ss && std::any_of(ss->objects.begin(), ss->objects.end(),
+                                                 [&](const SystemObject& o) { return iequals(o.base, base); });
+                    };
+                    auto& script = fs->mission->script;
+                    for (auto& pl : where.places) {
+                        auto* eb = econ->base(pl.base);
+                        if (!eb || (!where.system.empty() && !iequals(eb->system, where.system))) continue;
+                        auto solar = std::find_if(script.solars.begin(), script.solars.end(), [&](const MsnSolarDef& d) {
+                            return iequals(d.base, pl.base) && (d.system.empty() || iequals(d.system, eb->system));
+                        });
+                        if (solar == script.solars.end() && !station(eb->system, eb->nickname)) continue;
+                        msn_base = eb->nickname;
+                        msn_room = pl.room;
+                        if (solar != script.solars.end()) msn_solar = solar->nickname;
+                        p.system = eb->system;
+                        break;
+                    }
+                    if (msn_base.empty() && !where.system.empty())
+                        if (auto ss = universe.load_system(where.system))
+                            for (auto& o : ss->objects)
+                                if (!o.base.empty() && econ->base(o.base)) {
+                                    msn_base = o.base;
+                                    p.system = where.system;
+                                    break;
+                                }
+                    // Aboard a mission ship: put it into space first, then dock there.
+                    p.base = msn_solar.empty() && !msn_base.empty() ? msn_base : msn_solar.empty() ? p.base : "";
+                    SDL_Log("mission %s starts in %s%s%s%s%s", fs->mission->name.c_str(), p.system.c_str(),
+                            msn_base.empty() ? "" : " at ", msn_base.c_str(), msn_room.empty() ? "" : ", ", msn_room.c_str());
+                }
                 apply_player(*fs, p, *ships, vfs, renderer, cam, args);
+                if (!msn_solar.empty()) {
+                    fs->spawn_solar(*fs->mission, msn_solar);
+                    if (!fs->dock_at_base(renderer.system(), msn_base)) SDL_Log("cannot dock aboard %s", msn_solar.c_str());
+                }
+                if (fs->docked() && !msn_room.empty()) fs->base_room = msn_room;
             }
             if (args.credits >= 0) fs->player.credits = args.credits;
             if (args.rank >= 0) fs->player.rank = args.rank;
@@ -3477,13 +3567,19 @@ int run(const Args& args) {
                 fs->input.cruise = args.cruise;
                 fs->input.steer = game::mouse_steer(args.cursor_x, args.cursor_y);
                 fs->firing = args.fire;
-                if (!args.dock.empty()) {
+                // --dock: autopilot there, once the ship is in space and the object exists
+                // (a mission may spawn it after launch).
+                bool dock_sent = false;
+                auto try_dock = [&] {
+                    if (dock_sent || args.dock.empty() || fs->docked() || !fs->object_named(renderer.system(), args.dock)) return;
+                    dock_sent = true;
                     for (std::size_t i = 0; i < fs->contacts.size(); ++i) fs->contacts[i].selected = false;
                     fs->contacts.push_back({args.dock, {}, 0, true});
                     fs->target = static_cast<int>(fs->contacts.size() - 1);
                     fs->dock_request(renderer.system());
                     SDL_Log("autopilot to %s: %s", args.dock.c_str(), fs->nav_status().c_str());
-                }
+                };
+                try_dock();
                 // Docked runs start on the chosen base screen tab (and its room).
                 if (fs->docked() && args.tab > 0) fs->set_tab(static_cast<FlightSession::Tab>(std::clamp(args.tab, 0, 3)));
                 for (double t = 0; t < args.sim; t += 1.0 / 60) {
@@ -3498,6 +3594,7 @@ int run(const Args& args) {
                     if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
                     if (args.launch >= 0 && t < args.launch && t + 1.0 / 60 >= args.launch && fs->docked())
                         fs->dock_request(renderer.system());
+                    if (!fs->docked()) try_dock();
                 }
                 for (auto& [good, n] : args.buys) {
                     const Good* g = econ->good(good);
@@ -3604,6 +3701,8 @@ int run(const Args& args) {
                             fs->answer_offer(e.key.key == SDLK_Y);
                         } else if (fs->docked() && e.key.key >= SDLK_1 && e.key.key <= SDLK_4) {
                             fs->set_tab(static_cast<FlightSession::Tab>(e.key.key - SDLK_1));
+                        } else if (fs->docked() && e.key.key == SDLK_0) {
+                            fs->leave_dealer();
                         } else if (fs->docked() && (e.key.key == SDLK_RIGHT || e.key.key == SDLK_LEFT)) {
                             fs->trade(e.key.key == SDLK_RIGHT ? 1 : -1, (e.key.mod & SDL_KMOD_SHIFT) != 0);
                             if (fs->refit_needed) {
