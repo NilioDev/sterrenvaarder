@@ -41,6 +41,7 @@ static int failures = 0;
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/mbases.hpp"
+#include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/pilots.hpp"
@@ -908,6 +909,46 @@ static void test_thn_player() {
     CHECK(std::abs(q.state("box")->pos.x - 10) < 1e-3f && std::abs(q.state("box")->pos.y - 100) < 1e-3f);
 }
 
+static void test_wav() {
+    // A self-made tone: 0.1 s of 16-bit mono at 8000 Hz, then the same as 8-bit stereo.
+    auto wav = [](int bits, int channels, const std::vector<std::uint8_t>& body) {
+        std::vector<std::uint8_t> d;
+        auto u32 = [&](std::uint32_t v) { for (int k = 0; k < 4; ++k) d.push_back(static_cast<std::uint8_t>(v >> (8 * k))); };
+        auto u16 = [&](std::uint16_t v) { d.push_back(static_cast<std::uint8_t>(v)); d.push_back(static_cast<std::uint8_t>(v >> 8)); };
+        d.insert(d.end(), {'R', 'I', 'F', 'F'});
+        u32(static_cast<std::uint32_t>(4 + 8 + 16 + 8 + body.size()));
+        d.insert(d.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+        u32(16);
+        u16(1);
+        u16(static_cast<std::uint16_t>(channels));
+        u32(8000);
+        u32(static_cast<std::uint32_t>(8000 * channels * bits / 8));
+        u16(static_cast<std::uint16_t>(channels * bits / 8));
+        u16(static_cast<std::uint16_t>(bits));
+        d.insert(d.end(), {'d', 'a', 't', 'a'});
+        u32(static_cast<std::uint32_t>(body.size()));
+        d.insert(d.end(), body.begin(), body.end());
+        return d;
+    };
+    std::vector<std::uint8_t> pcm16;
+    for (int i = 0; i < 800; ++i) {
+        auto v = static_cast<std::int16_t>(std::lround(10000 * std::sin(i * 0.2)));
+        pcm16.push_back(static_cast<std::uint8_t>(v));
+        pcm16.push_back(static_cast<std::uint8_t>(static_cast<std::uint16_t>(v) >> 8));
+    }
+    auto data16 = wav(16, 1, pcm16);
+    Sound a = decode_wav(data16);
+    CHECK(a.rate == 8000 && a.channels == 1 && a.samples.size() == 800 && std::abs(a.seconds() - 0.1f) < 1e-4f);
+    CHECK(a.samples[5] == static_cast<std::int16_t>(std::lround(10000 * std::sin(1.0))));
+    auto data8 = wav(8, 2, std::vector<std::uint8_t>(1600, 128 + 64));
+    Sound b = decode_wav(data8);
+    CHECK(b.channels == 2 && b.samples.size() == 1600 && b.samples[0] == 64 << 8 && std::abs(b.seconds() - 0.1f) < 1e-4f);
+    bool threw = false;
+    std::vector<std::uint8_t> junk(20, 0);
+    try { decode_wav(junk); } catch (const FormatError&) { threw = true; }
+    CHECK(threw);
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -1121,6 +1162,7 @@ int main() {
     test_skinning();
     test_mbases();
     test_thn_player();
+    test_wav();
     test_anm_frames();
     test_costumes();
     test_fonts();

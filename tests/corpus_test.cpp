@@ -11,6 +11,7 @@
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/mbases.hpp"
+#include "sterrenvaarder/audio.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
 #include "sterrenvaarder/anm.hpp"
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
     std::size_t msn_triggers = 0, msn_dangling = 0;
     std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
     std::vector<std::string> scene_costumes, scene_anims;  // what scene characters wear and play
+    double wav_seconds = 0;
     std::size_t thn_paths = 0, thn_short_paths = 0, thn_rides = 0, thn_bad_rides = 0;
     std::size_t thn_views = 0, thn_moves = 0, thn_cuts = 0, thn_bad_cuts = 0, thn_bad_moves = 0;
     std::size_t dfm_posed = 0, dfm_pose_off = 0;  // bones the joints reach, and those that land elsewhere than stored
@@ -61,6 +63,12 @@ int main(int argc, char** argv) {
                 lib.add(file->root());
                 anm_scripts += lib.scripts().size();
                 for (auto& sc : lib.scripts()) anm_seconds += sc.length();
+            } else if (path.ends_with(".wav")) {
+                // Sounds: every file should decode to samples (numbers only).
+                kind = "wav";
+                Sound snd = decode_wav(data);
+                if (snd.samples.empty()) throw FormatError("no samples");
+                wav_seconds += snd.seconds();
             } else if (path.ends_with(".dfm")) {
                 // Character meshes: every level and its strips must hold together.
                 kind = "dfm";
@@ -335,6 +343,7 @@ int main(int argc, char** argv) {
     std::printf("character meshes: %zu triangles, %zu bones, %zu bones without a part\n", dfm_tris, dfm_bones, dfm_bad_bones);
     std::printf("scenes: %zu moves (%zu name no entity), %zu camera cuts (%zu to no camera, %zu give a view)\n", thn_moves,
                 thn_bad_moves, thn_cuts, thn_bad_cuts, thn_views);
+    std::printf("sounds: %.0f minutes in all\n", wav_seconds / 60);
     std::printf("scene paths: %zu (%zu with fewer than 2 points), %zu path animations (%zu on no path)\n", thn_paths,
                 thn_short_paths, thn_rides, thn_bad_rides);
     std::printf("character bind pose: %zu of %zu bones off (worst %.4f)\n", dfm_pose_off, dfm_posed, dfm_pose_worst);
