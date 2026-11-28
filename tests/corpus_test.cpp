@@ -422,7 +422,10 @@ int main(int argc, char** argv) {
                     if (!v || !b || !v->at(0) || !b->at(0)) continue;
                     const Voice* voice = voices.voice(v->at(0)->as_string());
                     ++calls;
+                    auto* arch = sec.find("archetype");
                     auto ls = game::dock_reply_lines(b->at(0)->as_string(), true);
+                    for (auto& l : game::launch_clear_lines(game::dock_kind(arch && arch->at(0) ? arch->at(0)->as_string() : "")))
+                        ls.push_back(l);
                     for (std::size_t i = 0; i < ls.size(); ++i) {
                         ++parts;
                         if (!voice || !voice->lines.count(to_lower(ls[i]))) ++missing, ++missing_at[i];

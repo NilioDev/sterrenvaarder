@@ -1081,6 +1081,9 @@ static void test_radio() {
     CHECK(ok.size() == 3 && ok[0] == "gcs_misc_thisis+" && ok[1] == "gcs_refer_base_x_base-" && ok[2] == "gcs_dockrequest_granted_01-");
     auto no = game::dock_reply_lines("", false);
     CHECK(no.size() == 1 && no[0] == "gcs_dockrequest_responsehostile_01-");
+    CHECK(game::dock_kind("Dock_Ring") == game::DockKind::Ring && game::dock_kind("x_battleship") == game::DockKind::Moor &&
+          game::dock_kind("largestation1") == game::DockKind::Berth);
+    CHECK(game::launch_clear_lines(game::DockKind::Ring)[0] == "gcs_docklaunch_clear_ring_01-");
 }
 
 static void test_voices() {
