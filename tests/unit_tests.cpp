@@ -214,6 +214,17 @@ void test_combat() {
     CHECK(c.hull == 1500);
     for (int i = 0; i < 121; ++i) c.update(0.1f);
     CHECK(c.shield > 89 && c.shield < 92);  // back at 15 % (+ a little regeneration)
+    // A hull floor (mission Invulnerable) stops hits there: the ship cannot die.
+    Combatant tough;
+    tough.hull = tough.max_hull = 1000;
+    tough.hull_floor = 900;
+    tough.damage(50, 0);
+    CHECK(tough.hull == 950);
+    tough.damage(500, 0);
+    CHECK(tough.hull == 900 && tough.alive());
+    tough.hull_floor = 0;
+    tough.damage(5000, 0);
+    CHECK(!tough.alive());
 
     GunArchetype ga;
     ga.refire_delay = 0.12f;

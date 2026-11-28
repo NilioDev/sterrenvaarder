@@ -327,6 +327,7 @@ struct NpcShip {
     std::size_t order_step = 0;
     float order_time = 0;  // seconds in the current step
     bool docked_away = false;
+    float lifetime = -1;  // mission SetLifeTime: seconds left before it leaves the scene (< 0: no limit)
     // Random traffic: the zone it belongs to (-1 = not traffic), its ship entry and job.
     int pop_zone = -1;
     const NpcShipArch* pop_arch = nullptr;
@@ -1375,6 +1376,21 @@ struct FlightSession {
             if (!x.voice.empty() && !base.empty() && (iequals(x.base, base) || iequals(x.dock_with, base))) return x.voice;
         return {};
     }
+    // Mission limits on docking and trade lanes (PlayerCanDock, PlayerCanTradelane, LockDock).
+    struct DockRules {
+        bool can_dock = true, can_lane = true;
+        std::vector<std::string> dock_except, lane_except;  // allowed anyway (object or base nicknames)
+        std::vector<std::string> locked;                    // objects the player may not dock at
+    } dock_rules;
+    static bool listed(const std::vector<std::string>& l, const SystemObject& o) {
+        std::string base = o.base.empty() ? o.dock_with : o.base;
+        return std::any_of(l.begin(), l.end(), [&](const std::string& x) { return iequals(x, o.nickname) || (!base.empty() && iequals(x, base)); });
+    }
+    bool may_use(const SystemObject& o) const {
+        if (o.is_tradelane()) return dock_rules.can_lane || listed(dock_rules.lane_except, o);
+        if (listed(dock_rules.locked, o)) return false;
+        return dock_rules.can_dock || listed(dock_rules.dock_except, o);
+    }
     void dock_request(const StarSystem& sys) {
         if (nav == Nav::Docked) {  // launch
             if (auto* o = game::find_object(sys, nav_target)) {
@@ -1396,6 +1412,11 @@ struct FlightSession {
         if (target < 0 || target >= static_cast<int>(contacts.size())) return;
         const SystemObject* o = game::find_object(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
+        if (!may_use(*o)) {
+            notice = o->is_tradelane() ? "TRADE LANE NOT AVAILABLE" : "DOCKING NOT PERMITTED: " + label_of(*o);
+            notice_time = 4.f;
+            return;
+        }
         bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
         std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = radio_voice(sys, *o);
         if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
@@ -1605,6 +1626,14 @@ struct FlightSession {
         float dt = static_cast<float>(dt_d);
         sim_time += dt_d;
         for (auto& n : npcs) {
+            if (n.lifetime >= 0 && n.body.alive()) {
+                n.lifetime -= dt;
+                if (n.lifetime < 0) {  // its time is up: it leaves the scene, without an explosion
+                    n.mesh = {};
+                    n.body.hull = 0;
+                    n.docked_away = true;
+                }
+            }
             n.burst = n.burst > 0 ? n.burst - dt : n.burst + dt;
             if (n.burst <= 0 && n.burst > -dt) n.burst = -1.5f;  // just ended: pause
             else if (n.burst < 0 && n.burst + dt >= 0) n.burst = 1.0f;
@@ -2174,6 +2203,8 @@ struct FlightSession {
         if (vfs.exists("missions/formations.ini")) m->shapes = parse_formations(parse_ini(vfs.read("missions/formations.ini")));
         m->name = name;
         mission = std::move(m);
+        dock_rules = {};
+        music.mission = {};
         mission->runner.emplace(mission->script);
         mission->runner->start();
         SDL_Log("mission %s: %zu triggers", name.c_str(), mission->script.triggers.size());
@@ -2608,6 +2639,42 @@ struct FlightSession {
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
                 m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f, comm_voice(a.arg(0))});
+            } else if (iequals(a.name, "Invulnerable")) {
+                // Invulnerable = ship, on [, ..., fraction]: hits stop at that share of its hull
+                // (without a share: just short of destroyed). Our reading of the values.
+                bool on = a.args.size() > 1 && a.args[1].as_bool();
+                float share = a.args.size() > 3 ? a.num(3) : 0.f;
+                auto apply = [&](game::Combatant& b) { b.hull_floor = on ? std::max(1.f, b.max_hull * share) : 0.f; };
+                if (iequals(a.arg(0), "Player")) apply(body);
+                else for_mission_ships(a.arg(0), [&](NpcShip& n) { apply(n.body); });
+            } else if (iequals(a.name, "AdjHealth")) {
+                // AdjHealth = ship, change: adds that share of its full hull.
+                auto apply = [&](game::Combatant& b) {
+                    if (b.alive()) b.hull = std::clamp(b.hull + b.max_hull * a.num(1), std::max(b.hull_floor, 0.f), b.max_hull);
+                };
+                if (iequals(a.arg(0), "Player")) apply(body);
+                else for_mission_ships(a.arg(0), [&](NpcShip& n) { apply(n.body); });
+            } else if (iequals(a.name, "SetLifeTime") || iequals(a.name, "SetLifetime")) {
+                for_mission_ships(a.arg(0), [&](NpcShip& n) { n.lifetime = std::max(0.f, a.num(1)); });
+            } else if (iequals(a.name, "PlayerCanDock") || iequals(a.name, "PlayerCanTradelane")) {
+                // = allowed [, exceptions...]: while not allowed, only the listed ones are.
+                bool dock = iequals(a.name, "PlayerCanDock");
+                bool& can = dock ? dock_rules.can_dock : dock_rules.can_lane;
+                auto& except = dock ? dock_rules.dock_except : dock_rules.lane_except;
+                can = !a.args.empty() && a.args[0].as_bool();
+                except.clear();
+                for (std::size_t i = 1; i < a.args.size(); ++i) except.push_back(a.arg(i));
+            } else if (iequals(a.name, "LockDock")) {
+                // LockDock = player, object, lock | unlock (also written object, player, ...).
+                std::string obj = iequals(a.arg(0), "Player") ? a.arg(1) : a.arg(0);
+                auto& l = dock_rules.locked;
+                std::erase_if(l, [&](const std::string& x) { return iequals(x, obj); });
+                if (iequals(a.arg(2), "lock")) l.push_back(obj);
+            } else if (iequals(a.name, "SetRep")) {
+                // SetRep = player, faction, value (-1..1).
+                if (iequals(a.arg(0), "Player") && a.args.size() > 2) player.rep[to_lower(a.arg(1))] = std::clamp(a.num(2), -1.f, 1.f);
+            } else if (iequals(a.name, "PlaySoundEffect")) {
+                play_here(a.arg(0));
             } else if (iequals(a.name, "PlayMusic")) {
                 std::vector<std::string> args;
                 for (auto& v : a.args) args.push_back(v.as_string());

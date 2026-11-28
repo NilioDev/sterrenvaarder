@@ -31,6 +31,7 @@ struct Combatant {
     float shield_rebuild_level = 0;  // fraction restored when it comes back
     float shield_offline = 0;        // seconds left offline
     const ShieldArchetype* shield_arch = nullptr;
+    float hull_floor = 0;            // hits stop here (mission Invulnerable); > 0 cannot die
     bool alive() const { return hull > 0; }
 
     void set_shield(const ShieldArchetype* s);
