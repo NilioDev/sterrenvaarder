@@ -37,6 +37,7 @@ static int failures = 0;
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/population.hpp"
+#include "sterrenvaarder/dfm.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -706,6 +707,21 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_dfm_strips() {
+    // Two strips joined by repeated corners: 0 1 2 3 | 3 3 4 | 4 5 6.
+    DfmMesh m;
+    m.point_index.resize(7);
+    DfmMesh::Group g;
+    g.strip = {0, 1, 2, 3, 3, 4, 4, 5, 6};
+    auto t = m.triangles(g);
+    // Strip one gives (0 1 2) and (2 1 3), turned to keep the winding; the joins give
+    // nothing; strip two gives one triangle from 4 5 6.
+    CHECK(t.size() == 9);
+    CHECK(t[0] == 0 && t[1] == 1 && t[2] == 2);
+    CHECK(t[3] == 2 && t[4] == 1 && t[5] == 3);
+    CHECK((t[6] == 4 || t[6] == 5) && t[8] == 6);
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -915,6 +931,7 @@ static void test_postfx() {
 int main() {
     test_mission();
     test_population();
+    test_dfm_strips();
     test_fonts();
     test_postfx();
     test_thn();
