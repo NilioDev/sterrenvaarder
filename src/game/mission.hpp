@@ -73,6 +73,16 @@ public:
     // True while an active trigger waits for a condition of this name (e.g. "MsnResponse").
     bool waiting_for(std::string_view condition) const;
 
+    // Saved progress: which triggers are active and how often each has fired. Restoring
+    // sets the triggers back without running their actions.
+    struct Progress {
+        std::vector<std::string> active;
+        std::vector<std::pair<std::string, int>> fired;
+        int outcome = 0;  // Outcome as int
+    };
+    Progress progress() const;
+    void restore(const Progress& p);
+
 private:
     struct State {
         bool active = false;

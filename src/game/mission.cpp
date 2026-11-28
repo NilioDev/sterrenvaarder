@@ -27,6 +27,26 @@ void MissionRunner::activate(std::string_view trigger) {
     s.events_from = events_.size();
 }
 
+MissionRunner::Progress MissionRunner::progress() const {
+    Progress p;
+    for (std::size_t i = 0; i < states_.size(); ++i) {
+        auto& n = script_.triggers[i].nickname;
+        if (states_[i].active) p.active.push_back(n);
+        if (states_[i].fired) p.fired.emplace_back(n, states_[i].fired);
+    }
+    p.outcome = static_cast<int>(outcome_);
+    return p;
+}
+
+void MissionRunner::restore(const Progress& p) {
+    for (auto& s : states_) s = State{};
+    events_.clear();
+    for (auto& [n, count] : p.fired)
+        if (auto it = index_.find(to_lower(n)); it != index_.end()) states_[it->second].fired = count;
+    for (auto& n : p.active) activate(n);
+    outcome_ = static_cast<Outcome>(p.outcome);
+}
+
 bool MissionRunner::active(std::string_view trigger) const {
     auto it = index_.find(to_lower(trigger));
     return it != index_.end() && states_[it->second].active;
