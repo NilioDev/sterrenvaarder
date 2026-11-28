@@ -1552,6 +1552,46 @@ struct FlightSession {
         }
     }
 
+    // Autoplay on a base: goes to the rooms the mission waits for (each once per visit), and
+    // launches once nothing here is left to do while the mission waits for something in space.
+    float autoplay_wait = 0;
+    std::string autoplay_base;
+    std::set<std::string> autoplay_rooms;
+    void autoplay_docked(const StarSystem& sys, float dt) {
+        if (!docked() || !mission || !mission->runner) return;
+        if (!iequals(autoplay_base, player.base)) {
+            autoplay_base = player.base;
+            autoplay_rooms.clear();
+        }
+        autoplay_rooms.insert(to_lower(mission_room()));
+        if (room.scene || !room.pending_scene.empty() || offer_open() || popup_open() || !talk_partners().empty()) {
+            autoplay_wait = 3;  // let the room have its say first
+            return;
+        }
+        if ((autoplay_wait -= dt) > 0) return;
+        autoplay_wait = 3;
+        for (auto& c : mission->runner->waiting_on("LocEnter")) {
+            std::string r = c.arg(0);
+            if (!iequals(c.arg(1), player.base) || iequals(r, mission_room()) || autoplay_rooms.count(to_lower(r))) continue;
+            if (iequals(r, "Bar")) set_tab(Tab::Bar);
+            else if (iequals(r, "Equipment")) set_tab(Tab::Equipment);
+            else if (iequals(r, "ShipDealer")) set_tab(Tab::Ships);
+            else if (iequals(r, "Trader")) set_tab(Tab::Commodities);
+            else {
+                leave_dealer();
+                base_room = r;
+            }
+            autoplay_doing = "goes to the " + r;
+            return;
+        }
+        for (const char* k : {"SpaceEnter", "InSpace", "PlayerLaunch", "LaunchComplete", "BaseExit", "SystemEnter"})
+            if (mission->runner->waiting_for(k)) {
+                dock_request(sys);
+                autoplay_doing = "launches";
+                return;
+            }
+    }
+
     // Formation (F4): fly beside the targeted ship, or leave formation. Missions watch it
     // (PlayerManeuver = formation, ship; leaving reports "inverse") and can switch it off.
     void formation_request() {
@@ -1588,6 +1628,8 @@ struct FlightSession {
     // Test runs (--autoplay): plays the player's part in space so a mission can be followed
     // without hands. Fights the nearest hostile ship close by, else flies to the objective.
     std::string autoplay_doing;
+    int autoplay_reform = -1;  // the formation leader left for a fight, to rejoin after it
+    float autoplay_leader_still = 0;  // seconds the formation leader has not moved
     void autoplay(const StarSystem& sys) {
         input.steer = {};
         firing = false;
@@ -1605,7 +1647,52 @@ struct FlightSession {
                         autoplay_doing = "docks at " + o->nickname;
                         return;
                     }
+        // A leader that has stopped for a while has nowhere to take us: go our own way.
+        if (nav == Nav::Formation) {
+            for (auto& n : npcs)
+                if (n.body.id == formation_leader) autoplay_leader_still = n.ship.vel.length() < 5 ? autoplay_leader_still + 1.f / 60 : 0;
+            if (autoplay_leader_still > 10) {
+                autoplay_leader_still = 0;
+                formation_request();
+                autoplay_doing = "leaves the formation";
+                return;
+            }
+        }
+        if (nav == Nav::Formation)  // a fight close by: leave the formation for it, and come back after
+            for (auto& n : npcs)
+                if (n.body.alive() && n.hostile && (n.body.pos - ship.pos).length() < 2000) {
+                    autoplay_reform = formation_leader;
+                    formation_request();
+                    break;
+                }
         if (nav != Nav::Free) return;
+        if (autoplay_reform >= 0) {
+            bool fight = false, lead_alive = false;
+            for (auto& n : npcs) {
+                fight = fight || (n.body.alive() && n.hostile && (n.body.pos - ship.pos).length() < 3000);
+                if (n.body.id == autoplay_reform && n.body.alive()) lead_alive = true;
+            }
+            if (!lead_alive) autoplay_reform = -1;
+            else if (!fight)
+                for (auto& n : npcs)
+                    if (n.body.id == autoplay_reform) {
+                        DVec3 to = n.ship.pos - ship.pos;
+                        if (to.length() < 2500) {
+                            contacts.push_back({n.name, {}, 0, false});
+                            target = static_cast<int>(contacts.size() - 1);
+                            formation_request();
+                            autoplay_reform = -1;
+                            autoplay_doing = "forms up again with " + n.name;
+                            return;
+                        }
+                        Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                        input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                        input.throttle = 1.f;
+                        input.cruise = to.length() > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                        autoplay_doing = "flies back to " + n.name;
+                        return;
+                    }
+        }
         const NpcShip* foe = nullptr;
         double best = 3000;
         for (auto& n : npcs)
@@ -2698,6 +2785,23 @@ struct FlightSession {
         }
         std::optional<DVec3> position(std::string_view o) const override { return fs.where(o); }
         std::string room() const override { return fs.mission_room(); }
+        std::vector<DVec3> positions_of(std::string_view label) const override {
+            std::vector<DVec3> out;
+            if (!fs.mission) return out;
+            for (auto& n : fs.npcs) {
+                if (!n.body.alive() || n.mission_name.empty()) continue;
+                bool in = iequals(n.mission_name, label);
+                for (auto& l : n.names) in = in || iequals(l, label);
+                if (in) out.push_back(n.ship.pos);
+            }
+            return out;
+        }
+        bool in_tradelane(std::string_view o) const override {
+            if (iequals(o, "Player")) return fs.nav == Nav::Lane;
+            for (auto& n : fs.npcs)
+                if (n.body.alive() && iequals(n.mission_name, o)) return n.lane.has_value();
+            return false;
+        }
         float health(std::string_view o) const override {
             if (iequals(o, "Player")) return fs.body.hull / std::max(1.f, fs.body.max_hull);
             if (auto* n = npc(o)) return n->body.hull / std::max(1.f, n->body.max_hull);
@@ -3262,7 +3366,10 @@ struct FlightSession {
                     if (!m.last_room.empty()) m.runner->event({T::LocExit, m.last_room, m.last_base, ""});
                     if (!room.empty()) m.runner->event({T::LocEnter, room, player.base, ""});
                 }
-                if (!iequals(sys, m.last_system) && !m.last_system.empty()) m.runner->event({T::SystemExit, m.last_system, "", ""});
+                if (!iequals(sys, m.last_system) && !m.last_system.empty()) {
+                    m.runner->event({T::SystemExit, m.last_system, "", ""});
+                    if (!docked()) m.runner->event({T::JumpInComplete, sys, "", ""});
+                }
             } else if (!room.empty()) {
                 m.runner->event({T::LocEnter, room, player.base, ""});  // starting in a room
             }
@@ -3442,6 +3549,10 @@ struct FlightSession {
                 // SetShipAndLoadout = ship, loadout; "none" takes the ship away (between
                 // scenes), which we leave to the next one given.
                 if (!iequals(a.arg(0), "none")) pending_ship = {a.arg(0), iequals(a.arg(1), "none") ? std::string() : a.arg(1)};
+            } else if (iequals(a.name, "LockManeuvers")) {
+                // LockManeuvers = true | false: the player's maneuvers (dock, formation) all off or on.
+                bool lock = a.args.empty() || a.args[0].as_bool();
+                for (const char* k : {"dock", "formation"}) lock ? (void)m.maneuver_off.insert(k) : (void)m.maneuver_off.erase(k);
             } else if (iequals(a.name, "EnableManeuver")) {
                 // EnableManeuver = Dock | formation | ..., true / false
                 if (!a.args.empty() && a.args.size() > 1 && !a.args[1].as_bool()) m.maneuver_off.insert(to_lower(a.arg(0)));
@@ -4313,7 +4424,8 @@ int run(const Args& args) {
                     advance_room(*fs, renderer, t);
                     if (args.autoplay) {
                         std::string was = fs->autoplay_doing;
-                        fs->autoplay(renderer.system());
+                        if (fs->docked()) fs->autoplay_docked(renderer.system(), 1.f / 60);
+                        else fs->autoplay(renderer.system());
                         if (fs->autoplay_doing != was)
                             SDL_Log("autoplay at %.0f s: %s (at %.0f, %.0f, %.0f)", t, fs->autoplay_doing.empty() ? "idle" : fs->autoplay_doing.c_str(),
                                     fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);

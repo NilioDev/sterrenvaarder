@@ -1176,6 +1176,22 @@ static void test_mission_start() {
     pr.event({game::MissionEvent::Type::PopUpDialog, "close", "", ""});
     pr.update(0.1f, dw, act);
     CHECK(pings == 2 && pr.waiting_on("CharSelect").empty());
+    // WatchTrigger: ACTIVE while switched on, COMPLETE once it has fired.
+    MissionScript ws = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_target\nInitState = ACTIVE\nCnd_CommComplete = line_a\nAct_Ping = x\n"
+        "[Trigger]\nnickname = t_on\nInitState = ACTIVE\nCnd_WatchTrigger = t_target, ACTIVE\nAct_Pong = x\n"
+        "[Trigger]\nnickname = t_done\nInitState = ACTIVE\nCnd_WatchTrigger = t_target, COMPLETE\nAct_Ping = x\n"));
+    game::MissionRunner wr(ws);
+    int pongs = 0;
+    pings = 0;
+    auto act2 = [&](const MsnCommand& c, const MsnTrigger&) { pings += c.name == "Ping"; pongs += c.name == "Pong"; };
+    wr.start();
+    wr.update(0.1f, dw, act2);
+    CHECK(pongs == 1 && pings == 0);
+    wr.event({game::MissionEvent::Type::CommComplete, "line_a", "", ""});
+    wr.update(0.1f, dw, act2);
+    wr.update(0.1f, dw, act2);
+    CHECK(pings == 2);
     // Moving away from a point (TICK_AWAY) and asking for a maneuver.
     MissionScript ts = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_away\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 50, TICK_AWAY\nAct_Ping = x\n"
