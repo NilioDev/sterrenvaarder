@@ -834,9 +834,11 @@ struct FlightSession {
         SoundDb db;
         std::string system;
         SystemMusic tracks;
-        std::map<std::string, std::shared_ptr<Sound>> decoded;  // this system's tracks, by nickname
+        std::map<std::string, std::shared_ptr<Sound>> decoded;  // tracks and ambience of this system, by nickname
         std::string playing;                                     // nickname of the track now on
         game::Mixer::Handle handle = 0;
+        std::string ambient;                 // nickname of the room ambience now looping
+        game::Mixer::Handle ambient_handle = 0;
         game::MusicMood mood = game::MusicMood::Space;
         float since_combat = 1e9f;
     } music;
@@ -1771,7 +1773,8 @@ struct FlightSession {
         if (!m.loaded) {
             m.loaded = true;
             try {
-                if (vfs->exists("audio/music.ini")) m.db.add(parse_ini(vfs->read("audio/music.ini")));
+                for (const char* f : {"audio/music.ini", "audio/ambience_sounds.ini", "audio/gf_sounds.ini"})
+                    if (vfs->exists(f)) m.db.add(parse_ini(vfs->read(f)));
             } catch (const std::exception& e) {
                 SDL_Log("music list: %s", e.what());
             }
@@ -1794,31 +1797,61 @@ struct FlightSession {
         in.since_combat = m.since_combat;
         for (auto& n : npcs)
             if (n.hostile && n.mesh) in.nearest_hostile = std::min(in.nearest_hostile, (n.ship.pos - ship.pos).length());
-        m.mood = game::choose_mood(in, m.mood);
-        const std::string* want = &m.tracks.space;
-        if (m.mood == game::MusicMood::Danger && !m.tracks.danger.empty()) want = &m.tracks.danger;
-        if (m.mood == game::MusicMood::Battle && !m.tracks.battle.empty()) want = &m.tracks.battle;
-        if (*want == m.playing) return;
+        // Docked: the room's own music and ambience. A room without music keeps what plays.
+        const RoomInfo* info = nullptr;
+        if (docked() && !iequals(room.base, player.base)) room.load_base(*vfs, player.base);
+        if (docked() && room.rooms) {
+            info = room.rooms->room(room_view_name());
+            if (!info) info = room.rooms->room(room.rooms->start_room);  // as the room view falls back
+        }
+        const std::string* want = &m.playing;
+        const char* what = "room";
+        if (!docked()) {
+            m.mood = game::choose_mood(in, m.mood);
+            want = &m.tracks.space;
+            what = "space";
+            if (m.mood == game::MusicMood::Danger && !m.tracks.danger.empty()) want = &m.tracks.danger, what = "danger";
+            if (m.mood == game::MusicMood::Battle && !m.tracks.battle.empty()) want = &m.tracks.battle, what = "battle";
+        } else {
+            m.mood = game::MusicMood::Space;
+            if (info && !info->music.empty()) want = &info->music;
+        }
+        const std::string& amb = info ? info->ambient : std::string();
+        if (!iequals(amb, m.ambient)) {
+            if (m.ambient_handle) mixer->fade(m.ambient_handle, 0, 1.f, true);
+            m.ambient_handle = 0;
+            m.ambient = amb;
+            const SoundDef* d = amb.empty() ? nullptr : m.db.find(amb);
+            if (auto snd = d ? sound(*d) : nullptr) {
+                m.ambient_handle = mixer->play(snd, 0, true);
+                mixer->fade(m.ambient_handle, d->gain(), 1.f);
+                SDL_Log("ambience: room loop (%.0f s)", snd->seconds());
+            }
+        }
+        if (iequals(*want, m.playing)) return;
         // Cross-fade: the old track fades out while the new one fades in.
         if (m.handle) mixer->fade(m.handle, 0, 2.f, true);
         m.handle = 0;
         m.playing = *want;
         const SoundDef* d = want->empty() ? nullptr : m.db.find(*want);
-        if (!d) return;
-        auto& snd = m.decoded[to_lower(*want)];
-        if (!snd) {
-            std::string path = CharacterData::normal_path(d->file);
-            try {
-                if (vfs->exists(path)) snd = std::make_shared<Sound>(decode_wav(vfs->read(path)));
-            } catch (const std::exception& e) {
-                SDL_Log("music: %s", e.what());
-            }
-        }
+        auto snd = d ? sound(*d) : nullptr;
         if (!snd) return;
         m.handle = mixer->play(snd, 0, true);
         mixer->fade(m.handle, d->gain(), 2.f);
-        SDL_Log("music: %s track (%.0f s)", m.mood == game::MusicMood::Battle ? "battle" : m.mood == game::MusicMood::Danger ? "danger" : "space",
-                snd->seconds());
+        SDL_Log("music: %s track (%.0f s)", what, snd->seconds());
+    }
+    // A sound file decoded once and kept (music, ambience).
+    std::shared_ptr<Sound> sound(const SoundDef& d) {
+        auto& snd = music.decoded[to_lower(d.nickname)];
+        if (!snd) {
+            std::string path = CharacterData::normal_path(d.file);
+            try {
+                if (vfs->exists(path)) snd = std::make_shared<Sound>(decode_wav(vfs->read(path)));
+            } catch (const std::exception& e) {
+                SDL_Log("sound %s: %s", d.nickname.c_str(), e.what());
+            }
+        }
+        return snd;
     }
     void update_traffic(float dt) {
         if (!vfs || !universe || !rend || !db) return;

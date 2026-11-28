@@ -235,6 +235,9 @@ std::optional<BaseRooms> BaseRooms::load(const Vfs& vfs, std::string_view base_f
                 r.camera = str(rs, "name");
             } else if (iequals(rs.name, "ForSaleShipPlacement")) {
                 if (auto n = str(rs, "name"); !n.empty()) r.ship_placements.push_back(n);
+            } else if (iequals(rs.name, "Room_Sound")) {
+                r.music = str(rs, "music");
+                r.ambient = str(rs, "ambient");
             } else if (iequals(rs.name, "Hotspot")) {
                 r.hotspots.push_back({str(rs, "name"), str(rs, "behavior"), str(rs, "room_switch")});
             }
