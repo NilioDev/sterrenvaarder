@@ -55,6 +55,21 @@ struct Fuse {
     std::vector<Start> starts;
 };
 
+// Flying wreckage (fx/explosions.ini [Debris]): how long a piece lasts, the trail it leaves
+// and the effect it ends with.
+struct DebrisType {
+    std::string nickname;
+    float lifetime_min = 1, lifetime_max = 3;
+    std::string trail, explosion;
+};
+
+// An [explosion]: the effect it plays and the debris its ship breaks into.
+struct ExplosionArch {
+    std::string nickname, effect;
+    std::vector<std::pair<std::string, float>> debris_types;  // nickname, weight
+    float debris_impulse = 0;
+};
+
 class EffectDb {
 public:
     EffectDb() = default;
@@ -67,6 +82,8 @@ public:
     const BeamSpear* beam(std::string_view name) const;
     // The effect an [explosion] (fx/explosions.ini, a ship's explosion_arch) plays, or "".
     const std::string& explosion_effect(std::string_view explosion) const;
+    const ExplosionArch* explosion(std::string_view nickname) const;
+    const DebrisType* debris(std::string_view nickname) const;
     // Reads the fuse files (freelancer.ini fuses =).
     void add_fuses(const std::vector<std::string>& files);
     const Fuse* fuse(std::string_view name) const;
@@ -78,7 +95,8 @@ private:
     std::unordered_map<std::string, std::string> effect_to_vis_;  // [Effect] -> vis_effect
     std::unordered_map<std::string, std::string> effect_to_beam_;  // [Effect] -> vis_beam
     std::unordered_map<std::string, BeamSpear> beams_;
-    std::unordered_map<std::string, std::string> explosion_effect_;
+    std::unordered_map<std::string, ExplosionArch> explosions_;
+    std::unordered_map<std::string, DebrisType> debris_;
     std::unordered_map<std::string, Fuse> fuses_;
     mutable std::unordered_map<std::string, std::shared_ptr<const AleLibrary>> libs_;
 };

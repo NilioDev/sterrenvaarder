@@ -110,7 +110,9 @@ are our own. Ships die with the effect their `explosion_arch` names in `fx/explo
 and the damage fuses from `shiparch.ini` (`fuse = name, delay, hit points`, defined in the
 `fx/fuse*.ini` files) start sparks, fire and smoke at the ship's hardpoints as the hull
 drops. Animated textures (frame rects in the `.txm`) play over each particle's life.
-Fields, engine trails and flying debris are not in yet. `--npc-die <seconds>` destroys the
+A destroyed ship breaks into its model parts: they fly apart with the explosion's
+`debris_impulse`, tumble, trail the smoke of a `debris_type` picked by weight and end in that
+`[Debris]` entry's own explosion after its lifetime. Fields are not in yet. `--npc-die <seconds>` destroys the
 test NPCs at that moment in a screenshot run.
 
 ## Trading and saves (phase 4)

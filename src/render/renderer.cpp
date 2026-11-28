@@ -780,6 +780,7 @@ struct Renderer::Impl {
         DVec3 pos;
         Mat4 rotation;
         std::vector<float> lod_ranges;
+        int only_part = -1;  // >= 0: draw just this part, centred on pos
     };
     std::vector<DynamicInstance> dynamic;
     MeshLibrary shared_meshes;
@@ -1126,10 +1127,14 @@ struct Renderer::Impl {
             float dist = static_cast<float>(rel.length());
             Mat4 obj_world =
                 Mat4::translate(static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z)) * inst.rotation;
-            for (auto& part : inst.model->parts) {
+            for (std::size_t pi = 0; pi < inst.model->parts.size(); ++pi) {
+                if (inst.only_part >= 0 && pi != static_cast<std::size_t>(inst.only_part)) continue;
+                auto& part = inst.model->parts[pi];
                 int lod = pick_lod(inst.lod_ranges, part, dist, s.lod_scale);
                 if (lod < 0) continue;
                 Mat4 world = obj_world * part.local;
+                if (inst.only_part >= 0)  // the part's own origin sits at pos
+                    world = obj_world * Mat4::translate(-part.local.at(0, 3), -part.local.at(1, 3), -part.local.at(2, 3)) * part.local;
                 for (auto& dr : part.lods[lod].draws) {
                     if (inst.model->materials[dr.material].blend == Blend::Opaque)
                         draw_range(inst.model, dr, world, false, Blend::Opaque, false);
@@ -1456,6 +1461,22 @@ void Renderer::draw_sprite(DVec3 pos, float size, float rotation, Color3 color, 
 void Renderer::draw_hud_model(ModelHandle m, float px, float py, float ppu, HudColor tint) {
     if (!m) return;
     impl_->hud_models.push_back({static_cast<GpuModel*>(m.p), px, py, ppu, tint});
+}
+
+int Renderer::model_part_count(ModelHandle m) const {
+    return m ? static_cast<int>(static_cast<GpuModel*>(m.p)->parts.size()) : 0;
+}
+
+Vec3 Renderer::model_part_offset(ModelHandle m, int part) const {
+    if (!m || part < 0 || part >= model_part_count(m)) return {};
+    const Mat4& l = static_cast<GpuModel*>(m.p)->parts[static_cast<std::size_t>(part)].local;
+    return {l.at(0, 3), l.at(1, 3), l.at(2, 3)};
+}
+
+void Renderer::draw_model_part(ModelHandle m, int part, DVec3 pos, const Mat4& rotation,
+                               const std::vector<float>& lod_ranges) {
+    if (!m || part < 0 || part >= model_part_count(m)) return;
+    impl_->dynamic.push_back({static_cast<GpuModel*>(m.p), pos, rotation, lod_ranges, part});
 }
 
 void Renderer::draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges) {

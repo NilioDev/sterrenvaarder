@@ -52,8 +52,24 @@ EffectDb::EffectDb(const Vfs& vfs, const std::vector<std::string>& files) : vfs_
                 std::string vb = first(sec, "vis_beam");
                 if (!vb.empty()) effect_to_beam_[to_lower(nick)] = to_lower(vb);
             } else if (iequals(sec.name, "explosion")) {
-                std::string fx = first(sec, "effect");
-                if (!fx.empty()) explosion_effect_[to_lower(nick)] = fx;
+                ExplosionArch ex;
+                ex.nickname = nick;
+                ex.effect = first(sec, "effect");
+                for (auto* d : sec.find_all("debris_type"))
+                    if (!d->values.empty())
+                        ex.debris_types.emplace_back(d->values[0].as_string(), d->values.size() > 1 ? d->values[1].as_float() : 1.f);
+                ex.debris_impulse = number(sec, "debris_impulse", 0);
+                explosions_[to_lower(nick)] = std::move(ex);
+            } else if (iequals(sec.name, "Debris")) {
+                DebrisType d;
+                d.nickname = nick;
+                if (auto* e = sec.find("lifetime"); e && e->values.size() >= 2) {
+                    d.lifetime_min = e->values[0].as_float();
+                    d.lifetime_max = e->values[1].as_float();
+                }
+                d.trail = first(sec, "trail");
+                d.explosion = first(sec, "explosion");
+                debris_[to_lower(nick)] = std::move(d);
             } else if (iequals(sec.name, "BeamSpear") || iequals(sec.name, "BeamBolt")) {
                 BeamSpear b;
                 b.nickname = nick;
@@ -115,8 +131,18 @@ ResolvedEffect EffectDb::resolve(std::string_view name) const {
 
 const std::string& EffectDb::explosion_effect(std::string_view explosion) const {
     static const std::string none;
-    auto it = explosion_effect_.find(to_lower(std::string(explosion)));
-    return it == explosion_effect_.end() ? none : it->second;
+    const ExplosionArch* ex = this->explosion(explosion);
+    return ex ? ex->effect : none;
+}
+
+const ExplosionArch* EffectDb::explosion(std::string_view nickname) const {
+    auto it = explosions_.find(to_lower(std::string(nickname)));
+    return it == explosions_.end() ? nullptr : &it->second;
+}
+
+const DebrisType* EffectDb::debris(std::string_view nickname) const {
+    auto it = debris_.find(to_lower(std::string(nickname)));
+    return it == debris_.end() ? nullptr : &it->second;
 }
 
 void EffectDb::add_fuses(const std::vector<std::string>& files) {

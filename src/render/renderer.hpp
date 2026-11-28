@@ -73,6 +73,11 @@ public:
     void add_mesh_library(const std::string& path);
     // Queues one instance for the next render() call. lod_ranges as in the archetype.
     void draw_model(ModelHandle m, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges);
+    // A model's parts (a ship's wings, hull, ...) one at a time, for wreckage: the part's own
+    // origin is placed at pos, turned by rotation. The offset is where the part sits in the model.
+    int model_part_count(ModelHandle m) const;
+    Vec3 model_part_offset(ModelHandle m, int part) const;
+    void draw_model_part(ModelHandle m, int part, DVec3 pos, const Mat4& rotation, const std::vector<float>& lod_ranges);
     // A camera-facing additive glow for the next render() call (weapon bolts, flashes,
     // explosions). Size is the half-width in metres; intensity scales HDR brightness.
     void draw_glow(DVec3 pos, float size, Color3 color, float intensity);
