@@ -188,6 +188,10 @@ script and lists the conditions the runner doesn't evaluate yet.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
+## Navigation map
+
+`M` opens the map of the system you are in, seen from above on an 8 x 8 grid (A-H across, 1-8 down). It shows the stars, planets, bases, jump gates and holes with their names, the trade lanes, where you are and which way you're heading, and the mission waypoint. `--map` opens it for screenshot runs.
+
 ## Random traffic (phase 6e, in progress)
 
 Systems fill up with traffic from their own population zones, as in the original:
