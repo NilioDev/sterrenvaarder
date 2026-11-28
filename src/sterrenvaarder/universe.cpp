@@ -47,6 +47,10 @@ Universe::Universe(const Vfs& vfs) : vfs_(vfs) {
         if (auto l = sec.find("LODranges"))
             for (auto& v : l->values) a.lod_ranges.push_back(v.as_float());
         a.solar_radius = num(sec, "solar_radius");
+        if (auto d = sec.find("destructible"); d && !d->values.empty()) a.destructible = d->values[0].as_bool();
+        a.hit_pts = num(sec, "hit_pts");
+        a.loadout = str(sec, "loadout");
+        a.explosion_arch = str(sec, "explosion_arch");
         solars_[to_lower(a.nickname)] = std::move(a);
     }
     if (vfs.exists("solar/stararch.ini")) {

@@ -885,11 +885,22 @@ struct FlightSession {
         Quat orient;
         SystemObject obj;  // to target and dock at it like a station (its base, if any)
         std::string system;  // empty: wherever the player is
+        // Destructible ones (weapon platforms): a hull to shoot at, guns of their own.
+        bool destructible = false;
+        game::Combatant body;
+        std::vector<game::Gun> guns;
+        std::string faction;
+        std::vector<std::string> names;  // nickname and labels (for SetVibe)
+        float burst = 0;
+        bool alive() const { return !destructible || body.alive(); }
     };
     bool solar_here(const MissionSolar& m) const {
         return m.system.empty() || !rend || iequals(m.system, rend->system().nickname);
     }
     std::vector<MissionSolar> msn_solars;
+    bool solar_hostile(const MissionSolar& ms) const {
+        return !ms.faction.empty() && attitude_of(player.rep_with(ms.faction)) == Attitude::Hostile;
+    }
     // A system object, or a solar the mission has put into space.
     const SystemObject* object_named(const StarSystem& sys, std::string_view n) const {
         if (auto* o = game::find_object(sys, n)) return o;
@@ -1698,6 +1709,31 @@ struct FlightSession {
         for (auto& n : npcs)
             if (n.body.alive() && n.hostile)
                 if (double d = (n.body.pos - ship.pos).length(); d < best) best = d, foe = &n;
+        // Solars: those the mission wants destroyed (by nickname or label), else any hostile one.
+        auto wanted = [&](const MissionSolar& ms) {
+            if (!mission || !mission->runner) return false;
+            for (auto& c : mission->runner->waiting_on("Destroyed"))
+                for (auto& nm : ms.names)
+                    if (iequals(nm, c.arg(0))) return true;
+            return false;
+        };
+        bool any_wanted = false;
+        for (auto& ms : msn_solars) any_wanted = any_wanted || (ms.destructible && ms.body.alive() && solar_here(ms) && wanted(ms));
+        if (!foe)
+            for (auto& ms : msn_solars)
+                if (ms.destructible && ms.body.alive() && solar_here(ms) && (any_wanted ? wanted(ms) : solar_hostile(ms))) {
+                    DVec3 to = ms.pos - ship.pos;
+                    double d = to.length();
+                    if (d > 4000) continue;
+                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                    input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                    input.cruise = false;
+                    input.throttle = d > 700 ? 1.f : 0.f;
+                    aim_dir = dir;
+                    firing = game::dot(ship.orient.forward(), dir) > 0.97f && d < 900;
+                    autoplay_doing = "attacks " + ms.nickname;
+                    return;
+                }
         if (foe) {
             DVec3 to = foe->body.pos - ship.pos;
             Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
@@ -1946,6 +1982,19 @@ struct FlightSession {
             double d = (o.ship.pos - n.ship.pos).length();
             if (d > kNpcScanRange || (best && d >= best->dist) || !npc_enemies(n, o)) continue;
             best = Foe{{o.ship.pos, o.ship.vel, o.ship.orient}, o.body.id, d};
+        }
+        for (auto& ms : msn_solars) {
+            if (!ms.destructible || !ms.body.alive() || !solar_here(ms)) continue;
+            double d = (ms.pos - n.ship.pos).length();
+            if (d > kNpcScanRange || (best && d >= best->dist)) continue;
+            bool hate = false;
+            if (auto v = vibes.between(n.names, ms.names)) hate = attitude_of(*v) == Attitude::Hostile;
+            else if (factions && !n.faction.empty() && !ms.faction.empty())
+                if (auto* f = factions->faction(n.faction)) {
+                    auto it = f->rep.find(to_lower(ms.faction));
+                    hate = it != f->rep.end() && attitude_of(it->second) == Attitude::Hostile;
+                }
+            if (hate) best = Foe{{ms.pos, {}, ms.orient}, ms.body.id, d};
         }
         return best;
     }
@@ -2207,6 +2256,26 @@ struct FlightSession {
         body.update(dt);
         std::vector<game::Combatant*> targets{&body};
         for (auto& n : npcs) targets.push_back(&n.body);
+        // Weapon platforms and other destructible solars: fire at a hostile player in range.
+        for (auto& ms : msn_solars) {
+            if (!ms.destructible || !ms.body.alive() || !solar_here(ms)) continue;
+            targets.push_back(&ms.body);
+            world.update_guns(ms.guns, dt);
+            ms.burst = ms.burst > 0 ? ms.burst - dt : ms.burst + dt;
+            if (ms.burst <= 0 && ms.burst > -dt) ms.burst = -1.5f;
+            else if (ms.burst < 0 && ms.burst + dt >= 0) ms.burst = 1.0f;
+            if (ms.guns.empty() || ms.burst <= 0 || !body.alive() || !solar_hostile(ms)) continue;
+            float speed = ms.guns[0].arch ? ms.guns[0].arch->muzzle_velocity : 600.f;
+            float range = speed * (ms.guns[0].munition ? ms.guns[0].munition->lifetime : 1.f);
+            DVec3 to = ship.pos - ms.pos;
+            double dist = to.length();
+            if (dist > range * 0.9) continue;
+            DVec3 lead = to + ship.vel * (dist / speed);
+            game::ShipState st;
+            st.pos = ms.pos;
+            st.orient = ms.orient;
+            fire_guns(ms.guns, ms.body.id, st, render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)}));
+        }
         music.since_combat += dt;
         world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
             // Report the hit to the mission (ProjHit = ship hit, shooter).
@@ -2215,6 +2284,8 @@ struct FlightSession {
                     if (id == body.id) return "Player";
                     for (auto& nn : npcs)
                         if (nn.body.id == id) return nn.mission_name;
+                    for (auto& ms : msn_solars)
+                        if (ms.destructible && ms.body.id == id) return ms.nickname;
                     return {};
                 };
                 std::string hit = name_of(t.id), by = name_of(p.owner);
@@ -2265,6 +2336,14 @@ struct FlightSession {
                 if (mission && mission->runner && !n.mission_name.empty())
                     mission->runner->event({game::MissionEvent::Type::Destroyed, n.mission_name, "", ""});
                 n.mesh = {};
+            }
+        for (auto& ms : msn_solars)
+            if (ms.destructible && !ms.body.alive() && ms.mesh) {
+                const std::string& boom = fxdb && ms.arch ? fxdb->explosion_effect(ms.arch->explosion_arch) : std::string();
+                if (!boom.empty() && fxdb->vis(boom)) spawn_fx(boom, ms.pos, {}, ms.orient);
+                else explosions.push_back({ms.pos, 0, 120});
+                ms.mesh = {};
+                if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::Destroyed, ms.nickname, "", ""});
             }
         for (auto& e : explosions) e.age += dt;
         std::erase_if(explosions, [](const Explosion& e) { return e.age > 2.0f; });
@@ -2968,6 +3047,10 @@ struct FlightSession {
             if (iequals(sh.nickname, f->formation)) shape = &sh;
         DVec3 pos{f->position[0], f->position[1], f->position[2]};
         Quat q = Quat{f->orientation[0], f->orientation[1], f->orientation[2], f->orientation[3]}.normalized();
+        if (auto r = rel_spot(f->rel_pos)) {
+            pos = r->first;
+            q = r->second;
+        }
         if (a.args.size() >= 4) pos = {a.num(1), a.num(2), a.num(3)};
         if (a.args.size() >= 8) q = Quat{a.num(4), a.num(5), a.num(6), a.num(7)}.normalized();
         std::string leader;
@@ -2998,6 +3081,25 @@ struct FlightSession {
         }
     }
 
+    // rel_pos: the spot that far from the object at that angle around its heading, facing it.
+    std::optional<std::pair<DVec3, Quat>> rel_spot(const MsnRelPos& r) const {
+        if (r.object.empty()) return std::nullopt;
+        DVec3 anchor;
+        Quat heading{};
+        if (iequals(r.object, "Player")) {
+            anchor = ship.pos;
+            heading = ship.orient;
+        } else if (auto p = where(r.object)) {
+            anchor = *p;
+        } else {
+            return std::nullopt;
+        }
+        Quat turn = Quat::axis_angle({0, 1, 0}, r.angle * 3.14159265f / 180.f);
+        Vec3 dir = (heading * turn).rotate({0, 0, -1});
+        DVec3 spot = anchor + game::to_d(dir) * static_cast<double>(r.distance);
+        return std::pair{spot, Quat::look(Vec3{-dir.x, -dir.y, -dir.z}, heading.rotate({0, 1, 0}))};
+    }
+
     void mission_spawn(const std::string& name, std::optional<DVec3> at = std::nullopt, std::optional<Quat> facing = std::nullopt) {
         auto& m = *mission;
         const MsnShipDef* def = m.script.ship(name);
@@ -3016,6 +3118,11 @@ struct FlightSession {
         bool hostile = factions && !npc->affiliation.empty() && attitude_of(player.rep_with(npc->affiliation)) == Attitude::Hostile;
         DVec3 pos = at ? *at : DVec3{def->position[0], def->position[1], def->position[2]};
         Quat q = facing ? *facing : Quat{def->orientation[0], def->orientation[1], def->orientation[2], def->orientation[3]};
+        if (!at)
+            if (auto r = rel_spot(def->rel_pos)) {
+                pos = r->first;
+                if (!facing) q = r->second;
+            }
         auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, npc_display_name(npc), pos, q.normalized(), hostile);
         n.mission_name = def->nickname;
         n.faction = npc->affiliation;
@@ -3089,6 +3196,25 @@ struct FlightSession {
                 ms.obj.pos = {d.position[0], d.position[1], d.position[2]};
                 ms.obj.rotate_deg = game::euler_degrees(ms.orient);
                 ms.system = d.system;
+                ms.faction = d.faction;
+                ms.names = {d.nickname};
+                for (auto& l : d.labels) ms.names.push_back(l);
+                if (sa->destructible && sa->hit_pts > 0) {
+                    ms.destructible = true;
+                    ms.body.id = next_body_id++;
+                    ms.body.pos = ms.pos;
+                    ms.body.hull = ms.body.max_hull = sa->hit_pts;
+                    ms.body.radius = std::max(20.f, sa->solar_radius * 0.3f);  // its hit sphere (our estimate)
+                    if (db)
+                        if (const Loadout* lo = db->loadout(d.loadout.empty() ? sa->loadout : d.loadout))
+                            for (auto& e : lo->equip)
+                                if (const GunArchetype* g = db->gun(e.item)) {
+                                    game::Gun gun;
+                                    gun.arch = g;
+                                    gun.munition = db->munition(g->projectile);
+                                    ms.guns.push_back(gun);
+                                }
+                }
                 msn_solars.push_back(std::move(ms));
             }
     }
@@ -3099,7 +3225,7 @@ struct FlightSession {
         for (auto& n : npcs)
             if (n.body.alive() && (iequals(n.mission_name, o) || iequals(n.name, o))) return n.ship.pos;
         for (auto& m : msn_solars)
-            if (solar_here(m) && iequals(m.nickname, o)) return m.pos;
+            if (solar_here(m) && m.alive() && iequals(m.nickname, o)) return m.pos;
         if (rend)
             if (auto* so = game::find_object(rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
         return std::nullopt;
@@ -3678,10 +3804,14 @@ struct FlightSession {
             contacts.push_back(std::move(c));
         }
         for (auto& m : msn_solars) {
-            if (!solar_here(m)) continue;
+            if (!solar_here(m) || !m.alive()) continue;
             game::HudContact c;
             c.name = m.nickname;
             c.label = m.name;
+            if (m.destructible) {
+                c.hostile = solar_hostile(m);
+                c.hull = m.body.hull / std::max(1.f, m.body.max_hull);
+            }
             c.pos = m.pos;
             c.radius = m.arch ? std::max(50.f, m.arch->solar_radius) : 100.f;
             c.marked = is_marked(m.nickname);
