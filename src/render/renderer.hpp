@@ -13,6 +13,7 @@
 #include "render/hud_batch.hpp"
 #include "render/mat.hpp"
 #include "sterrenvaarder/model.hpp"
+#include "sterrenvaarder/postfx.hpp"
 #include "sterrenvaarder/universe.hpp"
 #include "sterrenvaarder/vfs.hpp"
 
@@ -43,6 +44,7 @@ struct RenderSettings {
     float bloom = 0.06f;
     float normal_strength = 1.0f;  // derived normal maps (0 = off)
     float lod_scale = 1.0f;        // 1 = original draw distances; > 1 extends them
+    PostFx post;                   // optional look (postfx.ini); off by default
 };
 
 // Lighting for an interior scene (base rooms): replaces the star system's sky, objects

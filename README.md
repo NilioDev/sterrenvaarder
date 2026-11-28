@@ -83,6 +83,14 @@ anchor, offset, size and visibility per panel. See
 `sterrenvaarder/hud.ini` in the data layers (so a mod can ship one), then from
 `--hud-config <file>`.
 
+An optional post-processing look (in the spirit of ReShade) sits on top: extra bloom,
+sharpening, saturation, vibrance, contrast, brightness, colour temperature, vignette, film
+grain and chromatic aberration, with built-in presets (`vivid`, `cinematic`, `crisp`) and
+your own `[Preset]` sections. It is off by default, so the game looks like the original
+unless you turn it on. See [docs/postfx.ini.example](docs/postfx.ini.example); it is read
+from `sterrenvaarder/postfx.ini` in the data layers, then `--postfx <file>`, and
+`--postfx-preset <name>` picks a preset directly. The HUD is never affected.
+
 ```sh
 ./build/sterrenvaarder --data /path/to/DATA --width 3440 --height 1440 \
     --screenshot fly.png --sim 4 --cursor 0.25,-0.05   # scripted flight, then a screenshot

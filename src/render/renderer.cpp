@@ -1302,7 +1302,12 @@ struct Renderer::Impl {
         }
 
         // ---- tonemap, upscale, sharpen
-        float tu[4] = {s.exposure, bloom.empty() ? 0.f : s.bloom, 0, 0};
+        const PostFx& pf = s.post;
+        float glow = bloom.empty() ? 0.f : s.bloom + (pf.enabled ? pf.bloom : 0.f);
+        float tu[16] = {s.exposure, glow, static_cast<float>(std::fmod(time, 1000.0)), pf.enabled ? 1.f : 0.f,
+                        pf.saturation, pf.vibrance, pf.contrast, pf.brightness,
+                        pf.temperature, pf.vignette, pf.grain, pf.chromatic,
+                        static_cast<float>(rw) / std::max(1u, rh), 0, 0, 0};
         fullscreen(cmd, ldr, tonemap, {hdr, bloom.empty() ? hdr : bloom[0]}, tu, sizeof tu);
         SDL_GPUTexture* final_src = ldr;
         if (upscaled) {
@@ -1310,7 +1315,8 @@ struct Renderer::Impl {
             fullscreen(cmd, upscaled, upscale, {ldr}, uu, sizeof uu);
             final_src = upscaled;
         }
-        float su[4] = {1.f / out_w, 1.f / out_h, s.sharpness, 0};
+        float sharp = std::clamp(s.sharpness + (pf.enabled ? pf.sharpen : 0.f), 0.f, 1.f);
+        float su[4] = {1.f / out_w, 1.f / out_h, sharp, 0};
         fullscreen(cmd, target, sharpen, {final_src}, su, sizeof su);
 
         // ---- HUD, at output resolution

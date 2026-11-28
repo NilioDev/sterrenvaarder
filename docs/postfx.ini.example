@@ -1,0 +1,28 @@
+; Sterrenvaarder post-processing look ("ReShade-like"), optional and off by default.
+; Copy to <your mod or data folder>/sterrenvaarder/postfx.ini, or pass it with --postfx.
+; --postfx-preset <name> picks a built-in look from the command line.
+; With enabled = false (or no file at all) you see the original look.
+
+[PostFx]
+enabled = false
+preset = original     ; original, vivid, cinematic, crisp, or the nickname of a [Preset] below
+                      ; any key below here overrides the preset's value
+;bloom = 0.0          ; extra glow on top of the engine's own (0..1)
+;sharpen = 0.0        ; extra sharpening (0..1)
+;saturation = 1.0     ; 1 = unchanged, 0 = grey
+;vibrance = 0.0       ; lifts dull colours more than vivid ones (-1..1)
+;contrast = 1.0       ; 1 = unchanged
+;brightness = 0.0     ; -0.5..0.5
+;temperature = 0.0    ; < 0 cooler, > 0 warmer (-1..1)
+;vignette = 0.0       ; darker corners (0..1)
+;grain = 0.0          ; film grain (0..1)
+;chromatic = 0.0      ; colour fringes toward the screen edges (0..1)
+
+; Your own look: name it and set preset = <nickname> above.
+[Preset]
+nickname = deep_space
+saturation = 1.1
+contrast = 1.1
+temperature = -0.15
+vignette = 0.25
+bloom = 0.1
