@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "sterrenvaarder/math.hpp"
+#include "sterrenvaarder/model.hpp"
 #include "sterrenvaarder/utf.hpp"
 
 namespace sterrenvaarder {
@@ -33,13 +34,14 @@ struct DfmBone {
     std::string name;        // part name without "Part_" (e.g. "L Palm"); empty for bones without a part
     std::string node;        // its .3db node
     int index = 0;           // its position among the .3db nodes: the id the skin chains use
-    std::array<float, 12> to_root{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};  // "Bone to root" as stored
+    std::array<float, 12> to_root{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};  // "Bone to root" as stored (it maps root space into the bone)
 };
 
 struct DfmModel {
     std::vector<float> fractions;  // detail of each level, 1 = full
     std::vector<DfmMesh> levels;   // level 0 has the most detail
     std::vector<DfmBone> bones;
+    std::vector<Joint> joints;  // Cmpnd/Cons: how the bones hang together (by part name)
     std::string skeleton;
     float scale = 1;
     static bool is_dfm(const UtfNode& root);

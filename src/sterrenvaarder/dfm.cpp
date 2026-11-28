@@ -93,6 +93,7 @@ DfmModel DfmModel::load(const UtfNode& root) {
     // Parts give the bones their names ("Part_L Palm" -> "L Palm").
     if (const UtfNode* cmp = root.child("Cmpnd")) {
         if (auto* s = cmp->child("Scale"); s && s->data.size() >= 4) d.scale = s->as<float>();
+        if (auto* cons = cmp->child("Cons")) load_joints(*cons, d.joints);
         for (auto& p : cmp->children) {
             const UtfNode* file = p.leaf ? nullptr : p.child("File name");
             if (!file) continue;

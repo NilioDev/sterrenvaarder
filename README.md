@@ -200,7 +200,9 @@ Animations (`.anm`) are read by `AnmLibrary`. Each script has joint maps (parent
 
 `CharacterParts` reads `characters/bodyparts.ini` and `characters/costumes.ini`. Bodyparts gives the mesh of each body, head, hand and accessory; a `[Skeleton]` section sets the sex of the parts after it, and accessories also name the hardpoints they attach to. A costume puts a head, body, two hands and its accessories together. The corpus test checks that every part a costume names exists and has its mesh in the data.
 
-The renderer draws a character mesh in its bind pose for now. Animation and the scenes come next. The corpus test reads all character meshes in the data and checks their strips and skin.
+Skinning (`game/skin`) poses the skeleton and moves the mesh with it. `pose_bones` walks the joints of `Cmpnd/Cons` from the root down. Each joint is offset by its origin and turned by the animation's rotation at that time, with keys blended spherically; without one it keeps its rest rotation. `skin_points` then moves every point by its bones, weighted. Despite its name, the stored "Bone to root" maps root space into the bone (its inverse is where the bone sits), and body joints store no rotation of their own, so the rest rotations come from those stored transforms. The corpus test checks that the joints rebuild every stored bind pose; 201 of the 204 meshes match exactly (a hurt pose, a torture rig and a creature place a few joints elsewhere).
+
+The renderer draws a character mesh in its bind pose for now. Moving meshes and the scenes come next. The corpus test reads all character meshes in the data and checks their strips and skin.
 
 ## Navigation map
 

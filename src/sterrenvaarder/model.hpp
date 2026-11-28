@@ -58,6 +58,9 @@ struct Joint {
     float min = 0, max = 0;
 };
 
+// Reads the joint records of a Cmpnd/Cons node (Fix, Rev, Pris, Sphere, Loose).
+void load_joints(const UtfNode& cons, std::vector<Joint>& out);
+
 struct Lod {
     VMeshRef ref;
     float range_end = 0;  // switch distance; 0 = unlimited

@@ -133,6 +133,8 @@ ModelPart load_part(const UtfNode& node, std::string name) {
     return part;
 }
 
+}  // namespace
+
 void load_joints(const UtfNode& cons, std::vector<Joint>& out) {
     struct Kind { const char* name; JointType type; std::size_t size; };
     const Kind kinds[] = {{"Fix", JointType::Fixed, 176}, {"Rev", JointType::Revolute, 208},
@@ -163,7 +165,6 @@ void load_joints(const UtfNode& cons, std::vector<Joint>& out) {
     }
 }
 
-}  // namespace
 
 Model Model::load(std::shared_ptr<UtfFile> file) {
     Model m;
