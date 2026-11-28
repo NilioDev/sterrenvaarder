@@ -31,10 +31,12 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/ale.cpp
   src/sterrenvaarder/effects.cpp
   src/sterrenvaarder/postfx.cpp
+  src/sterrenvaarder/fonts.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )
 target_include_directories(sterrenvaarder_data PUBLIC src)
+target_include_directories(sterrenvaarder_data PRIVATE third_party)
 
 # Game logic without graphics (flight model); unit-tested headless.
 add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp src/game/trade.cpp src/game/ai.cpp src/game/particles.cpp)
@@ -49,6 +51,7 @@ target_link_libraries(sv-export PRIVATE sterrenvaarder_data)
 
 enable_testing()
 add_executable(sterrenvaarder_tests tests/unit_tests.cpp)
+target_compile_definitions(sterrenvaarder_tests PRIVATE SV_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(sterrenvaarder_tests PRIVATE sterrenvaarder_game)
 add_test(NAME unit COMMAND sterrenvaarder_tests)
 
@@ -80,4 +83,7 @@ if(SV_BUILD_CLIENT)
 
   add_executable(sterrenvaarder app/main.cpp)
   target_link_libraries(sterrenvaarder PRIVATE sterrenvaarder_render)
+  # Our bundled open fonts (SIL OFL, licence beside each) go next to the program.
+  add_custom_command(TARGET sterrenvaarder POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/fonts $<TARGET_FILE_DIR:sterrenvaarder>/fonts)
 endif()

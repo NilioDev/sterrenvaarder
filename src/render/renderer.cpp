@@ -235,6 +235,7 @@ struct Renderer::Impl {
     std::unordered_map<std::string, std::unique_ptr<GpuModel>> models;
     std::vector<SDL_GPUBuffer*> buffers;
     std::vector<SDL_GPUTexture*> owned_textures;
+    SDL_GPUTexture* font_tex = nullptr;  // HUD font atlas (signed distance), when set
 
     std::vector<SceneObject> objects;
     std::vector<GpuModel*> background;
@@ -260,6 +261,7 @@ struct Renderer::Impl {
         if (hud_vb) SDL_ReleaseGPUBuffer(d, hud_vb);
         if (hud_tb) SDL_ReleaseGPUTransferBuffer(d, hud_tb);
         for (auto* t : owned_textures) SDL_ReleaseGPUTexture(d, t);
+        if (font_tex) SDL_ReleaseGPUTexture(d, font_tex);
     }
 
     // ------------------------------------------------------------ pipelines
@@ -926,14 +928,15 @@ struct Renderer::Impl {
     SDL_GPUGraphicsPipeline* make_hud_pipeline() {
         auto* d = gpu.device();
         auto* vs = gpu.shader("hud.vert", 0, 1);
-        auto* fs = gpu.shader("hud.frag", 0, 0);
+        auto* fs = gpu.shader("hud.frag", 1, 0);
         SDL_GPUGraphicsPipelineCreateInfo pi{};
         pi.vertex_shader = vs;
         pi.fragment_shader = fs;
         SDL_GPUVertexBufferDescription vbd{0, sizeof(HudVertex), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0};
-        SDL_GPUVertexAttribute attrs[2] = {{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(HudVertex, x)},
-                                           {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(HudVertex, rgba)}};
-        pi.vertex_input_state = {&vbd, 1, attrs, 2};
+        SDL_GPUVertexAttribute attrs[3] = {{0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(HudVertex, x)},
+                                           {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(HudVertex, rgba)},
+                                           {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(HudVertex, u)}};
+        pi.vertex_input_state = {&vbd, 1, attrs, 3};
         pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
         pi.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
         pi.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -1387,6 +1390,8 @@ struct Renderer::Impl {
             SDL_PushGPUVertexUniformData(cmd, 0, su2, sizeof su2);
             SDL_GPUBufferBinding vb{hud_vb, 0};
             SDL_BindGPUVertexBuffers(hp, 0, &vb, 1);
+            SDL_GPUTextureSamplerBinding fb{font_tex ? font_tex : white, gpu.linear_sampler()};
+            SDL_BindGPUFragmentSamplers(hp, 0, &fb, 1);
             if (hud_verts) SDL_DrawGPUPrimitives(hp, hud_verts, 1, 0, 0);
             SDL_EndGPURenderPass(hp);
         }
@@ -1396,6 +1401,24 @@ struct Renderer::Impl {
 Renderer::Renderer(Gpu& gpu, const Vfs& vfs, const Universe& universe)
     : impl_(std::make_unique<Impl>(gpu, vfs, universe)) {}
 Renderer::~Renderer() = default;
+
+void Renderer::set_hud_font(const FontAtlas* font) {
+    auto* d = impl_->gpu.device();
+    if (impl_->font_tex) {
+        SDL_WaitForGPUIdle(d);
+        SDL_ReleaseGPUTexture(d, impl_->font_tex);
+        impl_->font_tex = nullptr;
+    }
+    HudBatch::set_font(font);
+    if (!font) return;
+    Image img;
+    img.width = static_cast<std::uint32_t>(font->width);
+    img.height = static_cast<std::uint32_t>(font->height);
+    img.rgba.resize(font->pixels.size() * 4);
+    for (std::size_t i = 0; i < font->pixels.size(); ++i)
+        for (int c = 0; c < 4; ++c) img.rgba[i * 4 + c] = font->pixels[i];
+    impl_->font_tex = impl_->gpu.texture(img, false);
+}
 
 void Renderer::set_output_format(SDL_GPUTextureFormat fmt) {
     if (fmt == impl_->output_format) return;

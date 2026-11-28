@@ -14,6 +14,7 @@
 #include "sterrenvaarder/ini.hpp"
 #include "sterrenvaarder/png.hpp"
 #include "sterrenvaarder/postfx.hpp"
+#include "sterrenvaarder/fonts.hpp"
 #include "sterrenvaarder/texture.hpp"
 #include "sterrenvaarder/utf.hpp"
 #include "sterrenvaarder/vfs.hpp"
@@ -657,6 +658,20 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_fonts() {
+    using namespace sterrenvaarder;
+    auto styles = parse_fonts_ini(parse_text_ini("[TrueType]\nnickname = HudSmall\nfont = Agency FB\nfixed_height = 0.03\n"));
+    const FontStyle* hs = find_font_style(styles, "hudsmall");
+    CHECK(hs && hs->font == "Agency FB" && std::fabs(hs->fixed_height - 0.03f) < 1e-6f);
+    std::ifstream f(std::string(SV_SOURCE_DIR) + "/fonts/saira-condensed/SairaCondensed-Medium.ttf", std::ios::binary);
+    std::vector<std::uint8_t> ttf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    CHECK(!ttf.empty() && font_family(Bytes(ttf)) == "Saira Condensed Medium");
+    auto atlas = bake_font_atlas(Bytes(ttf));
+    CHECK(atlas && atlas->cap_height > 20 && atlas->glyphs['A'].present && atlas->glyphs[0xe9].present);
+    CHECK(atlas && atlas->glyphs['W'].advance > atlas->glyphs['i'].advance && !atlas->glyphs[200 - 70].present);
+    CHECK(!find_system_font("No Such Font Family 123").has_value());
+}
+
 static void test_postfx() {
     using namespace sterrenvaarder;
     PostFx off;
@@ -674,6 +689,7 @@ static void test_postfx() {
 }
 
 int main() {
+    test_fonts();
     test_postfx();
     test_thn();
     test_flight();

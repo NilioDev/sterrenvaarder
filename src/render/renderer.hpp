@@ -13,6 +13,7 @@
 #include "render/hud_batch.hpp"
 #include "render/mat.hpp"
 #include "sterrenvaarder/model.hpp"
+#include "sterrenvaarder/fonts.hpp"
 #include "sterrenvaarder/postfx.hpp"
 #include "sterrenvaarder/universe.hpp"
 #include "sterrenvaarder/vfs.hpp"
@@ -104,6 +105,9 @@ public:
     void draw_hud_model(ModelHandle m, float px, float py, float pixels_per_unit, HudColor tint = {});
     // Optional overlay for the next render() call, in output pixels.
     void set_hud(const HudBatch* hud) { hud_ = hud; }
+    // The interface font for HUD text (from fonts.ini, the system or our bundled font);
+    // nullptr goes back to the built-in stroke font. The atlas must outlive its use.
+    void set_hud_font(const FontAtlas* font);
     void set_room(const RoomLighting* room) { room_ = room; }  // nullptr = space
 
     struct Stats { int objects_drawn = 0, draw_calls = 0, triangles = 0, culled_by_lod = 0; };

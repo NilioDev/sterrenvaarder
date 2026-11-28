@@ -74,6 +74,7 @@ struct Args {
     float hud_aspect = -1;  // < 0: from the HUD config
     std::string hud_config;
     std::string postfx_config, postfx_preset;
+    std::string hud_font;  // a font file, a family name, or "stroke"
     float fov = 0;
     int npcs = 0;
     std::string npc_ship = "pi_fighter";
@@ -139,6 +140,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--hud-aspect") a.hud_aspect = std::stof(next());
         else if (k == "--hud-config") a.hud_config = next();
         else if (k == "--postfx") a.postfx_config = next();
+        else if (k == "--hud-font") a.hud_font = next();
         else if (k == "--postfx-preset") a.postfx_preset = next();
         else if (k == "--fov") a.fov = std::stof(next());
         else if (k == "--npcs") a.npcs = std::stoi(next());
@@ -1748,6 +1750,36 @@ int run(const Args& args) {
             apply_hud(text, args.hud_config);
         }
         if (args.hud_aspect >= 0) hud_cfg.max_aspect = args.hud_aspect;
+
+        // HUD font: the one fonts.ini names for the HUD (Agency FB) from the player's own system,
+        // else our bundled open font (Saira Condensed, SIL OFL), else the stroke font.
+        std::optional<FontAtlas> hud_font;
+        if (args.hud_font != "stroke") {
+            std::string family = "Agency FB";
+            if (vfs.exists("fonts/fonts.ini")) {
+                auto styles = parse_fonts_ini(parse_ini(vfs.read("fonts/fonts.ini")));
+                if (auto* st = find_font_style(styles, "HudSmall"); st && !st->font.empty()) family = st->font;
+            }
+            std::vector<std::string> files;
+            if (!args.hud_font.empty()) {
+                if (std::filesystem::exists(args.hud_font)) files.push_back(args.hud_font);
+                else family = args.hud_font;
+            }
+            if (auto sys = find_system_font(family)) files.push_back(*sys);
+            else SDL_Log("font %s is not installed; using the bundled font", family.c_str());
+            if (const char* base = SDL_GetBasePath())
+                files.push_back(std::string(base) + "fonts/saira-condensed/SairaCondensed-Medium.ttf");
+            for (auto& file : files) {
+                std::ifstream f(file, std::ios::binary);
+                std::vector<std::uint8_t> ttf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                if (ttf.empty()) continue;
+                if ((hud_font = bake_font_atlas(Bytes(ttf)))) {
+                    SDL_Log("HUD font: %s (%s)", hud_font->family.c_str(), file.c_str());
+                    break;
+                }
+            }
+        }
+        renderer.set_hud_font(hud_font ? &*hud_font : nullptr);
 
         // Optional post-processing look: off unless postfx.ini or the command line turns it on.
         auto apply_postfx = [&](std::string_view text, const std::string& from) {
