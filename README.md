@@ -188,6 +188,10 @@ script and lists the conditions the runner doesn't evaluate yet.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
+## Sound (phase 7, in progress)
+
+`decode_wav` reads the sound files of the player's own install. These are RIFF WAVE files that hold either plain PCM (8 or 16 bit) or MP3 (format 0x55, decoded with minimp3), and come out as 16-bit samples. The corpus test decodes all of them and reports how long they last together. Playback through SDL, the music per system and base, the voices of the dialogue and the sound of the scenes come next.
+
 ## Characters (phase 6d, in progress)
 
 Character bodies, heads and hands are deformable models (`.dfm`), and `DfmModel` reads them:
@@ -248,4 +252,5 @@ same licence; new files and larger works (mods, tools, platform ports) may use o
 ## Third-party code and fonts
 
 - `third_party/stb/stb_truetype.h` by Sean Barrett: public domain or MIT, at your choice (licence at the end of the file).
+- `third_party/minimp3/minimp3.h` by lieff: CC0 public domain dedication (at the top of the file).
 - `fonts/saira-condensed/`: Saira Condensed by Omnibus-Type, SIL Open Font License 1.1 (`OFL.txt`).
