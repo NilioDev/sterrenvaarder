@@ -38,6 +38,7 @@ static int failures = 0;
 #include "sterrenvaarder/lua32.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
+#include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -707,6 +708,18 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_anm_frames() {
+    // Frame sizes per channel type: time, position, rotation (full or packed).
+    CHECK(AnmChannel::frame_size(0x80, true) == 10);
+    CHECK(AnmChannel::frame_size(0x82, true) == 22);
+    CHECK(AnmChannel::frame_size(0x22, true) == 16);
+    CHECK(AnmChannel::frame_size(0x04, true) == 20);
+    CHECK(AnmChannel::frame_size(0x42, false) == 18);
+    CHECK(AnmChannel::frame_size(0x10, true) == 0);    // no data at all
+    CHECK(AnmChannel::frame_size(0xC0, true) == 0);    // two rotations
+    CHECK(AnmChannel::frame_size(0x100, true) == 0);   // unknown bit
+}
+
 static void test_dfm_strips() {
     // Two strips joined by repeated corners: 0 1 2 3 | 3 3 4 | 4 5 6.
     DfmMesh m;
@@ -932,6 +945,7 @@ int main() {
     test_mission();
     test_population();
     test_dfm_strips();
+    test_anm_frames();
     test_fonts();
     test_postfx();
     test_thn();

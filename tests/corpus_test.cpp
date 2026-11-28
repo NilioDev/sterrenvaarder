@@ -10,6 +10,7 @@
 #include "sterrenvaarder/mission.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
+#include "sterrenvaarder/anm.hpp"
 #include <algorithm>
 #include "game/mission.hpp"
 #include "sterrenvaarder/model.hpp"
@@ -36,13 +37,21 @@ int main(int argc, char** argv) {
         if (shown++ < 25) std::printf("FAIL [%s] %s: %s\n", kind.c_str(), path.c_str(), msg.c_str());
     };
     std::size_t msn_triggers = 0, msn_dangling = 0;
-    std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0;
+    std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
+    double anm_seconds = 0;
     std::map<std::string, int> msn_unknown;  // conditions the runner doesn't evaluate yet
     for (auto& path : vfs.list()) {
         auto data = vfs.read(path);
         std::string kind;
         try {
-            if (path.ends_with(".dfm")) {
+            if (path.ends_with(".anm")) {
+                kind = "anm";
+                auto file = UtfFile::parse(std::move(data));
+                AnmLibrary lib;
+                lib.add(file->root());
+                anm_scripts += lib.scripts().size();
+                for (auto& sc : lib.scripts()) anm_seconds += sc.length();
+            } else if (path.ends_with(".dfm")) {
                 // Character meshes: every level and its strips must hold together.
                 kind = "dfm";
                 auto file = UtfFile::parse(std::move(data));
@@ -190,6 +199,7 @@ int main(int argc, char** argv) {
     std::printf("models %zu, parts %zu, meshes %zu, triangles (all LODs) %zu, textures decoded %zu\n", models, parts,
                 meshes, triangles, textures);
     std::printf("character meshes: %zu triangles, %zu bones, %zu bones without a part\n", dfm_tris, dfm_bones, dfm_bad_bones);
+    std::printf("animations: %zu scripts, %.0f seconds\n", anm_scripts, anm_seconds);
     std::printf("mission triggers %zu, actions naming a missing trigger %zu\n", msn_triggers, msn_dangling);
     for (auto& [n, c] : msn_unknown) std::printf("  condition not evaluated yet: %s (%d)\n", n.c_str(), c);
     return total_fail ? 1 : 0;
