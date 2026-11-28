@@ -190,7 +190,7 @@ is stored in this repository: the unit tests use their own small scripts.
 
 ## Sound (phase 7, in progress)
 
-`decode_wav` reads the sound files of the player's own install. These are RIFF WAVE files that hold either plain PCM (8 or 16 bit) or MP3 (format 0x55, decoded with minimp3), and come out as 16-bit samples. The corpus test decodes all of them and reports how long they last together. Playback through SDL, the music per system and base, the voices of the dialogue and the sound of the scenes come next.
+`decode_wav` reads the sound files of the player's own install. These are RIFF WAVE files that hold either plain PCM (8 or 16 bit) or MP3 (format 0x55, decoded with minimp3), and come out as 16-bit samples. The corpus test decodes all of them and reports how long they last together. `game::Mixer` mixes any number of sounds into 16-bit stereo, each with its own volume, looping or not, and linearly resampled to the output rate. The client opens one SDL audio stream that pulls from it. Screenshot runs open no audio device, and `--no-sound` turns sound off. The music per system and base, the voices of the dialogue and the sound of the scenes come next.
 
 ## Characters (phase 6d, in progress)
 

@@ -31,6 +31,7 @@ static int failures = 0;
 #include "game/population.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
+#include "game/mixer.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -949,6 +950,49 @@ static void test_wav() {
     CHECK(threw);
 }
 
+static void test_mixer() {
+    // Self-made sounds: a constant mono level at half the output rate, and a short stereo click.
+    auto level = std::make_shared<Sound>();
+    level->rate = 4000;
+    level->channels = 1;
+    level->samples.assign(400, 1000);  // 0.1 s
+    auto click = std::make_shared<Sound>();
+    click->rate = 8000;
+    click->channels = 2;
+    click->samples = {2000, -2000, 2000, -2000};  // 2 frames
+    game::Mixer m(8000);
+    auto a = m.play(level, 0.5f);
+    auto b = m.play(click);
+    std::vector<std::int16_t> out(2 * 4);
+    m.mix(out.data(), 4);
+    CHECK(out[0] == 500 + 2000 && out[1] == 500 - 2000);  // both sounds, mono on both sides
+    CHECK(out[4] == 500 && out[5] == 500);                // the click is over
+    CHECK(m.playing(a) && !m.playing(b));
+    // The level lasts 0.1 s at any output rate: 800 frames here, then it stops.
+    std::vector<std::int16_t> rest(2 * 900);
+    m.mix(rest.data(), 900);
+    CHECK(rest[2 * 790] == 500 && rest[2 * 899] == 0 && !m.playing(a));
+    // Looping keeps going; stop ends it; gain and master scale it.
+    auto c = m.play(level, 1, true);
+    m.set_master(2);
+    m.mix(rest.data(), 900);
+    CHECK(m.playing(c) && rest[2 * 899] == 2000);
+    m.set_gain(c, 0.25f);
+    m.mix(rest.data(), 1);
+    CHECK(rest[0] == 500);
+    m.stop(c);
+    m.mix(rest.data(), 1);
+    CHECK(!m.playing(c) && rest[0] == 0);
+    // Loud sums clip instead of wrapping around.
+    auto loud = std::make_shared<Sound>(*level);
+    loud->samples.assign(400, 30000);
+    m.set_master(1);
+    m.play(loud);
+    m.play(loud);
+    m.mix(rest.data(), 1);
+    CHECK(rest[0] == 32767);
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -1163,6 +1207,7 @@ int main() {
     test_mbases();
     test_thn_player();
     test_wav();
+    test_mixer();
     test_anm_frames();
     test_costumes();
     test_fonts();
