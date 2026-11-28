@@ -30,6 +30,24 @@ void Mixer::set_gain(Handle h, float gain) {
         if (v.id == h) v.gain = gain;
 }
 
+void Mixer::fade(Handle h, float gain, float seconds, bool stop_at_end) {
+    std::lock_guard g(lock_);
+    for (auto& v : voices_) {
+        if (v.id != h) continue;
+        v.fade_to = gain;
+        v.stop_after_fade = stop_at_end;
+        float frames = std::max(seconds, 0.f) * static_cast<float>(rate_);
+        if (frames < 1) {
+            v.gain = gain;
+            v.fade_step = 0;
+            if (stop_at_end) v.pos = 1e18;  // ends at the next mix
+            v.loop = v.loop && !stop_at_end;
+        } else {
+            v.fade_step = (gain - v.gain) / frames;
+        }
+    }
+}
+
 bool Mixer::playing(Handle h) const {
     std::lock_guard g(lock_);
     return std::any_of(voices_.begin(), voices_.end(), [&](const Voice& v) { return v.id == h; });
@@ -59,6 +77,18 @@ void Mixer::mix(std::int16_t* out, std::size_t frames) {
                 for (int c = 0; c < 2; ++c)
                     acc[i * 2 + static_cast<std::size_t>(c)] += v.gain * (sample(a, c) * (1 - t) + sample(b, c) * t);
                 v.pos += step;
+                if (v.fade_step != 0) {
+                    v.gain += v.fade_step;
+                    if ((v.fade_step > 0 && v.gain >= v.fade_to) || (v.fade_step < 0 && v.gain <= v.fade_to)) {
+                        v.gain = v.fade_to;
+                        v.fade_step = 0;
+                        if (v.stop_after_fade) {
+                            v.loop = false;
+                            v.pos = 1e18;
+                            break;
+                        }
+                    }
+                }
             }
         }
         std::erase_if(voices_, [](const Voice& v) {

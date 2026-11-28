@@ -51,6 +51,7 @@
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
 #include "game/mixer.hpp"
+#include "game/music.hpp"
 #include "sterrenvaarder/audio.hpp"
 #include "sterrenvaarder/sounds.hpp"
 #include "sterrenvaarder/anm.hpp"
@@ -832,7 +833,12 @@ struct FlightSession {
         bool loaded = false;
         SoundDb db;
         std::string system;
+        SystemMusic tracks;
+        std::map<std::string, std::shared_ptr<Sound>> decoded;  // this system's tracks, by nickname
+        std::string playing;                                     // nickname of the track now on
         game::Mixer::Handle handle = 0;
+        game::MusicMood mood = game::MusicMood::Space;
+        float since_combat = 1e9f;
     } music;
     const Vfs* vfs = nullptr;
     const PetalDb* petal = nullptr;
@@ -1577,7 +1583,12 @@ struct FlightSession {
         body.update(dt);
         std::vector<game::Combatant*> targets{&body};
         for (auto& n : npcs) targets.push_back(&n.body);
+        music.since_combat += dt;
         world.update(dt, targets, [&](game::Combatant& t, const game::Projectile& p) {
+            // Shots landing on the player or on an enemy mean a fight is on (battle music).
+            if (t.id == 0) music.since_combat = 0;
+            for (auto& nn : npcs)
+                if (nn.body.id == t.id && nn.hostile) music.since_combat = 0;
             // A hit on a raised shield plays the shield's effect, turned to face out from the
             // ship at the point of impact; otherwise the munition's own hit effect.
             const std::string* shield_fx = nullptr;
@@ -1757,11 +1768,6 @@ struct FlightSession {
     void update_music() {
         if (!mixer || !vfs || !universe || !rend) return;
         auto& m = music;
-        const std::string& sys = rend->system().nickname;
-        if (sys == m.system) return;
-        m.system = sys;
-        mixer->stop(m.handle);
-        m.handle = 0;
         if (!m.loaded) {
             m.loaded = true;
             try {
@@ -1770,20 +1776,49 @@ struct FlightSession {
                 SDL_Log("music list: %s", e.what());
             }
         }
-        std::string file = universe->system_file(sys);
-        if (file.empty() || !vfs->exists(file)) return;
-        try {
-            SystemMusic sm = parse_system_music(parse_ini(vfs->read(file)));
-            const SoundDef* d = sm.space.empty() ? nullptr : m.db.find(sm.space);
-            if (!d) return;
-            std::string path = CharacterData::normal_path(d->file);
-            if (!vfs->exists(path)) return;
-            auto snd = std::make_shared<Sound>(decode_wav(vfs->read(path)));
-            m.handle = mixer->play(snd, d->gain(), true);
-            SDL_Log("music: %.0f s track for this system", snd->seconds());
-        } catch (const std::exception& e) {
-            SDL_Log("music: %s", e.what());
+        const std::string& sys = rend->system().nickname;
+        if (sys != m.system) {
+            m.system = sys;
+            m.tracks = {};
+            m.decoded.clear();
+            m.mood = game::MusicMood::Space;
+            std::string file = universe->system_file(sys);
+            try {
+                if (!file.empty() && vfs->exists(file)) m.tracks = parse_system_music(parse_ini(vfs->read(file)));
+            } catch (const std::exception& e) {
+                SDL_Log("music: %s", e.what());
+            }
         }
+        // The mood from the nearest enemy and the last shots.
+        game::MusicInput in;
+        in.since_combat = m.since_combat;
+        for (auto& n : npcs)
+            if (n.hostile && n.mesh) in.nearest_hostile = std::min(in.nearest_hostile, (n.ship.pos - ship.pos).length());
+        m.mood = game::choose_mood(in, m.mood);
+        const std::string* want = &m.tracks.space;
+        if (m.mood == game::MusicMood::Danger && !m.tracks.danger.empty()) want = &m.tracks.danger;
+        if (m.mood == game::MusicMood::Battle && !m.tracks.battle.empty()) want = &m.tracks.battle;
+        if (*want == m.playing) return;
+        // Cross-fade: the old track fades out while the new one fades in.
+        if (m.handle) mixer->fade(m.handle, 0, 2.f, true);
+        m.handle = 0;
+        m.playing = *want;
+        const SoundDef* d = want->empty() ? nullptr : m.db.find(*want);
+        if (!d) return;
+        auto& snd = m.decoded[to_lower(*want)];
+        if (!snd) {
+            std::string path = CharacterData::normal_path(d->file);
+            try {
+                if (vfs->exists(path)) snd = std::make_shared<Sound>(decode_wav(vfs->read(path)));
+            } catch (const std::exception& e) {
+                SDL_Log("music: %s", e.what());
+            }
+        }
+        if (!snd) return;
+        m.handle = mixer->play(snd, 0, true);
+        mixer->fade(m.handle, d->gain(), 2.f);
+        SDL_Log("music: %s track (%.0f s)", m.mood == game::MusicMood::Battle ? "battle" : m.mood == game::MusicMood::Danger ? "danger" : "space",
+                snd->seconds());
     }
     void update_traffic(float dt) {
         if (!vfs || !universe || !rend || !db) return;

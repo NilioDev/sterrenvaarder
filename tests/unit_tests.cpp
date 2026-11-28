@@ -32,6 +32,7 @@ static int failures = 0;
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
 #include "game/mixer.hpp"
+#include "game/music.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -992,6 +993,38 @@ static void test_mixer() {
     m.play(loud);
     m.mix(rest.data(), 1);
     CHECK(rest[0] == 32767);
+
+    // Fades: a looping level fades from 1 to 0 over 0.1 s (800 frames) and then stops.
+    game::Mixer f(8000);
+    auto fl = f.play(level, 1, true);
+    f.fade(fl, 0, 0.1f, true);
+    std::vector<std::int16_t> fo(2 * 900);
+    f.mix(fo.data(), 900);
+    CHECK(fo[0] == 1000 && fo[2 * 400] > 400 && fo[2 * 400] < 600 && fo[2 * 850] == 0 && !f.playing(fl));
+    auto up = f.play(level, 0, true);
+    f.fade(up, 0.5f, 0.05f);
+    f.mix(fo.data(), 900);
+    CHECK(f.playing(up) && fo[2 * 899] == 500);
+}
+
+static void test_music_mood() {
+    using game::MusicMood;
+    game::MusicInput calm;
+    CHECK(game::choose_mood(calm, MusicMood::Space) == MusicMood::Space);
+    game::MusicInput near_foe;
+    near_foe.nearest_hostile = 4000;
+    CHECK(game::choose_mood(near_foe, MusicMood::Space) == MusicMood::Danger);
+    near_foe.nearest_hostile = 6000;  // between enter and leave: stays as it was
+    CHECK(game::choose_mood(near_foe, MusicMood::Space) == MusicMood::Space);
+    CHECK(game::choose_mood(near_foe, MusicMood::Danger) == MusicMood::Danger);
+    near_foe.nearest_hostile = 7000;
+    CHECK(game::choose_mood(near_foe, MusicMood::Danger) == MusicMood::Space);
+    game::MusicInput fight;
+    fight.nearest_hostile = 800;
+    fight.since_combat = 3;
+    CHECK(game::choose_mood(fight, MusicMood::Space) == MusicMood::Battle);
+    fight.since_combat = 30;  // the shooting is over, the enemy still near
+    CHECK(game::choose_mood(fight, MusicMood::Battle) == MusicMood::Danger);
 }
 
 static void test_sound_db() {
@@ -1222,6 +1255,7 @@ int main() {
     test_wav();
     test_mixer();
     test_sound_db();
+    test_music_mood();
     test_anm_frames();
     test_costumes();
     test_fonts();
