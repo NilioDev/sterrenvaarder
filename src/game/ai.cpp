@@ -136,7 +136,7 @@ AiOutput FighterAi::update(const AiBody& self, const AiBody& target, float hull,
 
     // State changes.
     float flee_at = p_->job.flee_when_hull_damaged;
-    if (state_ != State::Flee && flee_at > 0 && 1.f - hull >= flee_at) enter(State::Flee);
+    if (state_ != State::Flee && !fled_ && flee_at > 0 && 1.f - hull >= flee_at) enter(State::Flee);
     if (state_ != State::Flee && state_ != State::Break && p_->has_evade_break && break_cooldown_ <= 0 &&
         recent_loss_ > 0 && recent_loss_ >= p_->damage_reaction.evade_break) {
         enter(State::Break);
@@ -172,6 +172,12 @@ AiOutput FighterAi::update(const AiBody& self, const AiBody& target, float hull,
             }
             break;
         case State::Flee:
+            // Our estimate: a ship runs until it is well clear (3 km, or 40 s), then turns
+            // back; it does not run a second time.
+            if (dist > 3000.f || state_time_ > 40.f) {
+                fled_ = true;
+                enter(State::HeadToward);
+            }
             break;
     }
 

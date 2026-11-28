@@ -15,7 +15,7 @@ void Combatant::set_shield(const ShieldArchetype* s) {
     shield_rebuild_level = s->offline_threshold;
 }
 
-void Combatant::damage(float hull_damage, float energy_damage, float shield_mod) {
+void Combatant::damage(float hull_damage, float energy_damage, float shield_mod, bool from_player) {
     if (!alive()) return;
     if (shield > 0 && shield_offline <= 0) {
         shield -= (hull_damage + energy_damage) * shield_mod;
@@ -25,7 +25,8 @@ void Combatant::damage(float hull_damage, float energy_damage, float shield_mod)
         }
         return;
     }
-    hull = std::max(std::min(hull, hull_floor), hull - hull_damage);
+    float floor = from_player ? player_floor : hull_floor;
+    hull = std::max(std::min(hull, floor), hull - hull_damage);
     hull = std::max(0.f, hull);
 }
 
@@ -76,7 +77,7 @@ void CombatWorld::update(float dt, std::vector<Combatant*>& targets,
             if (c.x * c.x + c.y * c.y + c.z * c.z <= double(t->radius) * t->radius) {
                 if (on_hit) on_hit(*t, p);
                 float mod = mods_ && p.gun && t->shield_arch ? mods_->shield_mod(p.gun->weapon_type, t->shield_arch->shield_type) : 1.f;
-                t->damage(p.hull_damage, p.energy_damage, mod);
+                t->damage(p.hull_damage, p.energy_damage, mod, player_id >= 0 && p.owner == player_id);
                 p.life = 0;
                 break;
             }

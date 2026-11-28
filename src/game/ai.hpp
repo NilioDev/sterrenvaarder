@@ -59,6 +59,7 @@ private:
     float trail_no_lock_ = 0;
     float trail_offset_right_ = 0, trail_offset_up_ = 0;
     float break_cooldown_ = 0;
+    bool fled_ = false;  // has run once already: comes back and fights on
 
     // Damage bookkeeping for the damage reactions.
     float last_hull_ = 1, recent_loss_ = 0, loss_window_ = 0;

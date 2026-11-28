@@ -107,6 +107,7 @@ struct Args {
     bool no_traffic = false;  // no random traffic
     bool no_characters = false;  // rooms without their characters
     bool no_sound = false;        // no audio device
+    bool unhurt = false;          // dev: the player's hull never drops below 1 (long autoplay runs)
     bool show_map = false;    // open the navigation map
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
@@ -202,6 +203,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--no-traffic") a.no_traffic = true;
         else if (k == "--no-characters") a.no_characters = true;
         else if (k == "--no-sound") a.no_sound = true;
+        else if (k == "--unhurt") a.unhurt = true;
         else if (k == "--map") a.show_map = true;
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
@@ -898,6 +900,71 @@ struct FlightSession {
         return m.system.empty() || !rend || iequals(m.system, rend->system().nickname);
     }
     std::vector<MissionSolar> msn_solars;
+    // Loot floating in space (mission SpawnLoot): the tractor beam takes it in (Shift+B the
+    // target, B all in range).
+    struct Loot {
+        std::string nickname, archetype, name;
+        DVec3 pos, vel;
+        Renderer::ModelHandle mesh;
+        bool pulled = false;
+    };
+    std::vector<Loot> loots;
+    static constexpr double kLootPullSpeed = 120;  // m/s toward the ship (our estimate)
+    float tractor_range() const {
+        float r = 0;
+        if (db)
+            if (auto* lo = db->loadout(player.loadout)) r = db->tractor_range_of(*lo);
+        return r > 0 ? r : 1500.f;  // every ship in the data carries one; 1500 m is the first's
+    }
+    // Shift+B: the targeted loot; B: all loot in range.
+    void tractor(bool all) {
+        double range = tractor_range();
+        for (auto& l : loots) {
+            bool chosen = all || (target >= 0 && target < static_cast<int>(contacts.size()) && contacts[target].name == l.nickname);
+            if (chosen && (l.pos - ship.pos).length() <= range) l.pulled = true;
+        }
+    }
+    void update_loot(double dt) {
+        for (auto& l : loots) {
+            if (l.pulled) {
+                DVec3 to = ship.pos - l.pos;
+                double d = to.length();
+                l.vel = ship.vel + (d > 1e-6 ? to * (kLootPullSpeed / d) : DVec3{});
+            }
+            l.pos = l.pos + l.vel * dt;
+        }
+        std::erase_if(loots, [&](const Loot& l) {
+            if (!l.pulled || (l.pos - ship.pos).length() > 30) return false;
+            notice = l.name + " taken aboard";
+            notice_time = 3.f;
+            if (mission && mission->runner) mission->runner->event({game::MissionEvent::Type::LootAcquired, l.nickname, "Player", ""});
+            return true;
+        });
+    }
+    void spawn_loot(const std::string& name) {
+        if (!mission) return;
+        const MsnLootDef* d = mission->script.loot(name);
+        if (!d) return;
+        Loot l;
+        l.nickname = d->nickname;
+        l.archetype = d->archetype;
+        l.name = strings && d->string_id ? strings->name(static_cast<std::uint32_t>(d->string_id), d->nickname) : d->nickname;
+        l.pos = DVec3{d->position[0], d->position[1], d->position[2]};
+        if (!d->rel_obj.empty()) {
+            std::optional<DVec3> at = where(d->rel_obj);
+            for (auto& n : npcs)  // a ship that has just blown up still marks the spot
+                if (!at && iequals(n.mission_name, d->rel_obj)) at = n.ship.pos;
+            if (at) l.pos = *at + DVec3{d->offset[0], d->offset[1], d->offset[2]};
+        }
+        l.vel = DVec3{d->velocity[0], d->velocity[1], d->velocity[2]};
+        if (db && rend)
+            if (auto* look = db->loot_look(d->archetype)) try {
+                    l.mesh = rend->load_model(look->model, look->material_libraries);
+                } catch (const std::exception& e) {
+                    SDL_Log("loot %s: %s", look->model.c_str(), e.what());
+                }
+        loots.push_back(std::move(l));
+    }
     bool solar_hostile(const MissionSolar& ms) const {
         return !ms.faction.empty() && attitude_of(player.rep_with(ms.faction)) == Attitude::Hostile;
     }
@@ -1581,9 +1648,7 @@ struct FlightSession {
         }
         if ((autoplay_wait -= dt) > 0) return;
         autoplay_wait = 3;
-        for (auto& c : mission->runner->waiting_on("LocEnter")) {
-            std::string r = c.arg(0);
-            if (!iequals(c.arg(1), player.base) || iequals(r, mission_room()) || autoplay_rooms.count(to_lower(r))) continue;
+        auto go_to = [&](const std::string& r) {
             if (iequals(r, "Bar")) set_tab(Tab::Bar);
             else if (iequals(r, "Equipment")) set_tab(Tab::Equipment);
             else if (iequals(r, "ShipDealer")) set_tab(Tab::Ships);
@@ -1593,8 +1658,32 @@ struct FlightSession {
                 base_room = r;
             }
             autoplay_doing = "goes to the " + r;
-            return;
-        }
+        };
+        // Rooms the mission waits for the player to enter or leave, or has a cutscene
+        // queued in: each once per visit.
+        std::vector<std::string> wanted;
+        for (auto& c : mission->runner->waiting_on("LocEnter"))
+            if (iequals(c.arg(1), player.base)) wanted.push_back(c.arg(0));
+        for (auto& r : mission->rtcs)
+            if (!r.played && !r.def.is_offer() && iequals(r.def.base, player.base)) wanted.push_back(r.def.room);
+        std::vector<std::string> leave;
+        for (auto& c : mission->runner->waiting_on("LocExit"))
+            if (iequals(c.arg(1), player.base)) {
+                wanted.push_back(c.arg(0));
+                leave.push_back(c.arg(0));
+            }
+        for (auto& r : wanted)
+            if (!r.empty() && !iequals(r, mission_room()) && !autoplay_rooms.count(to_lower(r))) {
+                go_to(r);
+                return;
+            }
+        // In a room the mission waits for the player to leave: step back out to the start room.
+        for (auto& r : leave)
+            if (iequals(r, mission_room()) && room.rooms && !iequals(room.rooms->start_room, r)) {
+                go_to(room.rooms->start_room);
+                return;
+            }
+        if (!leave.empty()) return;  // the mission is not done with this base yet
         for (const char* k : {"SpaceEnter", "InSpace", "PlayerLaunch", "LaunchComplete", "BaseExit", "SystemEnter"})
             if (mission->runner->waiting_for(k)) {
                 dock_request(sys);
@@ -1766,6 +1855,31 @@ struct FlightSession {
                             autoplay_doing = "flies to " + n.name;
                             return;
                         }
+        // The mission waits for loot to be taken in: fly within tractor range and pull it in.
+        if (mission && mission->runner)
+            for (auto& c : mission->runner->waiting_on("LootAcquired"))
+                for (auto& l : loots) {
+                    if (!iequals(l.nickname, c.arg(0))) continue;
+                    DVec3 to = l.pos - ship.pos;
+                    double d = to.length();
+                    if (d < tractor_range() * 0.8) {
+                        input.throttle = 0;
+                        input.cruise = false;
+                        if (!l.pulled) {
+                            contacts.push_back({l.nickname, {}, 0, false});
+                            target = static_cast<int>(contacts.size() - 1);
+                            tractor(false);
+                        }
+                        autoplay_doing = "tractors in " + l.name;
+                        return;
+                    }
+                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                    input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                    input.throttle = 1.f;
+                    input.cruise = d > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                    autoplay_doing = "flies to " + l.name;
+                    return;
+                }
         // The mission waits for the player to come close to a ship (DistShip = inside, Player,
         // ship, range) that is near: fly up to it.
         if (mission && mission->runner)
@@ -1826,7 +1940,8 @@ struct FlightSession {
             bool space_work = false;  // the mission still waits for something out here
             if (mission && mission->runner)
                 for (const char* k : {"DistShip", "DistVec", "DistVecLbL", "DistCircle", "TLEntered", "InTradelane", "PlayerManeuver", "JumpInComplete"})
-                    space_work = space_work || mission->runner->waiting_for(k);
+                    for (auto& c : mission->runner->waiting_on(k))
+                        space_work = space_work || !iequals(c.arg(0), "outside");  // "outside" is a leash, not a goal
             if (mission && mission->runner && !space_work && !mission->maneuver_off.count("dock"))
                 for (const char* cnd : {"BaseEnter", "LocEnter"})
                     for (auto& c : mission->runner->waiting_on(cnd))
@@ -1950,6 +2065,7 @@ struct FlightSession {
         rend = &r;
         world.set_shield_mods(&db);
         body.id = 0;
+        world.player_id = 0;
         body.radius = 8;
         body.hull = body.max_hull = arch->hit_pts * (lo ? db.armor_scale_of(*lo) : 1.f);
         if (lo) body.set_shield(db.shield_of(*lo));
@@ -2415,6 +2531,7 @@ struct FlightSession {
         for (auto& f : flashes) f.age += dt;
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
         update_effects(dt_d);
+        update_loot(dt_d);
         update_mission(dt);
         update_space_scene(dt);
         update_traffic(dt);
@@ -3602,12 +3719,21 @@ struct FlightSession {
                             if (n.orders.empty()) n.orders = ol->steps;
                         });
             }
+            else if (iequals(a.name, "SpawnLoot")) {
+                spawn_loot(a.arg(0));
+            }
             else if (iequals(a.name, "Destroy")) {
+                // Destroy = ship [, EXPLODE | SILENT]: it blows up (and counts as destroyed), or
+                // with SILENT just vanishes.
+                bool silent = iequals(a.arg(1), "SILENT");
                 for (auto& n : npcs)
                     if (iequals(n.mission_name, a.arg(0)) && n.body.alive()) {
-                        n.mesh = {};
-                        n.body.hull = 0;
-                        npc_left(n);
+                        n.body.hull_floor = n.body.player_floor = 0;
+                        n.body.hull = 0;  // the next combat step explodes it and reports it
+                        if (silent) {
+                            n.mesh = {};
+                            npc_left(n);
+                        }
                     }
             } else if (iequals(a.name, "SendComm") || iequals(a.name, "EtherComm") || iequals(a.name, "Ethercomm")) {
                 // Speaker and line; the voice clip's length comes later with audio.
@@ -3621,11 +3747,17 @@ struct FlightSession {
                     if (auto n = strings->name(static_cast<std::uint32_t>(a.num(1)), ""); !n.empty()) who = n;
                 m.comms.push_back({who, a.arg(ether ? 3 : 2), 4.f, comm_voice(a.arg(0))});
             } else if (iequals(a.name, "Invulnerable")) {
-                // Invulnerable = ship, on [, ..., fraction]: hits stop at that share of its hull
-                // (without a share: just short of destroyed). Our reading of the values.
+                // Invulnerable = ship, on [, player may destroy it, fraction].
                 bool on = a.args.size() > 1 && a.args[1].as_bool();
                 float share = a.args.size() > 3 ? a.num(3) : 0.f;
-                auto apply = [&](game::Combatant& b) { b.hull_floor = on ? std::max(1.f, b.max_hull * share) : 0.f; };
+                // Our reading of the flags: the share holds other ships' hits only; the player
+                // can wear the ship down past it (missions wait for that), and with the second
+                // flag false cannot destroy it. Without a share nothing destroys it.
+                bool player_kills = a.args.size() > 2 && a.args[2].as_bool();
+                auto apply = [&](game::Combatant& b) {
+                    b.hull_floor = on ? std::max(1.f, b.max_hull * share) : 0.f;
+                    b.player_floor = !on ? 0.f : a.args.size() <= 3 ? b.hull_floor : player_kills ? 0.f : 1.f;
+                };
                 if (iequals(a.arg(0), "Player")) apply(body);
                 else for_mission_ships(a.arg(0), [&](NpcShip& n) { apply(n.body); });
             } else if (iequals(a.name, "AdjHealth")) {
@@ -3726,7 +3858,7 @@ struct FlightSession {
                 // SetVibe, SetVibeLbl, SetVibeLblToShip, SetVibeShipToLbl = a, b, REP_*: how a
                 // feels about b. Toward the player it decides whether the ship attacks.
                 std::string x = a.arg(0), y = a.arg(1), rep = a.arg(2);
-                bool hostile = rep.find("HOSTILE") != std::string::npos;
+                bool hostile = attitude_of(game::rep_value(rep)) == Attitude::Hostile;  // not REP_NEUTRAL_HOSTILE
                 vibes.set(x, y, game::rep_value(rep));
                 if (iequals(y, "Player")) for_mission_ships(x, [&](NpcShip& n) { n.hostile = hostile; });
                 else if (iequals(x, "Player")) for_mission_ships(y, [&](NpcShip& n) { n.hostile = hostile; });
@@ -3785,6 +3917,8 @@ struct FlightSession {
             if (w.age < w.life) r.draw_model_part(w.mesh, w.part, w.pos, w.orient.matrix(), *w.lod_ranges);
         for (auto& m : msn_solars)
             if (m.mesh && solar_here(m)) r.draw_model(m.mesh, m.pos, m.orient.matrix(), m.arch->lod_ranges);
+        for (auto& l : loots)
+            if (l.mesh) r.draw_model(l.mesh, l.pos, Mat4{}, {});
         for (auto& n : npcs)
             if (n.body.alive() && n.mesh && !n.cloaked)
                 r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
@@ -3890,6 +4024,15 @@ struct FlightSession {
             c.pos = m.pos;
             c.radius = m.arch ? std::max(50.f, m.arch->solar_radius) : 100.f;
             c.marked = is_marked(m.nickname);
+            contacts.push_back(std::move(c));
+        }
+        for (auto& l : loots) {
+            game::HudContact c;
+            c.name = l.nickname;
+            c.label = l.name;
+            c.pos = l.pos;
+            c.radius = 5;
+            c.marked = is_marked(l.nickname);
             contacts.push_back(std::move(c));
         }
         for (auto& n : npcs) {
@@ -4023,6 +4166,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
     fs.npcs.clear();
     fs.next_body_id = 1;
     fs.wrecks.clear();
+    fs.loots.clear();
     fs.msn_solars.clear();
     Args a = args;
     if (!spawn_npcs) a.npcs = 0;
@@ -4206,6 +4350,7 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
     fs.npcs.clear();
     if (escort.empty()) fs.next_body_id = 1;
     fs.wrecks.clear();
+    fs.loots.clear();
     if (auto* o = game::find_object(renderer.system(), obj)) {
         auto sp = game::exit_point(*o, 600.f);
         fs.ship.pos = sp.pos;
@@ -4258,6 +4403,7 @@ void handle_story(FlightSession& fs, Renderer& renderer, Camera& cam) {
         fs.npcs.clear();
         fs.next_body_id = 1;
         fs.wrecks.clear();
+    fs.loots.clear();
     }
     if (!r.solar.empty() && fs.mission) fs.spawn_solar(*fs.mission, r.solar);
     if (!fs.dock_at_base(renderer.system(), r.base)) {
@@ -4671,7 +4817,10 @@ int run(const Args& args) {
                     if (!args.autoplay) fs->aim_dir = aim_through(cam, cx, cy, static_cast<float>(args.width), static_cast<float>(args.height));
                     if (args.npc_die >= 0 && t < args.npc_die && t + 1.0 / 60 >= args.npc_die)
                         for (auto& n : fs->npcs) n.body.hull = 0;
+                    if (args.unhurt) fs->body.hull_floor = fs->body.player_floor = std::max(fs->body.hull_floor, 1.f);
+                    bool was_alive = fs->body.alive();
                     fs->update_combat(1.0 / 60);
+                    if (was_alive && !fs->body.alive()) SDL_Log("the player is destroyed at %.0f s", t);
                     if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
                     if (!args.answer.empty() && fs->docked() && !fs->room.scene && !fs->talk_partners().empty()) fs->talk();
                     if (!args.answer.empty() && fs->popup_open() && !(fs->docked() && fs->room.scene)) fs->close_popup();
@@ -4789,6 +4938,7 @@ int run(const Args& args) {
                         else if (e.key.key == SDLK_RETURN && fs->space_scene) fs->space_scene.reset();
                         else if (e.key.key == SDLK_RETURN && fs->popup_open()) fs->close_popup();
                         else if (e.key.key == SDLK_T) fs->next_target();
+                        else if (e.key.key == SDLK_B && !fs->docked()) fs->tractor(!(e.key.mod & SDL_KMOD_SHIFT));
                         else if (e.key.key == SDLK_M && !fs->docked()) fs->show_map = !fs->show_map;
                         else if (e.key.key == SDLK_F3) fs->dock_request(renderer.system());
                         else if (e.key.key == SDLK_F4 && !fs->docked()) fs->formation_request();

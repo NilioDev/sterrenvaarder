@@ -32,13 +32,14 @@ struct Combatant {
     float shield_offline = 0;        // seconds left offline
     const ShieldArchetype* shield_arch = nullptr;
     float hull_floor = 0;            // hits stop here (mission Invulnerable); > 0 cannot die
+    float player_floor = 0;          // where the player's hits stop (they pass hull_floor)
     bool alive() const { return hull > 0; }
 
     void set_shield(const ShieldArchetype* s);
     // Applies one hit. Shields take both damage types while up; once down, the hull
     // takes hull damage only (energy damage has nothing to drain).
     // `shield_mod` scales what the shield takes (WeaponModDB: weapon type vs shield type).
-    void damage(float hull_damage, float energy_damage, float shield_mod = 1);
+    void damage(float hull_damage, float energy_damage, float shield_mod = 1, bool from_player = false);
     void update(float dt);
 };
 
@@ -64,6 +65,7 @@ public:
     const std::vector<Projectile>& projectiles() const { return projectiles_; }
     // WeaponModDB lookups for shield hits (none = every weapon hits every shield at 1x).
     void set_shield_mods(const ShipDatabase* db) { mods_ = db; }
+    int player_id = -1;  // the player's combatant id: its hits can pass an Invulnerable floor
 
 private:
     const ShipDatabase* mods_ = nullptr;

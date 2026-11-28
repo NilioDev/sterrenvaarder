@@ -88,6 +88,16 @@ struct MsnObjective {
     MsnCommand type;            // type = ids, ... | navmarker, ... | rep_inst, ...
 };
 
+// [MsnLoot]: a piece of equipment or a commodity floating in space (SpawnLoot), placed
+// relative to an object (rel_pos_obj + rel_pos_offset) or at a position.
+struct MsnLootDef {
+    std::string nickname, archetype, rel_obj, system;
+    int string_id = 0, amount = 1;
+    float offset[3] = {0, 0, 0};
+    float position[3] = {0, 0, 0};
+    float velocity[3] = {0, 0, 0};
+};
+
 struct MissionScript {
     int title_ids = 0, offer_ids = 0;
     int reward = 0;
@@ -100,8 +110,10 @@ struct MissionScript {
     std::vector<MsnObjList> obj_lists;
     std::vector<MsnDialog> dialogs;
     std::vector<MsnObjective> objectives;
+    std::vector<MsnLootDef> loots;
 
     const MsnTrigger* trigger(std::string_view nickname) const;
+    const MsnLootDef* loot(std::string_view nickname) const;
     const MsnShipDef* ship(std::string_view nickname) const;
     const MsnNpcDef* npc(std::string_view nickname) const;
     const MsnObjList* obj_list(std::string_view nickname) const;
