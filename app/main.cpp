@@ -99,6 +99,7 @@ struct Args {
     double npc_die = -1;    // screenshot runs: test NPCs are destroyed at this time (s)
     std::string mission;    // --mission M01a: run that story mission's script
     double win = -1;        // --win T: the mission succeeds at T seconds (tests the story flow)
+    std::string thorn;      // --thorn scene.thn,object: play that space scene once in space
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
     bool no_traffic = false;  // no random traffic
@@ -174,6 +175,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--mission") a.mission = next();
         else if (k == "--answer") a.answer = next();
         else if (k == "--win") a.win = std::stod(next());
+        else if (k == "--thorn") a.thorn = next();
         else if (k == "--launch") a.launch = std::stod(next());
         else if (k == "--no-traffic") a.no_traffic = true;
         else if (k == "--no-characters") a.no_characters = true;
@@ -818,12 +820,15 @@ struct FlightSession {
     // CallThorn = scene.thn, object: a cutscene in space. Its camera takes over until it
     // ends (Enter skips). The scene's "main object" marker is pinned to the object, so
     // what is attached to it follows; without one the scene is in system coordinates.
-    // Ships in the scene are not drawn yet.
+    // Ships the scene places itself are drawn while it plays; one riding on the main object
+    // stands in for that object, which is already there.
     struct SpaceScene {
         std::unique_ptr<ThnScript> script;
         std::unique_ptr<game::ThnPlayer> player;
         float time = 0;
         std::string anchor, marker;
+        struct Prop { std::string entity; Renderer::ModelHandle mesh; const ShipArchetype* arch = nullptr; };
+        std::vector<Prop> props;
     };
     std::optional<SpaceScene> space_scene;
     std::string pending_save;  // Save = name, title ids: an autosave (handled by the main loop)
@@ -1679,6 +1684,14 @@ struct FlightSession {
             sc.anchor = anchor;
             for (auto& e : sc.script->entities)
                 if (iequals(e.type, "MARKER") && to_lower(e.name).find("main_object") != std::string::npos) sc.marker = e.name;
+            for (auto& e : sc.script->entities) {
+                if (!iequals(e.type, "COMPOUND") || !iequals(e.category, "Spaceship") || !db || !rend) continue;
+                bool stand_in = std::any_of(sc.script->attachments.begin(), sc.script->attachments.end(), [&](const ThnAttach& a) {
+                    return a.position && iequals(a.child, e.name) && !sc.marker.empty() && iequals(a.parent, sc.marker);
+                });
+                const ShipArchetype* sa = stand_in ? nullptr : db->ship(e.template_name);
+                if (sa) sc.props.push_back({e.name, rend->load_model(sa->model, sa->material_libraries), sa});
+            }
             SDL_Log("space scene %s: %.1f s, %s", path.c_str(), sc.player->duration(),
                     sc.marker.empty() ? "in system coordinates" : "around its object");
             space_scene = std::move(sc);
@@ -3198,7 +3211,22 @@ struct FlightSession {
     }
     float flight_fov_y = 0.8f;  // the chase camera's, set at start (scenes bring their own)
 
+    void draw_space_scene(Renderer& r) {
+        if (!space_scene) return;
+        for (auto& p : space_scene->props) {
+            auto* st = space_scene->player->state(p.entity);
+            if (!st || !p.mesh) continue;
+            const Mat3& o = st->orient;  // rows: right, up, back -> the model matrix's columns
+            Mat4 m;
+            m.at(0, 0) = o[0]; m.at(1, 0) = o[1]; m.at(2, 0) = o[2];
+            m.at(0, 1) = o[3]; m.at(1, 1) = o[4]; m.at(2, 1) = o[5];
+            m.at(0, 2) = o[6]; m.at(1, 2) = o[7]; m.at(2, 2) = o[8];
+            r.draw_model(p.mesh, DVec3{st->pos.x, st->pos.y, st->pos.z}, m, p.arch->lod_ranges);
+        }
+    }
+
     void draw(Renderer& r) {
+        draw_space_scene(r);
         Mat4 rot = ship.orient.matrix() * Mat4::rotate_z(ship.bank);
         if (body.alive()) r.draw_model(mesh, ship.pos, rot, arch ? arch->lod_ranges : std::vector<float>{});
         draw_combat(r);
@@ -3789,7 +3817,7 @@ int run(const Args& args) {
                 fs->firing = args.fire;
                 // --dock: autopilot there, once the ship is in space and the object exists
                 // (a mission may spawn it after launch).
-                bool dock_sent = false;
+                bool dock_sent = false, thorn_sent = false;
                 auto try_dock = [&] {
                     if (dock_sent || args.dock.empty() || fs->docked() || !fs->object_named(renderer.system(), args.dock)) return;
                     dock_sent = true;
@@ -3821,6 +3849,11 @@ int run(const Args& args) {
                     if (args.launch >= 0 && t < args.launch && t + 1.0 / 60 >= args.launch && fs->docked())
                         fs->dock_request(renderer.system());
                     if (!fs->docked()) try_dock();
+                    if (!args.thorn.empty() && !fs->docked() && !thorn_sent) {
+                        thorn_sent = true;
+                        auto comma = args.thorn.find(',');
+                        fs->call_thorn(args.thorn.substr(0, comma), comma == std::string::npos ? "Player" : args.thorn.substr(comma + 1));
+                    }
                 }
                 for (auto& [good, n] : args.buys) {
                     const Good* g = econ->good(good);
