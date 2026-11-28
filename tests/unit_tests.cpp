@@ -1243,6 +1243,22 @@ static void test_mission_start() {
     tr.event({game::MissionEvent::Type::PlayerManeuver, "dock", "RING_1", ""});
     tr.update(0.1f, mw, act);
     CHECK(pings == 2);
+    // A trigger of the system just left still sees the player leave it.
+    MissionScript xs = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_exit\nsystem = Sys02\nInitState = ACTIVE\nCnd_SystemExit = Sys02\nAct_Ping = x\n"));
+    game::MissionRunner xr(xs);
+    pings = 0;
+    xr.start();
+    xr.event({game::MissionEvent::Type::SystemExit, "Sys02", "", ""});
+    xr.update(0.1f, mw, act);  // mw is in Sys01 now
+    CHECK(pings == 1);
+    MissionScript ys = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_true\nsystem = Sys02\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = x\n"));
+    game::MissionRunner yr(ys);
+    pings = 0;
+    yr.start();
+    yr.update(0.1f, mw, act);  // True fires in Sys01 too
+    CHECK(pings == 1);
     // "outside ..., distance, seconds": only after staying out that long without a break.
     MissionScript hs = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_held\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 2\nAct_Ping = x\n"));
@@ -1434,7 +1450,7 @@ static void test_mission_any_system() {
     using namespace sterrenvaarder::game;
     MissionScript m = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_any\nsystem = ANY\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = a\n"
-        "[Trigger]\nnickname = t_other\nsystem = Sys9\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = b\n"));
+        "[Trigger]\nnickname = t_other\nsystem = Sys9\nInitState = ACTIVE\nCnd_Timer = 0\nAct_Ping = b\n"));
     struct World : MissionWorld {
         std::string system() const override { return "Sys1"; }
         bool in_space() const override { return true; }

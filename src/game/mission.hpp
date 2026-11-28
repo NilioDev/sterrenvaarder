@@ -119,6 +119,7 @@ private:
     // waits for, so thousands of ProjHit events in a big battle don't slow the others down.
     std::unordered_map<int, std::vector<std::pair<std::size_t, MissionEvent>>> events_;
     std::size_t event_count_ = 0;
+    std::string exited_system_;  // the system the player just left (until the next update)
     template <class F> void each_event(MissionEvent::Type type, std::size_t from, F&& f) const;
     std::unordered_map<std::string, int> destroyed_;      // lower-case ship nickname
     std::unordered_map<std::string, int> spawned_labels_; // lower-case label -> ships spawned

@@ -1881,6 +1881,8 @@ struct FlightSession {
                     if (double d = (n.body.pos - ship.pos).length(); d < 10000) {
                         int r = rank(n);
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
+                        // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
+                        if (r == 3 && mission && mission->waypoint) continue;
                         if (r < best_rank || (r == best_rank && d < best)) best_rank = r, best = d, foe = &n;
                     }
         }
@@ -3507,6 +3509,13 @@ struct FlightSession {
                 pos = r->first;
                 if (!facing) q = r->second;
             }
+        // arrival_obj = base: it launches from there, just in front of the base.
+        if (!at && !def->arrival_obj.empty())
+            if (auto* o = game::find_object(rend->system(), def->arrival_obj)) {
+                auto sp = game::exit_point(*o, 150.f);
+                pos = sp.pos;
+                if (!facing) q = sp.orient;
+            }
         auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, npc_display_name(npc), pos, q.normalized(), hostile);
         n.mission_name = def->nickname;
         n.faction = npc->affiliation;
@@ -4555,6 +4564,11 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
     std::string sys = fs.pending_jump_system, obj = fs.pending_jump_object;
     fs.pending_jump_system.clear();
     fs.pending_jump_object.clear();
+    // Gates of the system left behind that lead where the player goes: ships on their way to
+    // dock with one of them (an escort sent ahead to the gate) make the jump too.
+    std::vector<std::string> same_way;
+    for (auto& o : renderer.system().objects)
+        if (o.is_jump() && iequals(o.goto_system, sys)) same_way.push_back(o.nickname);
     try {
         renderer.load_system(sys);
     } catch (const std::exception& e) {
@@ -4566,6 +4580,9 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
     auto follows_player = [&](const NpcShip& n) {
         if (n.order_step >= n.orders.size()) return false;
         const auto& o = n.orders[n.order_step];
+        if (iequals(o.name, "Dock"))
+            for (auto& g : same_way)
+                if (iequals(o.arg(0), g)) return true;
         return iequals(o.name, "FollowPlayer") || (iequals(o.name, "Follow") && iequals(o.arg(0), "Player"));
     };
     std::vector<NpcShip> escort;
@@ -4594,6 +4611,10 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
         n.ship.vel = fs.ship.vel;
         n.body.pos = n.ship.pos;
         n.lane.reset();
+        if (n.order_step < n.orders.size() && iequals(n.orders[n.order_step].name, "Dock")) {  // done: it came through
+            ++n.order_step;
+            n.order_time = 0;
+        }
         fs.npcs.push_back(std::move(n));
     }
     if (!escort.empty()) SDL_Log("%zu mission ships jump along", escort.size());

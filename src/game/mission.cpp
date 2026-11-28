@@ -78,6 +78,7 @@ bool MissionRunner::fired(std::string_view trigger) const {
 }
 
 void MissionRunner::event(MissionEvent e) {
+    if (e.type == MissionEvent::Type::SystemExit) exited_system_ = e.a;
     if (e.type == MissionEvent::Type::Destroyed) {
         std::string n = to_lower(e.a);
         ++destroyed_[n];
@@ -327,7 +328,19 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         const auto& t = script_.triggers[i];
         const auto& s = states_[i];
         if (!s.active) continue;
-        if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) continue;
+        if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) {
+            // A trigger of the system just left still sees the player leave it (SystemExit).
+            bool exit_cnd = !exited_system_.empty() && iequals(t.system, exited_system_);
+            if (exit_cnd) {
+                exit_cnd = false;
+                for (auto& c : t.conditions) exit_cnd = exit_cnd || iequals(c.name, "SystemExit");
+            }
+            // "True" holds in every system: scripts switch such triggers on from elsewhere
+            // (the set-up after a save, the next step of a chain), so the system is no bar.
+            bool always = !t.conditions.empty();
+            for (auto& c : t.conditions) always = always && iequals(c.name, "True");
+            if (!exit_cnd && !always) continue;
+        }
         bool ok = !t.conditions.empty();
         for (auto& c : t.conditions) ok = ok && holds(t, c, s, w);
         // A repeatable trigger fires again only once its conditions have gone false in
@@ -360,6 +373,7 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
             }
         }
     }
+    exited_system_.clear();
 }
 
 MissionStart mission_start(const MissionScript& script) {
