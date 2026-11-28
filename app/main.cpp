@@ -360,6 +360,7 @@ struct NpcShip {
     std::size_t order_step = 0;
     float order_time = 0;  // seconds in the current step
     int order_sub = 0;     // GotoSpline: the point on the curve it flies to now
+    float order_fought = 0;  // seconds a fight has kept it from the current step
     bool docked_away = false;
     std::optional<game::LaneTrip> lane;  // riding a trade lane (Dock order on a ring)
     float lifetime = -1;  // mission SetLifeTime: seconds left before it leaves the scene (< 0: no limit)
@@ -1002,6 +1003,8 @@ struct FlightSession {
     // Navigation: autopilot approach, trade lanes, docking and jumps.
     enum class Nav { Free, Approach, Lane, Docked, Formation };
     int formation_leader = -1;  // Nav::Formation: body id of the ship the player flies beside
+    Vec3 formation_slot{40, 0, 60};  // where beside the leader (a mission's Follow names its own)
+    bool formation_ordered = false;  // the mission put the player there (GiveObjList = Player, Follow)
     int lane_rejoin = -1;       // riding a lane with the formation: the leader to fly beside again after it
     Nav nav = Nav::Free;
     std::string nav_target;            // object nickname
@@ -1742,6 +1745,7 @@ struct FlightSession {
         if (nav == Nav::Formation) {
             nav = Nav::Free;
             formation_leader = -1;
+            formation_ordered = false;
             report("inverse");
             return;
         }
@@ -1763,6 +1767,36 @@ struct FlightSession {
         report(lead->mission_name.empty() ? lead->name : lead->mission_name);
         nav = Nav::Formation;
         formation_leader = lead->body.id;
+        formation_slot = {40, 0, 60};
+    }
+
+    // GiveObjList = Player, list: a list's Follow = ship, distance, x, y, z flies the player
+    // beside that ship, as formation does, until a BreakFormation or Idle list (or
+    // PObjIdle) lets go. The player may still break off by hand.
+    void player_orders(const std::vector<MsnCommand>& steps) {
+        for (auto& step : steps) {
+            if (iequals(step.name, "Follow") && !iequals(step.arg(0), "Player")) {
+                for (auto& n : npcs)
+                    if (n.body.alive() && iequals(n.mission_name, step.arg(0)) && (nav == Nav::Free || nav == Nav::Formation)) {
+                        nav = Nav::Formation;
+                        formation_leader = n.body.id;
+                        formation_slot = step.args.size() >= 5 ? Vec3{step.num(2), step.num(3), step.num(4)} : Vec3{40, 0, 60};
+                        formation_ordered = true;
+                    }
+                return;
+            }
+            if (iequals(step.name, "BreakFormation") || iequals(step.name, "Idle")) {
+                player_idle();
+                return;
+            }
+        }
+    }
+    void player_idle() {
+        if (nav == Nav::Formation && formation_ordered) {
+            nav = Nav::Free;
+            formation_leader = -1;
+        }
+        formation_ordered = false;
     }
 
     // Returns true while navigation owns the controls.
@@ -1799,6 +1833,7 @@ struct FlightSession {
         }
         return false;
     }
+    bool autoplay_leaving = false;  // the objective is a way out: fight only what comes close
     void autoplay(const StarSystem& sys) {
         input.steer = {};
         firing = false;
@@ -1951,6 +1986,10 @@ struct FlightSession {
                 return;
             }
         }
+        if (nav == Nav::Formation && formation_ordered) {  // the mission flies us: let it
+            autoplay_doing = "follows the mission's lead";
+            return;
+        }
         if (nav == Nav::Formation)  // a fight close by: leave the formation for it, and come back after
             for (auto& n : npcs)
                 if (n.body.alive() && n.hostile && (n.body.pos - ship.pos).length() < 2000) {
@@ -1999,6 +2038,10 @@ struct FlightSession {
             for (auto& n : npcs)
                 if (n.body.alive() && !n.hostile && !n.mission_name.empty()) friends.push_back(n.body.id);
             auto rank = [&](const NpcShip& n) {
+                // Marked on the HUD: what the mission points the player at (M10: the fleet's
+                // escort, while it counts the cruisers only to send in reserves).
+                for (auto& nm : n.names)
+                    if (is_marked(nm)) return -1;
                 for (auto& c : waited)
                     for (auto& nm : n.names)
                         if (iequals(nm, c.arg(0))) return 0;
@@ -2007,6 +2050,20 @@ struct FlightSession {
                         return 1;  // it goes for those we fly with: stop it first
                 return is_big_ship(n) ? 3 : 2;
             };
+            // The objective is a way out (a jump gate or hole: "break off and fly to ..."): leave
+            // the big ships, and only fight what comes close.
+            bool& leaving = autoplay_leaving;
+            leaving = false;
+            if (mission && mission->waypoint && !mission->waypoint->object.empty())
+                if (auto* o = object_named(sys, mission->waypoint->object)) leaving = o->is_jump();
+            // Or the mission waits for the player to get out of a place (DistVec = outside,
+            // Player, ...) and that is a step on, not a leash (M10: out of the ship yard).
+            if (mission && mission->runner && mission->waypoint)
+                for (auto& t : mission->script.triggers)
+                    if (mission->runner->active(t.nickname))
+                        for (auto& c : t.conditions)
+                            if (iequals(c.name, "DistVec") && iequals(c.arg(0), "outside") && iequals(c.arg(1), "Player") && !leads_to_fail(t, 3))
+                                leaving = true;
             int best_rank = 4;
             for (auto& n : npcs)
                 if (n.body.alive() && n.hostile && !n.cloaked)
@@ -2014,6 +2071,7 @@ struct FlightSession {
                         // Worn down as far as the player's guns go (Invulnerable): nothing left to do.
                         if (n.body.player_floor > 0 && n.body.hull <= n.body.player_floor + 1.f) continue;
                         int r = rank(n);
+                        if (leaving && (is_big_ship(n) || d >= 1500)) continue;
                         if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
                         // A capital ship isn't worth a fighter's time while the objective lies elsewhere.
                         if (r == 3 && mission && mission->waypoint) continue;
@@ -2056,7 +2114,7 @@ struct FlightSession {
             double pick_d = 0;
             bool pick_clear = false;
             for (auto& ms : msn_solars)
-                if (ms.destructible && ms.body.alive() && solar_here(ms) && (any_wanted ? wanted(ms) : solar_hostile(ms))) {
+                if (!autoplay_leaving && ms.destructible && ms.body.alive() && solar_here(ms) && (any_wanted ? wanted(ms) : solar_hostile(ms))) {
                     double d = (ms.pos - ship.pos).length();
                     if (d > (any_wanted ? 8000 : 4000)) continue;
                     const game::Combatant* in_way = line_blocker(ship.pos, ms.pos, ms.body.id);
@@ -2255,6 +2313,12 @@ struct FlightSession {
                             continue;
                         space_work = space_work || (player && !iequals(c.arg(0), "outside"));
                     }
+            // The base the objective names comes first (another base close by may only hold a
+            // repeatable scene).
+            std::string goal_base;
+            if (mission && mission->waypoint && !mission->waypoint->object.empty())
+                if (auto* wo = object_named(sys, mission->waypoint->object)) goal_base = !wo->dock_with.empty() ? wo->dock_with : wo->base;
+            const SystemObject* chosen = nullptr;
             if (mission && mission->runner && !space_work && !mission->maneuver_off.count("dock"))
                 for (const char* cnd : {"BaseEnter", "LocEnter"})
                     for (auto& c : mission->runner->waiting_on(cnd)) {
@@ -2273,12 +2337,16 @@ struct FlightSession {
                             if (!best || (!ring_like(*best) && ring_like(o))) best = &o;
                         }
                         if (!best) continue;
-                        contacts.push_back({best->nickname, {}, 0, true});
-                        target = static_cast<int>(contacts.size() - 1);
-                        dock_request(sys);
-                        autoplay_doing = "lands at " + best->nickname;
-                        return;
+                        const std::string& bb = !best->dock_with.empty() ? best->dock_with : best->base;
+                        if (!chosen || (!goal_base.empty() && iequals(bb, goal_base))) chosen = best;
                     }
+            if (chosen) {
+                contacts.push_back({chosen->nickname, {}, 0, true});
+                target = static_cast<int>(contacts.size() - 1);
+                dock_request(sys);
+                autoplay_doing = "lands at " + chosen->nickname;
+                return;
+            }
             autoplay_doing = "waits at the objective";
             return;
         }
@@ -2332,7 +2400,7 @@ struct FlightSession {
                 return false;
             }
             // Our slot: behind and to the right of the leader (our estimate of the original's).
-            DVec3 spot = lead->ship.pos + game::to_d(lead->ship.orient.rotate({40, 0, 60}));
+            DVec3 spot = lead->ship.pos + game::to_d(lead->ship.orient.rotate(formation_slot));
             DVec3 to = spot - ship.pos;
             double dist = to.length();
             if (dist < 200) {
@@ -3071,7 +3139,7 @@ struct FlightSession {
         if (n.pop_zone < 0 || n.pop_zone >= static_cast<int>(zones.size())) return;
         auto& z = zones[n.pop_zone];
         n.orders.clear();
-        n.order_step = 0;
+        n.order_step = 0; n.order_fought = 0;
         n.order_time = 0;
         if (iequals(n.pop_behavior, "trade") && rend) {
             // The nearest dockable base.
@@ -3977,12 +4045,19 @@ struct FlightSession {
         bool always = false;
         for (std::size_t i = 0; i < n.orders.size() && i <= n.order_step; ++i)
             if (iequals(n.orders[i].name, "SetPriority")) always = iequals(n.orders[i].arg(0), "ALWAYS_EXECUTE");
-        if (!always)
-            if (auto foe = npc_foe(n); foe && foe->dist < 1500 && !is_warship(n)) return false;
+        // A fight holds up a ship that nothing can destroy (Invulnerable) on its way somewhere
+        // for a minute at most; then it carries on (M10: Botzler's run must not end in an
+        // endless dogfight).
+        bool going = n.order_step < n.orders.size() && iequals(n.orders[n.order_step].name.substr(0, 4), "Goto");
+        if (!always && !(going && n.body.hull_floor > 0 && n.order_fought >= 60.f))
+            if (auto foe = npc_foe(n); foe && foe->dist < 1500 && !is_warship(n)) {
+                n.order_fought += dt;
+                return false;
+            }
         while (n.order_step < n.orders.size()) {
             const MsnCommand& o = n.orders[n.order_step];
             n.order_time += dt;
-            auto next = [&] { ++n.order_step; n.order_time = 0; n.order_sub = 0; };
+            auto next = [&] { ++n.order_step; n.order_time = 0; n.order_sub = 0; n.order_fought = 0; };
             const std::string& k = o.name;
             if (iequals(k, "GotoVec")) {
                 // goto type, x, y, z, range, ...
@@ -4361,10 +4436,11 @@ struct FlightSession {
             } else if (iequals(a.name, "NagOff")) {
                 std::erase_if(m.nags, [&](const Mission::Nag& x) { return iequals(x.name, a.arg(0)); });
             } else if (iequals(a.name, "PobjIdle")) {
-                // PobjIdle = ship: drops its orders; it waits where it is.
+                // PobjIdle: the player's orders end (no_params); with a ship named, its orders.
+                if (a.args.empty() || iequals(a.arg(0), "no_params") || iequals(a.arg(0), "Player")) player_idle();
                 for_mission_ships(a.arg(0), [&](NpcShip& n) {
                     n.orders.clear();
-                    n.order_step = 0;
+                    n.order_step = 0; n.order_fought = 0;
                     n.order_time = 0;
                 });
             } else if (iequals(a.name, "RevertCam")) {
@@ -4403,13 +4479,14 @@ struct FlightSession {
                                     MsnCommand follow;
                                     follow.name = "FollowPlayer";
                                     n.orders = {follow};
-                                    n.order_step = 0;
+                                    n.order_step = 0; n.order_fought = 0;
                                     n.order_time = 0;
                                 });
+                if (auto* ol = m.script.obj_list(a.arg(1)); ol && iequals(a.arg(0), "Player")) player_orders(ol->steps);
                 if (auto* ol = m.script.obj_list(a.arg(1)))
                     for_mission_ships(a.arg(0), [&](NpcShip& n) {
                         n.orders = ol->steps;
-                        n.order_step = 0;
+                        n.order_step = 0; n.order_fought = 0;
                         n.order_time = 0;
                     });
             } else if (iequals(a.name, "RelocateShip")) {
@@ -4935,15 +5012,17 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
                 if (iequals(o.arg(0), g)) return true;
         return iequals(o.name, "FollowPlayer") || (iequals(o.name, "Follow") && iequals(o.arg(0), "Player"));
     };
-    // Ships the mission waits to see arrive there with the player (NPCSystemEnter = system,
-    // ship...) come along too, as a wingman would.
+    // Ships the mission looks for arriving there (NPCSystemEnter = system, ship...) come along
+    // too, as a wingman would; also when the trigger that looks is only switched on once the
+    // player is there (M10: entering Rh02 starts the wait for Von Claussen).
     auto awaited = [&](const NpcShip& n) {
         if (!fs.mission || !fs.mission->runner) return false;
-        for (auto& c : fs.mission->runner->waiting_on("NPCSystemEnter"))
-            if (iequals(c.arg(0), sys))
-                for (std::size_t i = 1; i < c.args.size(); ++i)
-                    for (auto& nm : n.names)
-                        if (iequals(nm, c.arg(i))) return true;
+        for (auto& t : fs.mission->script.triggers)
+            for (auto& c : t.conditions)
+                if (iequals(c.name, "NPCSystemEnter") && iequals(c.arg(0), sys))
+                    for (std::size_t i = 1; i < c.args.size(); ++i)
+                        for (auto& nm : n.names)
+                            if (iequals(nm, c.arg(i))) return true;
         return false;
     };
     std::vector<NpcShip> escort;
@@ -5016,7 +5095,25 @@ void handle_story(FlightSession& fs, Renderer& renderer, Camera& cam) {
     fs.loots.clear();
     }
     if (!r.solar.empty() && fs.mission) fs.spawn_solar(*fs.mission, r.solar);
-    if (!fs.dock_at_base(renderer.system(), r.base)) {
+    // A base aboard a ship of a later mission (M10 ends by moving the player aboard the
+    // Osiris of M11): bring that ship in now; the next mission keeps it.
+    bool docked = fs.dock_at_base(renderer.system(), r.base);
+    if (!docked && r.solar.empty() && fs.vfs && fs.mission) {
+        const auto& order = game::story_missions();
+        auto it = std::find_if(order.begin(), order.end(), [&](const std::string& n) { return iequals(n, fs.mission->name); });
+        for (auto next = it == order.end() ? it : it + 1; next != order.end() && next <= it + 2; ++next) {
+            std::string file = "missions/" + to_lower(*next) + "/" + to_lower(*next) + ".ini";
+            if (!fs.vfs->exists(file)) continue;
+            FlightSession::Mission later;
+            later.script = parse_mission(parse_ini(fs.vfs->read(file)));
+            if (auto solar = fs.solar_with_base(later, r.base); !solar.empty()) {
+                fs.spawn_solar(later, solar);
+                break;
+            }
+        }
+        docked = fs.dock_at_base(renderer.system(), r.base);
+    }
+    if (!docked) {
         SDL_Log("cannot move the player to %s", r.base.c_str());
         return;
     }
