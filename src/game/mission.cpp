@@ -230,4 +230,53 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
     }
 }
 
+MissionStart mission_start(const MissionScript& script) {
+    MissionStart out;
+    std::vector<const MsnTrigger*> frontier;
+    std::vector<std::string> seen;
+    auto visit = [&](const MsnTrigger* t) {
+        if (!t || std::find(seen.begin(), seen.end(), to_lower(t->nickname)) != seen.end()) return;
+        seen.push_back(to_lower(t->nickname));
+        frontier.push_back(t);
+    };
+    for (auto& t : script.triggers)
+        if (t.initially_active) visit(&t);
+    // Two steps past the starting triggers covers "start -> bar scene -> enter bar".
+    for (int depth = 0; depth < 3 && !frontier.empty(); ++depth) {
+        std::vector<const MsnTrigger*> now;
+        now.swap(frontier);
+        for (auto* t : now) {
+            if (out.system.empty() && !t->system.empty() && !iequals(t->system, "ALL") && !iequals(t->system, "ANY"))
+                out.system = t->system;
+            for (auto& c : t->conditions) {
+                bool loc = iequals(c.name, "LocEnter");
+                std::string base = iequals(c.name, "BaseEnter") ? c.arg(0) : loc ? c.arg(1) : "";
+                if (base.empty()) continue;
+                std::string room = loc ? c.arg(0) : "";
+                auto same = [&](const MissionStart::Place& p) { return iequals(p.base, base); };
+                auto it = std::find_if(out.places.begin(), out.places.end(), same);
+                if (it == out.places.end()) out.places.push_back({base, room});
+                else if (it->room.empty()) it->room = room;
+            }
+        }
+        for (auto* t : now)
+            for (auto& a : t->actions)
+                if (iequals(a.name, "ActTrig")) visit(script.trigger(a.arg(0)));
+    }
+    return out;
+}
+
+const std::vector<std::string>& story_missions() {
+    static const std::vector<std::string> list{"M01a", "M01b", "M02", "M03", "M04", "M05", "M06",
+                                               "M07",  "M08",  "M09", "M10", "M11", "M12", "M13"};
+    return list;
+}
+
+std::string next_story_mission(std::string_view mission) {
+    auto& l = story_missions();
+    for (std::size_t i = 0; i + 1 < l.size(); ++i)
+        if (iequals(l[i], mission)) return l[i + 1];
+    return {};
+}
+
 }  // namespace sterrenvaarder::game

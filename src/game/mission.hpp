@@ -107,4 +107,21 @@ private:
     int outcome_ids_ = 0;
 };
 
+// Where a story mission begins, read from its starting triggers (InitState = ACTIVE) and
+// the triggers those switch on: the system they are bound to, and the bases they wait for
+// the player to enter (Cnd_BaseEnter, Cnd_LocEnter: base and room), nearest first. Empty when the script
+// names none. The original carries the player over from the previous mission; this lets a
+// mission be started on its own.
+struct MissionStart {
+    std::string system;
+    struct Place { std::string base, room; };  // room empty for Cnd_BaseEnter
+    std::vector<Place> places;
+};
+MissionStart mission_start(const MissionScript& script);
+
+// The story missions in the order they are played.
+const std::vector<std::string>& story_missions();
+// The mission after this one, or empty after the last.
+std::string next_story_mission(std::string_view mission);
+
 }  // namespace sterrenvaarder::game
