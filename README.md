@@ -135,7 +135,7 @@ read as data only. Markets, prices and cargo space come from `goods.ini`, `marke
 and the ship's `hold_size`; a base sells at the same price it buys, as in the original.
 
 ```sh
-./build/sterrenvaarder --data /path/to/DATA --new-game   # docked on Planet Manhattan, as in a new game
+./build/sterrenvaarder --data /path/to/DATA --new-game   # a new story game, from where EXE/NewPlayer.FL begins it
 ./build/sterrenvaarder --data /path/to/DATA --load save.ini
 ```
 
@@ -181,7 +181,7 @@ script and lists the conditions the runner doesn't evaluate yet.
 - When a room cutscene ends, the script hears `RTCDone`. A cutscene with `relocate_player = room, base` moves the player there, if need be to another system.
 - `--win T` makes the running mission succeed at T seconds, to test the hand-over.
 - `--thorn scene.thn,Object` plays a space cutscene around that object once you are in space. Ships the scene places itself are drawn too.
-- `CallThorn = scene, object` plays a cutscene in space. Its camera takes over (Enter skips) and the flight HUD steps aside. The scene's "main object" marker is pinned to the object, so cameras and paths attached to it follow the ship. Ships placed by the scene itself are not drawn yet.
+- `CallThorn = scene, object` plays a cutscene in space. Its camera takes over (Enter skips) and the flight HUD steps aside. The scene's "main object" marker is pinned to the object, so cameras and paths attached to it follow the ship. Ships the scene places itself are drawn too.
 - `PlayerEnemyClamp = min, max`: at most `max` enemies attack the player at once, and the others keep 2.5 km away without firing. `RpopAttClamp = true` makes random traffic count too. This is our reading of the two actions. `Save` writes an autosave next to the quick save.
 - Mission ships spawn with the ship, loadout and pilot from their `[NPCShipArch]`. Whether they are hostile follows your reputation with their faction.
 - Radio calls and dialogs play one after another, spoken in the speaker's voice.
@@ -191,6 +191,9 @@ script and lists the conditions the runner doesn't evaluate yet.
 - `SpawnFormation` places a formation's ships in the slots from `missions/formations.ini`. The first ship leads and the others follow it.
 - Docking, launching, changing rooms and leaving a system are reported to the script (SpaceExit, BaseExit, PlayerLaunch, LaunchComplete, LocEnter/LocExit, SystemExit).
 - On a base, tab 4 (key `4`) opens the bar. Entering a room counts for the script (`LocEnter`) for as long as you stay in it.
+- A new game reads EXE/NewPlayer.FL (plain or scrambled with the usual "FLS1" scheme) for the starting system, position, heading and first story mission, so it begins in space with the mission's opening, as the original does. `ForceLand` lands the player at a base, in another system if need be.
+- `PopUpDialog` shows a message box; Enter closes it (`Cnd_PopUpDialog`). When the mission waits for you to talk to someone in the room you stand in (`CharSelect`), the base screen shows "T = TALK TO ..." and `T` does it. `SetShipAndLoadout` gives the player that ship and loadout.
+- Room cutscenes also run in runs without a window, so a screenshot run plays a mission through. There, `--answer accept` also closes message boxes and talks to whoever the mission waits for, and `--tab 3@250,room@560` opens the bar at 250 s and goes back to the start room at 560 s.
 - A mission offer shows a panel with its title and text (from the offer scene's `mission_text_id`, or `SetTitle`/`SetOffer`) and "ACCEPT MISSION?". `Y` accepts and `N` declines (`MsnResponse`). For screenshot runs, `--answer accept|reject` answers it and `--launch T` launches from the base at T seconds.
 - Navigation objectives (`navmarker`, `rep_inst`) and `NNPath` put a waypoint on the HUD: a marker with its name and distance, or an arrow at the edge of the view. `NNIds ..., HISTORY` and `SetNNObj ..., OBJECTIVE_HISTORY` write the mission log.
 - `AddRTC`/`RemoveRTC` queue the room cutscenes from `[CharacterEncounter]` files. They count as played when you enter their room; the scenes themselves follow later.

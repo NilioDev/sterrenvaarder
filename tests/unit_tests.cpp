@@ -1160,8 +1160,40 @@ static void test_mission_start() {
     rr.event({game::MissionEvent::Type::RTCDone, "SCENES/one.ini", "", ""});
     rr.update(0.1f, dw, act);
     CHECK(pings == 1);
+    // Message boxes and talking to someone in a room.
+    MissionScript ps = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_pop\nInitState = ACTIVE\nCnd_PopUpDialog = CLOSE\nAct_Ping = x\n"
+        "[Trigger]\nnickname = t_talk\nInitState = ACTIVE\nCnd_CharSelect = guide, Bar, Sys01_01_Base\nAct_Ping = x\n"));
+    game::MissionRunner pr(ps);
+    pings = 0;
+    pr.start();
+    CHECK(pr.waiting_on("CharSelect").size() == 1 && pr.waiting_on("CharSelect")[0].arg(0) == "guide");
+    pr.event({game::MissionEvent::Type::CharSelect, "guide", "Bar", "Sys02_01_Base"});
+    pr.update(0.1f, dw, act);
+    CHECK(pings == 0);
+    pr.event({game::MissionEvent::Type::CharSelect, "GUIDE", "bar", "sys01_01_base"});
+    pr.event({game::MissionEvent::Type::PopUpDialog, "close", "", ""});
+    pr.update(0.1f, dw, act);
+    CHECK(pings == 2 && pr.waiting_on("CharSelect").empty());
     auto rel = parse_rtc(parse_text_ini("[CharacterEncounter]\nLocation = b1, Bar\nrelocate_player = Deck2, b2\n"));
     CHECK(rel.relocate_player == "Deck2" && rel.relocate_base == "b2");
+}
+
+static void test_new_player_file() {
+    std::string text = "[Player]\nsystem = Sys09 ; where it starts\npos = 100, -2.5, 3000\nrotate = 0, 90, 180\n"
+                       "name = %%NAME%%\n[StoryInfo]\nMission = Mission_07b\n";
+    // Plain text passes through; the scrambled form ("FLS1" + XOR with "Gene") decodes to it.
+    std::vector<std::uint8_t> plain(text.begin(), text.end());
+    CHECK(decode_fl_file(plain) == text);
+    std::vector<std::uint8_t> packed{'F', 'L', 'S', '1'};
+    const char key[4] = {'G', 'e', 'n', 'e'};
+    for (std::size_t i = 0; i < text.size(); ++i)
+        packed.push_back(static_cast<std::uint8_t>(text[i] ^ (((static_cast<unsigned>(key[i % 4]) + i) & 0xFFu) | 0x80u)));
+    CHECK(decode_fl_file(packed) == text);
+    auto st = read_new_player(decode_fl_file(packed));
+    CHECK(st && st->system == "Sys09" && st->mission == "M07b");
+    CHECK(st && st->pos[0] == 100 && st->pos[1] == -2.5 && st->pos[2] == 3000 && st->rotate[1] == 90 && st->rotate[2] == 180);
+    CHECK(!read_new_player("[StoryInfo]\nMission = Mission_01\n"));
 }
 
 static void test_euler_degrees() {
@@ -1437,6 +1469,7 @@ static void test_postfx() {
 
 int main() {
     test_mission();
+    test_new_player_file();
     test_population();
     test_dfm_strips();
     test_skinning();

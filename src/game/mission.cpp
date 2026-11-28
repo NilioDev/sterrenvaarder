@@ -107,12 +107,21 @@ bool MissionRunner::waiting_for(std::string_view condition) const {
     return false;
 }
 
+std::vector<MsnCommand> MissionRunner::waiting_on(std::string_view condition) const {
+    std::vector<MsnCommand> out;
+    for (std::size_t i = 0; i < states_.size(); ++i)
+        if (states_[i].active)
+            for (auto& c : script_.triggers[i].conditions)
+                if (iequals(c.name, condition)) out.push_back(c);
+    return out;
+}
+
 bool MissionRunner::knows_condition(std::string_view n) {
     static const char* known[] = {"True",       "Timer",        "CommComplete", "Destroyed",    "WatchTrigger",
                                   "DistShip",   "DistVec",      "HealthDec",    "SpaceEnter",   "SpaceExit",
                                   "BaseEnter",  "BaseExit",     "SystemEnter",  "SystemExit",   "PlayerLaunch",
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
-                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone"};
+                                  "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -191,6 +200,12 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return any_event(T::LocExit, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "RTCDone"))
         return any_event(T::RTCDone, [&](const MissionEvent& e) { return same_data_path(e.a, c.arg(0)); });
+    if (iequals(n, "CharSelect"))
+        return any_event(T::CharSelect, [&](const MissionEvent& e) {
+            return iequals(e.a, c.arg(0)) && is(e.b, c.arg(1)) && is(e.c, c.arg(2));
+        });
+    if (iequals(n, "PopUpDialog"))
+        return any_event(T::PopUpDialog, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)); });
     if (iequals(n, "MsnResponse"))
         return any_event(T::MsnResponse, [&](const MissionEvent& e) { return iequals(e.a, c.arg(0)); });
     if (iequals(n, "ProjHit")) {

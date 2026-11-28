@@ -3,6 +3,7 @@
 // Goods, markets and bases from the player's data (goods.ini, market_*.ini, universe.ini).
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -106,5 +107,19 @@ struct NewGameProfile {
     std::string rep_group;  // faction whose standing a new player starts with
 };
 std::optional<NewGameProfile> read_new_character(const Vfs& vfs);
+
+// Character files (.fl) are stored either as text or scrambled: "FLS1", then each byte
+// XORed with ((key[i % 4] + i) mod 256) | 0x80, key "Gene". Returns the text either way.
+std::string decode_fl_file(std::span<const std::uint8_t> bytes);
+
+// Where a new story game begins (EXE/NewPlayer.FL): [Player] system, pos, rotate and
+// the [StoryInfo] mission ("Mission_01a" -> "M01a").
+struct StoryStart {
+    std::string system;
+    double pos[3] = {0, 0, 0};
+    float rotate[3] = {0, 0, 0};  // degrees about x, y, z
+    std::string mission;
+};
+std::optional<StoryStart> read_new_player(std::string_view text);
 
 }  // namespace sterrenvaarder
