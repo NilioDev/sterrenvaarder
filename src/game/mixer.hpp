@@ -19,6 +19,8 @@ public:
     Handle play(std::shared_ptr<const Sound> sound, float gain = 1, bool loop = false);
     void stop(Handle h);
     void set_gain(Handle h, float gain);
+    // Moves a sound's volume to `gain` over `seconds`; with stop_at_end it ends there.
+    void fade(Handle h, float gain, float seconds, bool stop_at_end = false);
     bool playing(Handle h) const;
     void set_master(float gain) { master_ = gain; }
 
@@ -33,6 +35,8 @@ private:
         double pos = 0;  // in source frames
         float gain = 1;
         bool loop = false;
+        float fade_to = 1, fade_step = 0;  // per output frame; 0 = no fade
+        bool stop_after_fade = false;
     };
     int rate_;
     float master_ = 1;
