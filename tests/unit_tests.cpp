@@ -876,8 +876,10 @@ static void test_thn_player() {
     mv.target = "box";
     mv.has_pos = mv.has_orient = true;
     mv.pos = {10, 0, 0};
-    mv.q = {h, 0, h, 0};  // w, x, y, z
+    mv.q = {0, 0, 1, 0};  // w, x, y, z as scenes store it: cos and sin of the whole 90 degrees
     s.moves.push_back(mv);
+    auto mq = game::move_quat(mv.q);
+    CHECK(std::abs(mq[0] - h) < 1e-5f && std::abs(mq[2] - h) < 1e-5f);
     s.cuts.push_back({0, "CamA"});
     s.cuts.push_back({1, "CamB"});
     ThnCameraProp zoom;
@@ -1174,6 +1176,42 @@ static void test_euler_degrees() {
     CHECK(std::abs(zero.x) + std::abs(zero.y) + std::abs(zero.z) < 1e-4f);
 }
 
+static void test_thn_attach() {
+    // Self-written scene: a marker pinned to an object outside the scene, a probe riding
+    // 10 m in front of it (in its frame), and a camera that keeps looking at the probe.
+    ThnScript s;
+    s.duration = 5;
+    ThnEntity marker, probe, cam;
+    marker.name = "Main";
+    probe.name = "Probe";
+    probe.pos = {0, 0, -10};
+    cam.name = "Cam";
+    cam.type = "CAMERA";
+    cam.pos = {0, 50, 0};
+    s.entities = {marker, probe, cam};
+    ThnAttach ride;
+    ride.child = "Probe";
+    ride.parent = "Main";
+    ride.position = ride.orientation = ride.relative = true;
+    ThnAttach look;
+    look.child = "Cam";
+    look.parent = "Probe";
+    look.look_at = true;
+    s.attachments = {ride, look};
+    s.cuts.push_back({0, "Cam"});
+    game::ThnPlayer p(s);
+    // The object stands at x = 100 turned 90 degrees left: its forward (-Z) is world -X.
+    p.bind("Main", {100, 0, 0}, {0, 0, -1, 0, 1, 0, 1, 0, 0});  // rows: right, up, back
+    p.seek(1);
+    auto* pr = p.state("probe");
+    CHECK(pr && std::abs(pr->pos.x - 90) < 1e-3f && std::abs(pr->pos.z) < 1e-3f);
+    game::ThnPlayer::View v;
+    CHECK(p.view(v));
+    // From (0, 50, 0) towards (90, 0, 0).
+    float len = std::sqrt(90.f * 90.f + 50.f * 50.f);
+    CHECK(std::abs(v.forward.x - 90 / len) < 1e-3f && std::abs(v.forward.y + 50 / len) < 1e-3f);
+}
+
 static void test_voices() {
     // Self-written voice list: a voice, its lines, and a later section extending it.
     VoiceDb db;
@@ -1410,6 +1448,7 @@ int main() {
     test_voices();
     test_radio();
     test_mission_start();
+    test_thn_attach();
     test_euler_degrees();
     test_mission_music();
     test_music_mood();

@@ -107,6 +107,7 @@ ThnScript ThnScript::parse(Bytes data) {
             m.time = static_cast<float>(e[1].num());
             m.duration = static_cast<float>(p["duration"].num());
             m.target = target_of(e[3]);
+            if (e[3].is_table() && e[3].size() >= 2) m.to = e[3][2].str();
             if (sp["pos"].size() >= 3) {
                 m.has_pos = true;
                 m.pos = vec3(sp["pos"]);
@@ -129,7 +130,33 @@ ThnScript ThnScript::parse(Bytes data) {
             a.start = static_cast<float>(p["start_percent"].num(0));
             a.stop = static_cast<float>(p["stop_percent"].num(1));
             a.offset = vec3(p["offset"]);
+            const std::string& fl = p["flags"].str();
+            if (!fl.empty()) {
+                a.position = fl.find("POSITION") != std::string::npos;
+                a.orientation = fl.find("ORIENTATION") != std::string::npos;
+                a.look_along = fl.find("LOOK_AT") != std::string::npos;
+            }
             if (!a.target.empty() && !a.path.empty()) out.path_anims.push_back(std::move(a));
+            continue;
+        }
+        if (kind == "ATTACH_ENTITY") {
+            const LuaValue& who = e[3];
+            const LuaValue& p = e[4];
+            ThnAttach a;
+            a.time = static_cast<float>(e[1].num());
+            a.duration = static_cast<float>(p["duration"].num());
+            a.child = target_of(who);
+            a.parent = who.is_table() && who.size() >= 2 ? who[2].str() : std::string();
+            a.offset = vec3(p["offset"]);
+            const std::string& fl = p["flags"].str();
+            a.relative = fl.find("ENTITY_RELATIVE") != std::string::npos;
+            a.orientation_relative = fl.find("ORIENTATION_RELATIVE") != std::string::npos;
+            a.look_at = fl.find("LOOK_AT") != std::string::npos;
+            a.position = fl.find("POSITION") != std::string::npos;
+            // "ORIENTATION" on its own, not only as part of ORIENTATION_RELATIVE
+            for (std::size_t at = fl.find("ORIENTATION"); at != std::string::npos; at = fl.find("ORIENTATION", at + 1))
+                if (fl.compare(at, 20, "ORIENTATION_RELATIVE") != 0) a.orientation = true;
+            if (!a.child.empty() && !a.parent.empty()) out.attachments.push_back(std::move(a));
             continue;
         }
         if (kind == "START_CAMERA_PROP_ANIM") {
