@@ -17,6 +17,7 @@
 #include "sterrenvaarder/universe.hpp"
 #include "game/skin.hpp"
 #include "game/thn_player.hpp"
+#include "game/radio.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include <algorithm>
@@ -405,6 +406,33 @@ int main(int argc, char** argv) {
             }
         std::printf("voices: %zu voices, %zu lines, %zu found, %zu decode (%.0f minutes)\n", voices.size(), lines, found, decoded,
                     seconds / 60);
+        // Docking replies: each part of a base's answer should be a line of its radio voice.
+        if (vfs.exists("universe/universe.ini")) {
+            Universe uni(vfs);
+            std::size_t calls = 0, parts = 0, missing = 0;
+            std::map<std::size_t, std::size_t> missing_at;  // part index -> count
+            for (auto& name : uni.system_names()) {
+                std::string file = uni.system_file(name);
+                if (file.empty() || !vfs.exists(file)) continue;
+                for (auto& sec : parse_ini(vfs.read(file))) {
+                    if (!iequals(sec.name, "Object")) continue;
+                    auto* v = sec.find("voice");
+                    auto* b = sec.find("base");
+                    if (!b) b = sec.find("dock_with");
+                    if (!v || !b || !v->at(0) || !b->at(0)) continue;
+                    const Voice* voice = voices.voice(v->at(0)->as_string());
+                    ++calls;
+                    auto ls = game::dock_reply_lines(b->at(0)->as_string(), true);
+                    for (std::size_t i = 0; i < ls.size(); ++i) {
+                        ++parts;
+                        if (!voice || !voice->lines.count(to_lower(ls[i]))) ++missing, ++missing_at[i];
+                    }
+                }
+            }
+            std::printf("docking replies: %zu bases with a voice, %zu parts, %zu missing", calls, parts, missing);
+            for (auto& [i, n] : missing_at) std::printf(" (part %zu: %zu)", i + 1, n);
+            std::printf("\n");
+        }
     }
     // Random traffic: every populated zone's encounters should find ships for each slot.
     {
