@@ -1419,6 +1419,29 @@ static void test_mission_any_system() {
     r.update(0.1f, w, [](const MsnCommand&, const MsnTrigger&) {});
     CHECK(r.fired("t_any") && !r.fired("t_other"));
 
+    // A repeatable trigger on a state (docked on a base) fires once per landing.
+    MissionScript rep = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_land\nInitState = ACTIVE\nrepeatable = true\nCnd_BaseEnter = Base1\nAct_Ping = land\n"));
+    struct Dock : MissionWorld {
+        bool docked = true;
+        std::string system() const override { return "Sys1"; }
+        bool in_space() const override { return !docked; }
+        std::string base() const override { return docked ? "Base1" : ""; }
+        std::optional<DVec3> position(std::string_view) const override { return std::nullopt; }
+        float health(std::string_view) const override { return 1; }
+    } dock;
+    MissionRunner rr(rep);
+    int lands = 0;
+    auto count = [&](const MsnCommand& c, const MsnTrigger&) { lands += c.name == "Ping"; };
+    rr.start();
+    for (int i = 0; i < 5; ++i) rr.update(0.1f, dock, count);
+    CHECK(lands == 1);
+    dock.docked = false;
+    rr.update(0.1f, dock, count);
+    dock.docked = true;
+    rr.update(0.1f, dock, count);
+    CHECK(lands == 2);
+
     // Loot: parsed, and taking it in (LootAcquired = loot, Player) fires.
     MissionScript l = parse_mission(parse_text_ini(
         "[MsnLoot]\nnickname = pod\narchetype = pod_arch\nrel_pos_obj = boss\nrel_pos_offset = 50, 0, 0\nequip_amount = 1\n"

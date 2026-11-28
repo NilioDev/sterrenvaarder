@@ -42,6 +42,7 @@ void MissionRunner::activate(std::string_view trigger) {
     s.events_from = events_.size();
     s.closest = -1;
     s.apart_since = -1;
+    s.armed = true;
 }
 
 MissionRunner::Progress MissionRunner::progress() const {
@@ -131,7 +132,7 @@ bool MissionRunner::knows_condition(std::string_view n) {
                                   "LaunchComplete", "TLEntered", "TLExited",    "LocEnter",     "LocExit",
                                   "MsnResponse", "ProjHit",     "InSpace",      "RTCDone",      "PopUpDialog",  "CharSelect",   "PlayerManeuver",
                                   "DistVecLbL",  "ProjHitShipToLbl", "InTradelane", "JumpInComplete", "DistCircle",
-                                  "NPCSystemEnter", "TetherBroke", "LootAcquired"};
+                                  "NPCSystemEnter", "TetherBroke", "LootAcquired", "HasMsn"};
     for (auto* k : known)
         if (iequals(n, k)) return true;
     return false;
@@ -248,6 +249,7 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         return hits >= need;
     }
     if (iequals(n, "InTradelane")) return w.in_tradelane(c.arg(1)) == c.args[0].as_bool();
+    if (iequals(n, "HasMsn")) return w.has_job() == (c.args.empty() || !iequals(c.arg(0), "no"));  // HasMsn = yes | no
     if (iequals(n, "LootAcquired"))
         return any_event(T::LootAcquired, [&](const MissionEvent& e) { return is(e.a, c.arg(0)) && is(e.b, c.arg(1)); });
     if (iequals(n, "JumpInComplete"))
@@ -305,7 +307,10 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) continue;
         bool ok = !t.conditions.empty();
         for (auto& c : t.conditions) ok = ok && holds(t, c, s, w);
-        if (ok) ready.push_back(i);
+        // A repeatable trigger fires again only once its conditions have gone false in
+        // between: "player is on the base" fires once per landing, not every frame.
+        if (!ok) states_[i].armed = true;
+        else if (s.armed) ready.push_back(i);
     }
     for (std::size_t i : ready) {
         auto& s = states_[i];
@@ -315,6 +320,7 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         if (t.repeatable) {
             s.since = clock_;
             s.events_from = events_.size();
+            s.armed = false;
         } else {
             s.active = false;
         }

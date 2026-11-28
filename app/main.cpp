@@ -831,6 +831,7 @@ struct FlightSession {
         bool was_docked = false;
         std::string last_room, last_system, last_base;
         bool seen = false;
+        std::optional<std::pair<std::string, float>> jump_in;  // JumpInComplete due: system, seconds left
         int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
         float next_in = -1;     // after success: seconds until the next story mission
         std::set<std::string> maneuver_off;  // EnableManeuver = name, false: maneuvers switched off (lower case)
@@ -1915,6 +1916,33 @@ struct FlightSession {
                 autoplay_doing = "flies to the meeting point";
                 return;
             }
+        // No waypoint, but the mission waits for the player in a system next door
+        // (SystemEnter = system): head for the jump gate (or hole) that goes there.
+        if (mission && mission->runner && !(mission->waypoint && iequals(mission->waypoint->system, sys.nickname)))
+            for (auto& c : mission->runner->waiting_on("SystemEnter")) {
+                if (c.args.empty() || iequals(c.arg(0), sys.nickname)) continue;
+                const SystemObject* gate = nullptr;
+                for (auto& o : sys.objects)
+                    if (o.is_jump() && iequals(o.goto_system, c.arg(0)) &&
+                        (!gate || (DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() < (DVec3{gate->pos.x, gate->pos.y, gate->pos.z} - ship.pos).length()))
+                        gate = &o;
+                if (!gate) continue;
+                DVec3 to = DVec3{gate->pos.x, gate->pos.y, gate->pos.z} - ship.pos;
+                double d = to.length();
+                if (d < 1200) {
+                    contacts.push_back({gate->nickname, {}, 0, true});
+                    target = static_cast<int>(contacts.size() - 1);
+                    dock_request(sys);
+                    autoplay_doing = "takes " + gate->nickname;
+                    return;
+                }
+                Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                input.throttle = 1.f;
+                input.cruise = d > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
+                autoplay_doing = "flies to " + gate->nickname;
+                return;
+            }
         auto m = nav_map(sys);
         if (!m.has_waypoint) {
             input.throttle = 0;
@@ -1940,20 +1968,31 @@ struct FlightSession {
             bool space_work = false;  // the mission still waits for something out here
             if (mission && mission->runner)
                 for (const char* k : {"DistShip", "DistVec", "DistVecLbL", "DistCircle", "TLEntered", "InTradelane", "PlayerManeuver", "JumpInComplete"})
-                    for (auto& c : mission->runner->waiting_on(k))
-                        space_work = space_work || !iequals(c.arg(0), "outside");  // "outside" is a leash, not a goal
+                    for (auto& c : mission->runner->waiting_on(k)) {
+                        // "outside" is a leash, not a goal; and it must be about the player.
+                        bool player = iequals(k, "PlayerManeuver") || iequals(k, "JumpInComplete");
+                        for (auto& v : c.args) player = player || iequals(v.as_string(), "Player");
+                        space_work = space_work || (player && !iequals(c.arg(0), "outside"));
+                    }
             if (mission && mission->runner && !space_work && !mission->maneuver_off.count("dock"))
                 for (const char* cnd : {"BaseEnter", "LocEnter"})
-                    for (auto& c : mission->runner->waiting_on(cnd))
-                        for (auto& o : sys.objects)
-                            if (!o.base.empty() && (iequals(o.base, c.arg(0)) || iequals(o.base, c.arg(1))) &&
-                                (DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() < 3000) {
-                                contacts.push_back({o.nickname, {}, 0, true});
-                                target = static_cast<int>(contacts.size() - 1);
-                                dock_request(sys);
-                                autoplay_doing = "lands at " + o.nickname;
-                                return;
-                            }
+                    for (auto& c : mission->runner->waiting_on(cnd)) {
+                        // The base's docking point (a planet's ring, a station's fixture) when it
+                        // has one, else the object that is the base.
+                        const SystemObject* best = nullptr;
+                        for (auto& o : sys.objects) {
+                            const std::string& b = !o.dock_with.empty() ? o.dock_with : o.base;
+                            if (b.empty() || !(iequals(b, c.arg(0)) || iequals(b, c.arg(1)))) continue;
+                            if ((DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() > 6000) continue;
+                            if (!best || (best->dock_with.empty() && !o.dock_with.empty())) best = &o;
+                        }
+                        if (!best) continue;
+                        contacts.push_back({best->nickname, {}, 0, true});
+                        target = static_cast<int>(contacts.size() - 1);
+                        dock_request(sys);
+                        autoplay_doing = "lands at " + best->nickname;
+                        return;
+                    }
             autoplay_doing = "waits at the objective";
             return;
         }
@@ -3686,10 +3725,14 @@ struct FlightSession {
                 }
                 if (!iequals(sys, m.last_system) && !m.last_system.empty()) {
                     m.runner->event({T::SystemExit, m.last_system, "", ""});
-                    if (!docked()) m.runner->event({T::JumpInComplete, sys, "", ""});
+                    if (!docked()) m.jump_in = {sys, 1.5f};  // once the jump tunnel is behind the player
                 }
             } else if (!room.empty()) {
                 m.runner->event({T::LocEnter, room, player.base, ""});  // starting in a room
+            }
+            if (m.jump_in && (m.jump_in->second -= dt) <= 0) {
+                if (iequals(m.jump_in->first, sys)) m.runner->event({T::JumpInComplete, sys, "", ""});
+                m.jump_in.reset();
             }
             m.seen = true;
             m.was_docked = docked();
@@ -3828,6 +3871,19 @@ struct FlightSession {
             } else if (iequals(a.name, "SpawnSolar")) {
                 spawn_solar(m, a.arg(0));
             } else if (iequals(a.name, "GiveObjList")) {
+                // To the player, a list's FollowPlayer = formation, ships... puts those ships
+                // in the player's wing: they follow the player.
+                if (auto* ol = m.script.obj_list(a.arg(1)); ol && iequals(a.arg(0), "Player"))
+                    for (auto& step : ol->steps)
+                        if (iequals(step.name, "FollowPlayer"))
+                            for (std::size_t i = 1; i < step.args.size(); ++i)
+                                for_mission_ships(step.arg(i), [&](NpcShip& n) {
+                                    MsnCommand follow;
+                                    follow.name = "FollowPlayer";
+                                    n.orders = {follow};
+                                    n.order_step = 0;
+                                    n.order_time = 0;
+                                });
                 if (auto* ol = m.script.obj_list(a.arg(1)))
                     for_mission_ships(a.arg(0), [&](NpcShip& n) {
                         n.orders = ol->steps;

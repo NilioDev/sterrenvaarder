@@ -49,6 +49,7 @@ class MissionWorld {
 public:
     virtual ~MissionWorld() = default;
     virtual std::string system() const = 0;   // current system nickname
+    virtual bool has_job() const { return false; }  // a job (random mission) taken on the side
     virtual bool in_space() const = 0;
     virtual std::string base() const = 0;     // docked base, empty in space
     // A ship, solar or "Player" by nickname; nothing when it isn't there.
@@ -103,6 +104,7 @@ private:
         std::size_t events_from = 0;  // first event it may react to
         mutable double closest = -1;  // DistShip ... TICK_AWAY: the nearest it has seen (-1: none yet)
         mutable double apart_since = -1;  // TetherBroke: clock when the two drifted apart (-1: together)
+        bool armed = true;         // repeatable: its conditions went false since it last fired
     };
     bool holds(const MsnTrigger& t, const MsnCommand& c, const State& s, const MissionWorld& w) const;
     void activate(std::string_view trigger);
