@@ -720,6 +720,8 @@ static void test_mission() {
     auto archs = parse_npc_ship_archs(parse_text_ini(
         "[NPCShipArch]\nnickname = arch_a\nloadout = lo_a\nship_archetype = ship_a\npilot = pilot_a\nnpc_class = lawful, FIGHTER\n"));
     CHECK(archs.size() == 1 && archs[0].ship_archetype == "ship_a" && archs[0].npc_class.size() == 2);
+    auto forms = parse_formations(parse_text_ini("[Formation]\nnickname = vee\npos = 0, 0, 0\npos = -20, 0, 20\npos = 20, 0, 20\n"));
+    CHECK(forms.size() == 1 && forms[0].slots.size() == 3 && forms[0].slots[1][0] == -20.f);
     CHECK(m.title_ids == 10 && m.reward == 500 && m.triggers.size() == 7 && m.ships.size() == 2);
     CHECK(m.trigger("t_wait") && m.trigger("t_wait")->conditions[0].name == "Timer" && m.trigger("t_start")->initially_active);
 

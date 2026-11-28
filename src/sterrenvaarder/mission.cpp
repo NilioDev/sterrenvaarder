@@ -146,6 +146,24 @@ MissionScript parse_mission(const IniFile& ini) {
     return m;
 }
 
+std::vector<FormationShape> parse_formations(const IniFile& ini) {
+    std::vector<FormationShape> out;
+    for (auto& sec : ini) {
+        if (!iequals(sec.name, "Formation")) continue;
+        FormationShape f;
+        for (auto& e : sec.entries) {
+            if (iequals(e.key, "nickname")) f.nickname = first(e);
+            else if (iequals(e.key, "pos")) {
+                std::array<float, 3> p{0, 0, 0};
+                read_vec(e, p.data(), 3);
+                f.slots.push_back(p);
+            }
+        }
+        if (!f.nickname.empty()) out.push_back(std::move(f));
+    }
+    return out;
+}
+
 std::vector<NpcShipArch> parse_npc_ship_archs(const IniFile& ini) {
     std::vector<NpcShipArch> out;
     for (auto& sec : ini) {

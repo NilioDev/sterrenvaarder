@@ -4,6 +4,7 @@
 // objective lists, dialogs and the triggers that drive it. A trigger waits for its one
 // condition (Cnd_*) while active, then runs its actions (Act_*). Commands keep their raw
 // arguments; the mission runner (game/mission.hpp) gives them meaning.
+#include <array>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -107,5 +108,12 @@ struct NpcShipArch {
     std::vector<std::string> npc_class;
 };
 std::vector<NpcShipArch> parse_npc_ship_archs(const IniFile& ini);
+
+// [Formation] from missions/formations.ini: each ship's slot relative to the leader.
+struct FormationShape {
+    std::string nickname;
+    std::vector<std::array<float, 3>> slots;  // pos entries, leader first
+};
+std::vector<FormationShape> parse_formations(const IniFile& ini);
 
 }  // namespace sterrenvaarder
