@@ -476,12 +476,17 @@ struct FlightSession {
     struct Mission {
         MissionScript script;
         std::vector<NpcShipArch> archs;
+        std::vector<FormationShape> shapes;
         std::optional<game::MissionRunner> runner;
         std::string objective;  // current objective text
         struct Comm { std::string speaker, line; float left; };
         std::vector<Comm> comms;  // radio calls: one plays at a time
         std::string result;       // shown when the mission ends
         std::vector<std::string> unhandled;  // action names logged once
+        // What the player did last frame, to report changes as events.
+        bool was_docked = false;
+        std::string last_room, last_system, last_base;
+        bool seen = false;
     };
     std::unique_ptr<Mission> mission;
     // Objects a mission puts into space ([MsnSolar] via SpawnSolar).
@@ -1345,6 +1350,7 @@ struct FlightSession {
             if (!path.empty() && vfs.exists(path))
                 for (auto& a : parse_npc_ship_archs(parse_ini(vfs.read(path)))) m->archs.push_back(std::move(a));
         }
+        if (vfs.exists("missions/formations.ini")) m->shapes = parse_formations(parse_ini(vfs.read("missions/formations.ini")));
         mission = std::move(m);
         mission->runner.emplace(mission->script);
         mission->runner->start();
@@ -1357,7 +1363,50 @@ struct FlightSession {
         return npc ? npc->nickname : std::string();
     }
 
-    void mission_spawn(const std::string& name) {
+    // SpawnFormation = formation [, x, y, z [, w, x, y, z]]: its ships in their slots, the
+    // first one leading and the others following it.
+    void mission_spawn_formation(const MsnCommand& a) {
+        auto& m = *mission;
+        const MsnFormationDef* f = nullptr;
+        for (auto& d : m.script.formations)
+            if (iequals(d.nickname, a.arg(0))) f = &d;
+        if (!f) return;
+        const FormationShape* shape = nullptr;
+        for (auto& sh : m.shapes)
+            if (iequals(sh.nickname, f->formation)) shape = &sh;
+        DVec3 pos{f->position[0], f->position[1], f->position[2]};
+        Quat q = Quat{f->orientation[0], f->orientation[1], f->orientation[2], f->orientation[3]}.normalized();
+        if (a.args.size() >= 4) pos = {a.num(1), a.num(2), a.num(3)};
+        if (a.args.size() >= 8) q = Quat{a.num(4), a.num(5), a.num(6), a.num(7)}.normalized();
+        std::string leader;
+        for (std::size_t i = 0; i < f->ships.size(); ++i) {
+            Vec3 slot = shape && i < shape->slots.size() ? Vec3{shape->slots[i][0], shape->slots[i][1], shape->slots[i][2]}
+                                                         : Vec3{(i % 2 ? -1.f : 1.f) * 30.f * ((i + 1) / 2), 0, 30.f * ((i + 1) / 2)};
+            std::size_t before = npcs.size();
+            mission_spawn(f->ships[i], pos + game::to_d(q.rotate(slot)), q);
+            if (npcs.size() == before) continue;
+            if (leader.empty()) {
+                leader = f->ships[i];
+            } else {
+                MsnCommand follow;
+                follow.name = "Follow";
+                for (const std::string& v : {leader, std::string("0")}) {
+                    IniValue iv;
+                    iv.s = v;
+                    follow.args.push_back(iv);
+                }
+                for (float c : {slot.x, slot.y, slot.z}) {
+                    IniValue iv;
+                    iv.type = IniValue::Type::Float;
+                    iv.f = c;
+                    follow.args.push_back(iv);
+                }
+                npcs.back().orders = {follow};
+            }
+        }
+    }
+
+    void mission_spawn(const std::string& name, std::optional<DVec3> at = std::nullopt, std::optional<Quat> facing = std::nullopt) {
         auto& m = *mission;
         const MsnShipDef* def = m.script.ship(name);
         const MsnNpcDef* npc = def ? m.script.npc(def->npc) : nullptr;
@@ -1373,8 +1422,8 @@ struct FlightSession {
         const Loadout* lo = db->loadout(arch->loadout);
         const Pilot* pilot = pilots && !arch->pilot.empty() ? pilots->pilot(arch->pilot) : nullptr;
         bool hostile = factions && !npc->affiliation.empty() && attitude_of(player.rep_with(npc->affiliation)) == Attitude::Hostile;
-        DVec3 pos{def->position[0], def->position[1], def->position[2]};
-        Quat q{def->orientation[0], def->orientation[1], def->orientation[2], def->orientation[3]};
+        DVec3 pos = at ? *at : DVec3{def->position[0], def->position[1], def->position[2]};
+        Quat q = facing ? *facing : Quat{def->orientation[0], def->orientation[1], def->orientation[2], def->orientation[3]};
         auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, npc_display_name(npc), pos, q.normalized(), hostile);
         n.mission_name = def->nickname;
         m.runner->ship_spawned(def->nickname);
@@ -1475,6 +1524,8 @@ struct FlightSession {
         return false;
     }
 
+    std::string room_view_name() const { return room.current; }
+
     // Every live mission ship with this nickname or label.
     template <class F>
     void for_mission_ships(const std::string& name, F f) {
@@ -1499,6 +1550,34 @@ struct FlightSession {
                 m.comms.erase(m.comms.begin());
             }
         }
+        // Report what changed since the last frame: docking, launching, rooms, systems.
+        {
+            using T = game::MissionEvent::Type;
+            std::string sys = rend ? rend->system().nickname : std::string();
+            // Rooms are named <base>_<room>; scripts use the room part ("Bar", "Equipment").
+            std::string room = docked() ? room_view_name() : std::string();
+            if (auto u = room.rfind('_'); u != std::string::npos) room = room.substr(u + 1);
+            if (m.seen) {
+                if (!m.was_docked && docked()) m.runner->event({T::SpaceExit, "", "", ""});
+                if (m.was_docked && !docked()) {
+                    m.runner->event({T::BaseExit, m.last_base, "", ""});
+                    m.runner->event({T::PlayerLaunch, "", "", ""});
+                    m.runner->event({T::LaunchComplete, "Player", "", ""});
+                }
+                if (!iequals(room, m.last_room)) {
+                    if (!m.last_room.empty()) m.runner->event({T::LocExit, m.last_room, m.last_base, ""});
+                    if (!room.empty()) m.runner->event({T::LocEnter, room, player.base, ""});
+                }
+                if (!iequals(sys, m.last_system) && !m.last_system.empty()) m.runner->event({T::SystemExit, m.last_system, "", ""});
+            } else if (!room.empty()) {
+                m.runner->event({T::LocEnter, room, player.base, ""});  // starting in a room
+            }
+            m.seen = true;
+            m.was_docked = docked();
+            m.last_room = room;
+            m.last_system = sys;
+            if (docked()) m.last_base = player.base;
+        }
         MissionView view(*this, rend ? rend->system().nickname : std::string());
         m.runner->update(dt, view, [&](const MsnCommand& a, const MsnTrigger&) {
             if (iequals(a.name, "SpawnShip")) {
@@ -1520,6 +1599,8 @@ struct FlightSession {
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
                 m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f});
+            } else if (iequals(a.name, "SpawnFormation")) {
+                mission_spawn_formation(a);
             } else if (iequals(a.name, "SpawnSolar")) {
                 for (auto& d : m.script.solars)
                     if (iequals(d.nickname, a.arg(0)) && universe && rend) {

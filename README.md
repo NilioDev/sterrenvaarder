@@ -178,6 +178,8 @@ script and lists the conditions the runner doesn't evaluate yet.
 - Objectives (`SetNNObj`) show their text from your game's own resources, and the outcome is shown when the mission ends.
 - Ships follow their orders (`GiveObjList`, or the list `SpawnShip` names): fly to a point or ship (cruising on long legs), follow a leader in formation, wait, dock and leave. Hostile ships break off to fight when the player comes within 1.5 km.
 - `SetVibe` and its label variants make ships friendly or hostile toward the player. `Cloak` hides a ship, `RelocateShip` moves one, and `SpawnSolar` places mission objects such as bases.
+- `SpawnFormation` places a formation's ships in the slots from `missions/formations.ini`. The first ship leads and the others follow it.
+- Docking, launching, changing rooms and leaving a system are reported to the script (SpaceExit, BaseExit, PlayerLaunch, LaunchComplete, LocEnter/LocExit, SystemExit).
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
