@@ -1243,8 +1243,52 @@ static void test_mission_start() {
     tr.event({game::MissionEvent::Type::PlayerManeuver, "dock", "RING_1", ""});
     tr.update(0.1f, mw, act);
     CHECK(pings == 2);
+    // A trigger of the system just left still sees the player leave it.
+    MissionScript xs = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_exit\nsystem = Sys02\nInitState = ACTIVE\nCnd_SystemExit = Sys02\nAct_Ping = x\n"));
+    game::MissionRunner xr(xs);
+    pings = 0;
+    xr.start();
+    xr.event({game::MissionEvent::Type::SystemExit, "Sys02", "", ""});
+    xr.update(0.1f, mw, act);  // mw is in Sys01 now
+    CHECK(pings == 1);
+    MissionScript ys = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_true\nsystem = Sys02\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = x\n"));
+    game::MissionRunner yr(ys);
+    pings = 0;
+    yr.start();
+    yr.update(0.1f, mw, act);  // True fires in Sys01 too
+    CHECK(pings == 1);
+    // "outside ..., distance, seconds": only after staying out that long without a break.
+    MissionScript hs = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = t_held\nInitState = ACTIVE\nCnd_DistShip = outside, Player, buoy, 1000, 2\nAct_Ping = x\n"));
+    game::MissionRunner hr(hs);
+    pings = 0;
+    hr.start();
+    mw.player_x = 2000;
+    for (int i = 0; i < 15; ++i) hr.update(0.1f, mw, act);
+    mw.player_x = 500;  // back inside: the count starts over
+    hr.update(0.1f, mw, act);
+    mw.player_x = 2000;
+    for (int i = 0; i < 15; ++i) hr.update(0.1f, mw, act);
+    CHECK(pings == 0);
+    for (int i = 0; i < 6; ++i) hr.update(0.1f, mw, act);
+    CHECK(pings == 1);
     auto rel = parse_rtc(parse_text_ini("[CharacterEncounter]\nLocation = b1, Bar\nrelocate_player = Deck2, b2\n"));
     CHECK(rel.relocate_player == "Deck2" && rel.relocate_base == "b2");
+}
+
+static void test_burst() {
+    // Over 25 s at 60 fps a ship fires about 1 s in every 2.5 s, whatever the rounding.
+    for (float start : {0.f, -1.5f, 1.f, -0.3f}) {
+        float b = start;
+        int on = 0;
+        for (int i = 0; i < 1500; ++i) {
+            game::step_burst(b, 1.f / 60);
+            on += b > 0;
+        }
+        CHECK(on > 500 && on < 700);
+    }
 }
 
 static void test_vibes() {
@@ -1406,7 +1450,7 @@ static void test_mission_any_system() {
     using namespace sterrenvaarder::game;
     MissionScript m = parse_mission(parse_text_ini(
         "[Trigger]\nnickname = t_any\nsystem = ANY\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = a\n"
-        "[Trigger]\nnickname = t_other\nsystem = Sys9\nInitState = ACTIVE\nCnd_True = no_params\nAct_Ping = b\n"));
+        "[Trigger]\nnickname = t_other\nsystem = Sys9\nInitState = ACTIVE\nCnd_Timer = 0\nAct_Ping = b\n"));
     struct World : MissionWorld {
         std::string system() const override { return "Sys1"; }
         bool in_space() const override { return true; }
@@ -1611,6 +1655,7 @@ int main() {
     test_mission();
     test_mission_any_system();
     test_new_player_file();
+    test_burst();
     test_vibes();
     test_population();
     test_dfm_strips();

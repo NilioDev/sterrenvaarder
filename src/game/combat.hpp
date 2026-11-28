@@ -43,6 +43,18 @@ struct Combatant {
     void update(float dt);
 };
 
+// NPC and turret fire comes in bursts: `burst` > 0 is the time left firing, < 0 the pause
+// left. 1 s on, 1.5 s off.
+inline void step_burst(float& burst, float dt) {
+    if (burst > 0) {
+        burst -= dt;
+        if (burst <= 0) burst = -1.5f;
+    } else {
+        burst += dt;
+        if (burst >= 0) burst = 1.0f;
+    }
+}
+
 struct Gun {
     const GunArchetype* arch = nullptr;
     const MunitionArchetype* munition = nullptr;

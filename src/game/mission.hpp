@@ -103,6 +103,7 @@ private:
         double since = 0;          // clock when it was activated
         std::size_t events_from = 0;  // first event it may react to
         mutable double closest = -1;  // DistShip ... TICK_AWAY: the nearest it has seen (-1: none yet)
+        mutable double held_since = -1;   // DistShip ..., seconds: clock since it has held (-1: not)
         mutable double apart_since = -1;  // TetherBroke: clock when the two drifted apart (-1: together)
         bool armed = true;         // repeatable: its conditions went false since it last fired
     };
@@ -114,7 +115,12 @@ private:
     const MissionScript& script_;
     std::vector<State> states_;
     std::unordered_map<std::string, std::size_t> index_;  // lower-case nickname -> trigger
-    std::vector<MissionEvent> events_;
+    // Events by type, each with its sequence number: a trigger looks only at the type it
+    // waits for, so thousands of ProjHit events in a big battle don't slow the others down.
+    std::unordered_map<int, std::vector<std::pair<std::size_t, MissionEvent>>> events_;
+    std::size_t event_count_ = 0;
+    std::string exited_system_;  // the system the player just left (until the next update)
+    template <class F> void each_event(MissionEvent::Type type, std::size_t from, F&& f) const;
     std::unordered_map<std::string, int> destroyed_;      // lower-case ship nickname
     std::unordered_map<std::string, int> spawned_labels_; // lower-case label -> ships spawned
     std::unordered_map<std::string, std::vector<std::string>> ship_labels_;

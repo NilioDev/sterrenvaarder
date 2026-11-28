@@ -39,9 +39,10 @@ void MissionRunner::activate(std::string_view trigger) {
     auto& s = states_[it->second];
     s.active = true;
     s.since = clock_;
-    s.events_from = events_.size();
+    s.events_from = event_count_;
     s.closest = -1;
     s.apart_since = -1;
+    s.held_since = -1;
     s.armed = true;
 }
 
@@ -59,6 +60,7 @@ MissionRunner::Progress MissionRunner::progress() const {
 void MissionRunner::restore(const Progress& p) {
     for (auto& s : states_) s = State{};
     events_.clear();
+    event_count_ = 0;
     for (auto& [n, count] : p.fired)
         if (auto it = index_.find(to_lower(n)); it != index_.end()) states_[it->second].fired = count;
     for (auto& n : p.active) activate(n);
@@ -76,13 +78,24 @@ bool MissionRunner::fired(std::string_view trigger) const {
 }
 
 void MissionRunner::event(MissionEvent e) {
+    if (e.type == MissionEvent::Type::SystemExit) exited_system_ = e.a;
     if (e.type == MissionEvent::Type::Destroyed) {
         std::string n = to_lower(e.a);
         ++destroyed_[n];
         if (auto it = ship_labels_.find(n); it != ship_labels_.end())
             for (auto& l : it->second) ++destroyed_["label:" + l];
     }
-    events_.push_back(std::move(e));
+    int type = static_cast<int>(e.type);
+    events_[type].emplace_back(event_count_++, std::move(e));
+}
+
+template <class F> void MissionRunner::each_event(MissionEvent::Type type, std::size_t from, F&& f) const {
+    auto it = events_.find(static_cast<int>(type));
+    if (it == events_.end()) return;
+    auto& v = it->second;
+    auto first = std::lower_bound(v.begin(), v.end(), from, [](const auto& p, std::size_t n) { return p.first < n; });
+    for (; first != v.end(); ++first)
+        if (f(first->second)) return;
 }
 
 void MissionRunner::ship_spawned(std::string_view nickname) {
@@ -141,9 +154,9 @@ bool MissionRunner::knows_condition(std::string_view n) {
 bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s, const MissionWorld& w) const {
     using T = MissionEvent::Type;
     auto any_event = [&](T type, auto&& match) {
-        for (std::size_t i = s.events_from; i < events_.size(); ++i)
-            if (events_[i].type == type && match(events_[i])) return true;
-        return false;
+        bool found = false;
+        each_event(type, s.events_from, [&](const MissionEvent& e) { return found = match(e); });
+        return found;
     };
     auto is = [](const std::string& a, const std::string& b) { return b.empty() || iequals(a, b) || iequals(b, "ANY"); };
     const std::string& n = c.name;
@@ -192,7 +205,18 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
             if (s.closest < 0 || d < s.closest) s.closest = d;
             return !in && d > s.closest + tick;
         }
-        return inside ? in : !in;
+        bool ok = inside ? in : !in;
+        // "DistShip = outside, a, b, distance, seconds": it must hold that long without a
+        // break (our reading; the chained 30 s tethers before a mission fails need it).
+        if (iequals(n, "DistShip") && c.args.size() == 5 && c.num(4) > 0) {
+            if (!ok) {
+                s.held_since = -1;
+                return false;
+            }
+            if (s.held_since < 0) s.held_since = clock_;
+            return clock_ - s.held_since >= c.num(4);
+        }
+        return ok;
     }
     if (iequals(n, "HealthDec")) return w.position(c.arg(0)) && w.health(c.arg(0)) <= c.num(1);
     if (iequals(n, "SpaceEnter") || iequals(n, "InSpace")) return w.in_space();
@@ -238,14 +262,14 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
         // label, hits needed, shooter: hits on any ship of the label
         int need = std::max(1, static_cast<int>(c.num(1, 1))), hits = 0;
         std::string label = to_lower(c.arg(0));
-        for (std::size_t i = s.events_from; i < events_.size(); ++i) {
-            auto& e = events_[i];
-            if (e.type != T::ProjHit || (c.args.size() > 2 && !iequals(e.b, c.arg(2)))) continue;
+        each_event(T::ProjHit, s.events_from, [&](const MissionEvent& e) {
+            if (c.args.size() > 2 && !iequals(e.b, c.arg(2))) return false;
             bool in = iequals(e.a, label);
             if (auto it = ship_labels_.find(to_lower(e.a)); it != ship_labels_.end())
                 in = in || std::find(it->second.begin(), it->second.end(), label) != it->second.end();
             hits += in;
-        }
+            return hits >= need;
+        });
         return hits >= need;
     }
     if (iequals(n, "InTradelane")) return w.in_tradelane(c.arg(1)) == c.args[0].as_bool();
@@ -284,10 +308,10 @@ bool MissionRunner::holds(const MsnTrigger&, const MsnCommand& c, const State& s
     if (iequals(n, "ProjHit")) {
         // ship, hits needed, optional shooter
         int need = std::max(1, static_cast<int>(c.num(1, 1))), hits = 0;
-        for (std::size_t i = s.events_from; i < events_.size(); ++i)
-            if (events_[i].type == T::ProjHit && iequals(events_[i].a, c.arg(0)) &&
-                (c.args.size() < 3 || iequals(events_[i].b, c.arg(2))))
-                ++hits;
+        each_event(T::ProjHit, s.events_from, [&](const MissionEvent& e) {
+            if (iequals(e.a, c.arg(0)) && (c.args.size() < 3 || iequals(e.b, c.arg(2)))) ++hits;
+            return hits >= need;
+        });
         return hits >= need;
     }
     return false;  // not supported yet: waits
@@ -304,7 +328,19 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         const auto& t = script_.triggers[i];
         const auto& s = states_[i];
         if (!s.active) continue;
-        if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) continue;
+        if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) {
+            // A trigger of the system just left still sees the player leave it (SystemExit).
+            bool exit_cnd = !exited_system_.empty() && iequals(t.system, exited_system_);
+            if (exit_cnd) {
+                exit_cnd = false;
+                for (auto& c : t.conditions) exit_cnd = exit_cnd || iequals(c.name, "SystemExit");
+            }
+            // "True" holds in every system: scripts switch such triggers on from elsewhere
+            // (the set-up after a save, the next step of a chain), so the system is no bar.
+            bool always = !t.conditions.empty();
+            for (auto& c : t.conditions) always = always && iequals(c.name, "True");
+            if (!exit_cnd && !always) continue;
+        }
         bool ok = !t.conditions.empty();
         for (auto& c : t.conditions) ok = ok && holds(t, c, s, w);
         // A repeatable trigger fires again only once its conditions have gone false in
@@ -319,7 +355,7 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         ++s.fired;
         if (t.repeatable) {
             s.since = clock_;
-            s.events_from = events_.size();
+            s.events_from = event_count_;
             s.armed = false;
         } else {
             s.active = false;
@@ -337,6 +373,7 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
             }
         }
     }
+    exited_system_.clear();
 }
 
 MissionStart mission_start(const MissionScript& script) {
