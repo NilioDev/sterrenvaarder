@@ -137,4 +137,11 @@ const ThnPlayer::State* ThnPlayer::state(std::string_view entity) const {
     return it == now_.end() ? nullptr : &it->second;
 }
 
+std::vector<std::size_t> ThnPlayer::sounds_between(float from, float to) const {
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < script_.sounds.size(); ++i)
+        if (script_.sounds[i].time > from && script_.sounds[i].time <= to) out.push_back(i);
+    return out;
+}
+
 }  // namespace sterrenvaarder::game
