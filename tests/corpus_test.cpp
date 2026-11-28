@@ -10,6 +10,7 @@
 #include "sterrenvaarder/mission.hpp"
 #include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/dfm.hpp"
+#include "game/skin.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include <algorithm>
@@ -39,6 +40,8 @@ int main(int argc, char** argv) {
     };
     std::size_t msn_triggers = 0, msn_dangling = 0;
     std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
+    std::size_t dfm_posed = 0, dfm_pose_off = 0;  // bones the joints reach, and those that land elsewhere than stored
+    float dfm_pose_worst = 0;
     double anm_seconds = 0;
     std::map<std::string, int> msn_unknown;  // conditions the runner doesn't evaluate yet
     for (auto& path : vfs.list()) {
@@ -62,6 +65,18 @@ int main(int argc, char** argv) {
                 }
                 dfm_bones += d.bones.size();
                 for (auto& b : d.bones) dfm_bad_bones += b.name.empty();
+                // The joints' bind pose must put each bone where its "Bone to root" says.
+                auto pose = game::pose_bones(d);
+                for (std::size_t i = 0; i < d.bones.size(); ++i) {
+                    auto ref = game::Xform::from_bone(d.bones[i].to_root);
+                    float err = 0;
+                    for (int k = 0; k < 9; ++k) err = std::max(err, std::abs(pose[i].r[k] - ref.r[k]));
+                    err = std::max({err, std::abs(pose[i].t.x - ref.t.x), std::abs(pose[i].t.y - ref.t.y),
+                                    std::abs(pose[i].t.z - ref.t.z)});
+                    ++dfm_posed;
+                    if (err > 1e-3f) ++dfm_pose_off;
+                    dfm_pose_worst = std::max(dfm_pose_worst, err);
+                }
             } else if (path.ends_with(".thn")) {
                 kind = "thn";
                 ThnScript::parse(data);
@@ -221,6 +236,7 @@ int main(int argc, char** argv) {
     std::printf("models %zu, parts %zu, meshes %zu, triangles (all LODs) %zu, textures decoded %zu\n", models, parts,
                 meshes, triangles, textures);
     std::printf("character meshes: %zu triangles, %zu bones, %zu bones without a part\n", dfm_tris, dfm_bones, dfm_bad_bones);
+    std::printf("character bind pose: %zu of %zu bones off (worst %.4f)\n", dfm_pose_off, dfm_posed, dfm_pose_worst);
     std::printf("animations: %zu scripts, %.0f seconds\n", anm_scripts, anm_seconds);
     std::printf("mission triggers %zu, actions naming a missing trigger %zu\n", msn_triggers, msn_dangling);
     for (auto& [n, c] : msn_unknown) std::printf("  condition not evaluated yet: %s (%d)\n", n.c_str(), c);

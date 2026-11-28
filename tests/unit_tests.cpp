@@ -29,6 +29,7 @@ static int failures = 0;
 #include "game/particles.hpp"
 #include "game/mission.hpp"
 #include "game/population.hpp"
+#include "game/skin.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -750,6 +751,51 @@ static void test_dfm_strips() {
     CHECK((t[6] == 4 || t[6] == 5) && t[8] == 6);
 }
 
+static void test_skinning() {
+    using game::Xform;
+    // Two bones: "Root" at the origin and "Arm" one unit up the y axis, joined by a sphere
+    // joint. "Bone to root" holds the inverse of each bone's place, as the game files do.
+    DfmModel m;
+    m.bones.resize(2);
+    m.bones[0].name = "Root";
+    m.bones[1].name = "Arm";
+    m.bones[1].index = 1;
+    m.bones[1].to_root = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, 0};
+    Joint j;
+    j.type = JointType::Sphere;
+    j.parent = "Root";
+    j.child = "Arm";
+    j.origin = {0, 1, 0};
+    m.joints.push_back(j);
+    auto near = [](Vec3 a, Vec3 b) { return std::abs(a.x - b.x) < 1e-4f && std::abs(a.y - b.y) < 1e-4f && std::abs(a.z - b.z) < 1e-4f; };
+    CHECK(near(Xform::from_bone(m.bones[1].to_root).t, Vec3{0, 1, 0}));
+    auto rest = game::pose_bones(m);
+    CHECK(rest.size() == 2 && near(rest[1].t, Vec3{0, 1, 0}));
+
+    // One point on the arm's tip, one shared half and half.
+    DfmMesh mesh;
+    mesh.points = {{0, 2, 0}, {0, 1, 0}};
+    mesh.bone_first = {0, 1};
+    mesh.bone_count = {1, 2};
+    mesh.bone_ids = {1, 0, 1};
+    mesh.bone_weights = {1, 0.5f, 0.5f};
+    auto same = game::skin_points(m, mesh, rest);
+    CHECK(near(same[0], mesh.points[0]) && near(same[1], mesh.points[1]));
+
+    // An animation turns the arm 90 degrees about z: its tip swings from +y to -x.
+    AnmScript anim;
+    anim.joints.push_back({});
+    anim.joints[0].child = "arm";
+    const float h = std::sqrt(0.5f);
+    anim.joints[0].channel.times = {0, 1};
+    anim.joints[0].channel.rotations = {{0, 0, 0, 1}, {0, 0, h, h}};
+    auto bent = game::skin_points(m, mesh, game::pose_bones(m, &anim, 1));
+    CHECK(near(bent[0], Vec3{-1, 1, 0}));
+    CHECK(near(bent[1], Vec3{0, 1, 0}));  // on the joint itself: does not move
+    auto half = game::pose_bones(m, &anim, 0.5f);  // halfway: 45 degrees
+    CHECK(near(half[1].rotate(Vec3{0, 1, 0}), Vec3{-h, h, 0}));
+}
+
 static void test_population() {
     // A self-written system file with one populated zone and one without traffic.
     auto zones = parse_pop_zones(parse_text_ini(
@@ -960,6 +1006,7 @@ int main() {
     test_mission();
     test_population();
     test_dfm_strips();
+    test_skinning();
     test_anm_frames();
     test_costumes();
     test_fonts();
