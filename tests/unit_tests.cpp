@@ -787,6 +787,21 @@ static void test_mission() {
     r2.event({MissionEvent::Type::Destroyed, "escort", "", ""});
     r2.update(0.1f, w, {});
     CHECK(r2.outcome() == MissionRunner::Outcome::Failed && r2.outcome_ids() == 66);
+
+    // Rooms: a trigger switched on while the player is already in the room fires.
+    MissionScript m3 = parse_mission(parse_text_ini(
+        "[Trigger]\nnickname = a\nInitState = ACTIVE\nCnd_True = no_params\nAct_ActTrig = b\n"
+        "[Trigger]\nnickname = b\nCnd_LocEnter = Bar, Base_1\nAct_ChangeState = SUCCEED, 1\n"));
+    struct Docked : World {
+        bool in_space() const override { return false; }
+        std::string base() const override { return "base_1"; }
+        std::string room() const override { return "bar"; }
+    } d;
+    MissionRunner r3(m3);
+    r3.start();
+    r3.update(0.1f, d, {});
+    r3.update(0.1f, d, {});
+    CHECK(r3.outcome() == MissionRunner::Outcome::Succeeded);
 }
 
 static void test_fonts() {

@@ -180,6 +180,8 @@ script and lists the conditions the runner doesn't evaluate yet.
 - `SetVibe` and its label variants make ships friendly or hostile toward the player. `Cloak` hides a ship, `RelocateShip` moves one, and `SpawnSolar` places mission objects such as bases.
 - `SpawnFormation` places a formation's ships in the slots from `missions/formations.ini`. The first ship leads and the others follow it.
 - Docking, launching, changing rooms and leaving a system are reported to the script (SpaceExit, BaseExit, PlayerLaunch, LaunchComplete, LocEnter/LocExit, SystemExit).
+- On a base, tab 4 (key `4`) opens the bar. Entering a room counts for the script (`LocEnter`) for as long as you stay in it.
+- A mission offer shows its text with "ACCEPT MISSION?". `Y` accepts and `N` declines (`MsnResponse`). For screenshot runs, `--answer accept|reject` answers it.
 - Screenshot runs log how many triggers fired, which are waiting and which actions aren't handled yet. Nothing from the scripts
 is stored in this repository: the unit tests use their own small scripts.
 
