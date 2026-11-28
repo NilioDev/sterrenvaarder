@@ -15,4 +15,20 @@ std::vector<std::string> dock_reply_lines(std::string_view base_nickname, bool g
     return out;
 }
 
+DockKind dock_kind(std::string_view archetype) {
+    std::string a = to_lower(archetype);
+    if (a.find("ring") != std::string::npos) return DockKind::Ring;
+    for (const char* cap : {"battleship", "dreadnought", "liner", "cruiser", "carrier"})
+        if (a.find(cap) != std::string::npos) return DockKind::Moor;
+    return DockKind::Berth;
+}
+
+std::vector<std::string> launch_clear_lines(DockKind kind) {
+    switch (kind) {
+        case DockKind::Ring: return {"gcs_docklaunch_clear_ring_01-"};
+        case DockKind::Moor: return {"gcs_docklaunch_clear_moor_01-"};
+        default: return {"gcs_docklaunch_clear_berth_01-"};
+    }
+}
+
 }  // namespace sterrenvaarder::game

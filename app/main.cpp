@@ -1367,9 +1367,18 @@ struct FlightSession {
     }
 
     // F3 on the selected target: lanes, gates and bases. Pressing it again cancels.
+    // A base's radio: its own voice, or that of its dock ring (planets answer through it).
+    static std::string radio_voice(const StarSystem& sys, const SystemObject& o) {
+        if (!o.voice.empty()) return o.voice;
+        std::string base = o.base.empty() ? o.dock_with : o.base;
+        for (auto& x : sys.objects)
+            if (!x.voice.empty() && !base.empty() && (iequals(x.base, base) || iequals(x.dock_with, base))) return x.voice;
+        return {};
+    }
     void dock_request(const StarSystem& sys) {
         if (nav == Nav::Docked) {  // launch
             if (auto* o = game::find_object(sys, nav_target)) {
+                radio_call(radio_voice(sys, *o), game::launch_clear_lines(game::dock_kind(o->archetype)));
                 float d = approach_distance(*o) + 100.f;
                 auto sp = game::exit_point(*o, d);
                 ship.pos = sp.pos;
@@ -1388,10 +1397,7 @@ struct FlightSession {
         const SystemObject* o = game::find_object(sys, contacts[target].name);
         if (!o || !(o->is_tradelane() || o->is_jump() || o->dockable())) return;
         bool base = o->dockable() && !o->is_tradelane() && !o->is_jump();
-        // The base's radio: its own voice, or that of its dock ring (planets answer through it).
-        std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = o->voice;
-        for (auto& x : sys.objects)
-            if (voice.empty() && !x.voice.empty() && (iequals(x.base, base_nick) || iequals(x.dock_with, base_nick))) voice = x.voice;
+        std::string base_nick = o->base.empty() ? o->dock_with : o->base, voice = radio_voice(sys, *o);
         if (!o->reputation.empty() && attitude_of(player.rep_with(o->reputation)) == Attitude::Hostile) {
             notice = "DOCKING REFUSED: " + label_of(*o) + " IS HOSTILE";
             notice_time = 4.f;
