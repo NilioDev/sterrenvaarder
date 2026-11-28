@@ -717,6 +717,9 @@ static void test_mission() {
         "[Trigger]\nnickname = t_escort_dies\nCnd_Destroyed = escort, 1, EXPLODE\nAct_ChangeState = FAIL, 66\n"
         "[Trigger]\nnickname = t_watch\nInitState = ACTIVE\nrepeatable = true\nCnd_WatchTrigger = t_wait, OFF\nAct_Ping = x\n";
     MissionScript m = parse_mission(parse_text_ini(text));
+    auto archs = parse_npc_ship_archs(parse_text_ini(
+        "[NPCShipArch]\nnickname = arch_a\nloadout = lo_a\nship_archetype = ship_a\npilot = pilot_a\nnpc_class = lawful, FIGHTER\n"));
+    CHECK(archs.size() == 1 && archs[0].ship_archetype == "ship_a" && archs[0].npc_class.size() == 2);
     CHECK(m.title_ids == 10 && m.reward == 500 && m.triggers.size() == 7 && m.ships.size() == 2);
     CHECK(m.trigger("t_wait") && m.trigger("t_wait")->conditions[0].name == "Timer" && m.trigger("t_start")->initially_active);
 
