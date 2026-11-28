@@ -293,7 +293,13 @@ struct NpcShip {
     DamageFx damage;
     std::vector<Vec3> part_offsets;  // where each model part sits, for breaking up into wreckage
     bool hostile = true;             // attacks the player (mission ships can be friends)
+    bool cloaked = false;            // mission Cloak: unseen and untargetable
     std::string mission_name;        // [MsnShip] nickname, when a mission spawned it
+    // Mission orders ([ObjList] steps given by GiveObjList), worked through in order.
+    std::vector<MsnCommand> orders;
+    std::size_t order_step = 0;
+    float order_time = 0;  // seconds in the current step
+    bool docked_away = false;
 };
 
 struct Explosion {
@@ -478,6 +484,15 @@ struct FlightSession {
         std::vector<std::string> unhandled;  // action names logged once
     };
     std::unique_ptr<Mission> mission;
+    // Objects a mission puts into space ([MsnSolar] via SpawnSolar).
+    struct MissionSolar {
+        std::string nickname, name;
+        Renderer::ModelHandle mesh;
+        const SolarArchetype* arch = nullptr;
+        DVec3 pos;
+        Quat orient;
+    };
+    std::vector<MissionSolar> msn_solars;
     const ShipDatabase* db = nullptr;
     // (vfs is set with the economy, below)
     Renderer* rend = nullptr;
@@ -610,23 +625,29 @@ struct FlightSession {
                 const auto& ref = arch->fuses[i];
                 if (d.lit[i] || !b.alive() || b.hull > ref.hit_pts) continue;
                 d.lit[i] = true;
-                const Fuse* fu = fxdb->fuse(ref.name);
-                if (!fu || fu->death_fuse) continue;
-                for (auto& st : fu->starts) {
-                    ResolvedEffect fx = fxdb->resolve(st.effect);
-                    if (!fx) continue;
-                    for (auto& t : fx.vis->textures) pending_textures.push_back(t);
-                    std::vector<const Hardpoint*> cands;
-                    for (auto& name : st.hardpoints)
-                        for (auto& h : d.hardpoints)
-                            if (iequals(h.name, name)) cands.push_back(&h);
-                    Vec3 at{};
-                    if (!cands.empty()) at = cands[(fx_seed++ * 2654435761u >> 8) % cands.size()]->position;
-                    d.fx.push_back({at, game::EffectInstance(fx, fx_seed++)});
-                }
+                light_fuse(d, ref.name, false);
             }
         }
         for (auto& e : d.fx) e.fx.update(dt, s.pos + game::to_d(s.orient.rotate(e.offset)), s.orient, s.vel, 0, b.alive());
+    }
+
+    // Starts a fuse's effects at its hardpoints (damage fuses, or a mission's LightFuse).
+    void light_fuse(DamageFx& d, const std::string& name, bool include_death) {
+        if (!fxdb) return;
+        const Fuse* fu = fxdb->fuse(name);
+        if (!fu || (fu->death_fuse && !include_death)) return;
+        for (auto& st : fu->starts) {
+            ResolvedEffect fx = fxdb->resolve(st.effect);
+            if (!fx) continue;
+            for (auto& t : fx.vis->textures) pending_textures.push_back(t);
+            std::vector<const Hardpoint*> cands;
+            for (auto& hp : st.hardpoints)
+                for (auto& h : d.hardpoints)
+                    if (iequals(h.name, hp)) cands.push_back(&h);
+            Vec3 at{};
+            if (!cands.empty()) at = cands[(fx_seed++ * 2654435761u >> 8) % cands.size()]->position;
+            d.fx.push_back({at, game::EffectInstance(fx, fx_seed++)});
+        }
     }
 
     // The cruise trail runs while cruise charges (spark = charge so far) and while cruising.
@@ -1223,7 +1244,9 @@ struct FlightSession {
         for (auto& n : npcs) {
             if (!n.body.alive()) continue;
             world.update_guns(n.guns, dt);
-            if (n.ai) npc_think_pilot(n, dt);
+            if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
+            else if (!n.hostile) { n.input = {}; n.input.throttle = 0.f; }
+            else if (n.ai) npc_think_pilot(n, dt);
             else npc_think(n);
             n.model.update(n.ship, n.input, dt_d);
             n.body.pos = n.ship.pos;
@@ -1299,13 +1322,7 @@ struct FlightSession {
                 if (n.body.alive() && iequals(n.mission_name, o)) return &n;
             return nullptr;
         }
-        std::optional<DVec3> position(std::string_view o) const override {
-            if (iequals(o, "Player")) return fs.ship.pos;
-            if (auto* n = npc(o)) return n->ship.pos;
-            if (fs.rend)
-                if (auto* so = game::find_object(fs.rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
-            return std::nullopt;
-        }
+        std::optional<DVec3> position(std::string_view o) const override { return fs.where(o); }
         float health(std::string_view o) const override {
             if (iequals(o, "Player")) return fs.body.hull / std::max(1.f, fs.body.max_hull);
             if (auto* n = npc(o)) return n->body.hull / std::max(1.f, n->body.max_hull);
@@ -1363,6 +1380,114 @@ struct FlightSession {
         m.runner->ship_spawned(def->nickname);
     }
 
+    // Where a mission object is: the player, a mission ship or a solar in this system.
+    std::optional<DVec3> where(std::string_view o) const {
+        if (iequals(o, "Player")) return ship.pos;
+        for (auto& n : npcs)
+            if (n.body.alive() && (iequals(n.mission_name, o) || iequals(n.name, o))) return n.ship.pos;
+        for (auto& m : msn_solars)
+            if (iequals(m.nickname, o)) return m.pos;
+        if (rend)
+            if (auto* so = game::find_object(rend->system(), o)) return DVec3{so->pos.x, so->pos.y, so->pos.z};
+        return std::nullopt;
+    }
+
+    // Steers toward a point; true once within `range`.
+    static bool steer_to(NpcShip& n, DVec3 target, float range, float throttle, bool may_cruise) {
+        DVec3 to = target - n.ship.pos;
+        double dist = to.length();
+        if (dist <= range) {
+            n.input.throttle = 0;
+            n.input.cruise = false;
+            n.input.steer = {};
+            return true;
+        }
+        Vec3 dir{static_cast<float>(to.x / dist), static_cast<float>(to.y / dist), static_cast<float>(to.z / dist)};
+        Vec3 local = n.ship.orient.conjugate().rotate(dir);
+        n.input.steer = {std::clamp(local.y * 3.f, -1.f, 1.f), std::clamp(-local.x * 3.f, -1.f, 1.f), 0};
+        bool facing = -local.z > 0.9f;
+        n.input.throttle = facing ? throttle : 0.3f * throttle;
+        n.input.cruise = may_cruise && facing && dist > 2500;
+        return false;
+    }
+
+    // Works the ship's current order. Returns false when there is nothing to do, or a
+    // hostile ship is close enough to the player to fight instead.
+    bool npc_follow_orders(NpcShip& n, float dt) {
+        if (n.hostile && body.alive() && (ship.pos - n.ship.pos).length() < 1500) return false;
+        while (n.order_step < n.orders.size()) {
+            const MsnCommand& o = n.orders[n.order_step];
+            n.order_time += dt;
+            auto next = [&] { ++n.order_step; n.order_time = 0; };
+            const std::string& k = o.name;
+            if (iequals(k, "GotoVec")) {
+                // goto type, x, y, z, range, ...
+                bool cruise = !iequals(o.arg(0), "goto_no_cruise");
+                if (steer_to(n, {o.num(1), o.num(2), o.num(3)}, std::max(50.f, o.num(4, 100)), 1.f, cruise)) { next(); continue; }
+                return true;
+            }
+            if (iequals(k, "GotoShip")) {
+                // goto type, target, range, ...
+                auto p = where(o.arg(1));
+                if (!p) { next(); continue; }
+                bool cruise = !iequals(o.arg(0), "goto_no_cruise");
+                if (steer_to(n, *p, std::max(50.f, o.num(2, 200)), 1.f, cruise)) { next(); continue; }
+                return true;
+            }
+            if (iequals(k, "Follow") || iequals(k, "FollowPlayer")) {
+                // Follow = target, distance, offset x, y, z: hold that spot beside the leader.
+                std::string who = iequals(k, "FollowPlayer") ? std::string("Player") : o.arg(0);
+                const game::ShipState* lead = iequals(who, "Player") ? &ship : nullptr;
+                for (auto& m : npcs)
+                    if (m.body.alive() && iequals(m.mission_name, who)) lead = &m.ship;
+                if (!lead) { next(); continue; }
+                Vec3 off = iequals(k, "Follow") && o.args.size() >= 5 ? Vec3{o.num(2), o.num(3), o.num(4)} : Vec3{30, 0, 40};
+                DVec3 spot = lead->pos + game::to_d(lead->orient.rotate(off));
+                if (steer_to(n, spot, 30, 1.f, false)) {
+                    n.ship.orient = lead->orient;
+                    n.input.throttle = 0.8f;
+                }
+                return true;  // follows until given new orders
+            }
+            if (iequals(k, "Delay")) {
+                if (n.order_time >= o.num(0)) { next(); continue; }
+                n.input = {};
+                return true;
+            }
+            if (iequals(k, "Dock")) {
+                // Fly to the dock target and leave the scene there.
+                auto p = where(o.arg(0));
+                if (!p || steer_to(n, *p, 300, 1.f, true)) {
+                    n.docked_away = true;
+                    n.mesh = {};
+                    n.body.hull = 0;
+                    next();
+                    continue;
+                }
+                return true;
+            }
+            if (iequals(k, "Idle")) {
+                n.input = {};
+                return true;
+            }
+            next();  // formation, priority, avoidance, lifetime: nothing to fly yet
+        }
+        return false;
+    }
+
+    // Every live mission ship with this nickname or label.
+    template <class F>
+    void for_mission_ships(const std::string& name, F f) {
+        for (auto& n : npcs) {
+            if (n.mission_name.empty()) continue;
+            bool match = iequals(n.mission_name, name);
+            if (!match && mission)
+                if (auto* d = mission->script.ship(n.mission_name))
+                    for (auto& l : d->labels) match = match || iequals(l, name);
+            if (match) f(n);
+        }
+    }
+
     void update_mission(float dt) {
         if (!mission || !mission->runner) return;
         auto& m = *mission;
@@ -1376,7 +1501,15 @@ struct FlightSession {
         }
         MissionView view(*this, rend ? rend->system().nickname : std::string());
         m.runner->update(dt, view, [&](const MsnCommand& a, const MsnTrigger&) {
-            if (iequals(a.name, "SpawnShip")) mission_spawn(a.arg(0));
+            if (iequals(a.name, "SpawnShip")) {
+                mission_spawn(a.arg(0));
+                // SpawnShip = ship, objective list it starts with
+                if (a.args.size() > 1)
+                    if (auto* ol = m.script.obj_list(a.arg(1)))
+                        for_mission_ships(a.arg(0), [&](NpcShip& n) {
+                            if (n.orders.empty()) n.orders = ol->steps;
+                        });
+            }
             else if (iequals(a.name, "Destroy")) {
                 for (auto& n : npcs)
                     if (iequals(n.mission_name, a.arg(0))) n.mesh = {}, n.body.hull = 0;
@@ -1387,6 +1520,45 @@ struct FlightSession {
                     if (iequals(n.mission_name, who)) who = n.name;
                 if (auto* npc = m.script.npc(who)) who = npc_display_name(npc);
                 m.comms.push_back({who, a.arg(iequals(a.name, "SendComm") ? 2 : 1), 4.f});
+            } else if (iequals(a.name, "SpawnSolar")) {
+                for (auto& d : m.script.solars)
+                    if (iequals(d.nickname, a.arg(0)) && universe && rend) {
+                        const SolarArchetype* sa = universe->solar(d.archetype);
+                        if (!sa) break;
+                        MissionSolar ms;
+                        ms.nickname = d.nickname;
+                        ms.name = d.string_id && strings ? strings->name(static_cast<std::uint32_t>(d.string_id), d.nickname) : d.nickname;
+                        ms.mesh = rend->load_model(sa->model, sa->material_libraries);
+                        ms.arch = sa;
+                        ms.pos = {d.position[0], d.position[1], d.position[2]};
+                        ms.orient = Quat{d.orientation[0], d.orientation[1], d.orientation[2], d.orientation[3]}.normalized();
+                        msn_solars.push_back(std::move(ms));
+                    }
+            } else if (iequals(a.name, "GiveObjList")) {
+                if (auto* ol = m.script.obj_list(a.arg(1)))
+                    for_mission_ships(a.arg(0), [&](NpcShip& n) {
+                        n.orders = ol->steps;
+                        n.order_step = 0;
+                        n.order_time = 0;
+                    });
+            } else if (iequals(a.name, "RelocateShip")) {
+                // RelocateShip = ship, x, y, z: moves it there at once.
+                for_mission_ships(a.arg(0), [&](NpcShip& n) {
+                    n.ship.pos = {a.num(1), a.num(2), a.num(3)};
+                    n.ship.vel = {};
+                });
+            } else if (iequals(a.name, "LightFuse")) {
+                // LightFuse = ship, fuse: its sparks, fire and smoke start at the hardpoints.
+                for_mission_ships(a.arg(0), [&](NpcShip& n) { light_fuse(n.damage, a.arg(1), true); });
+            } else if (iequals(a.name, "Cloak")) {
+                for_mission_ships(a.arg(0), [&](NpcShip& n) { n.cloaked = a.args.size() > 1 && a.args[1].as_bool(); });
+            } else if (a.name.size() >= 7 && iequals(std::string_view(a.name).substr(0, 7), "SetVibe")) {
+                // SetVibe, SetVibeLbl, SetVibeLblToShip, SetVibeShipToLbl = a, b, REP_*: how a
+                // feels about b. Toward the player it decides whether the ship attacks.
+                std::string x = a.arg(0), y = a.arg(1), rep = a.arg(2);
+                bool hostile = rep.find("HOSTILE") != std::string::npos;
+                if (iequals(y, "Player")) for_mission_ships(x, [&](NpcShip& n) { n.hostile = hostile; });
+                else if (iequals(x, "Player")) for_mission_ships(y, [&](NpcShip& n) { n.hostile = hostile; });
             } else if (iequals(a.name, "StartDialog")) {
                 // A dialog is a row of radio lines, played in order.
                 if (auto* d = m.script.dialog(a.arg(0)))
@@ -1421,8 +1593,10 @@ struct FlightSession {
     void draw_combat(Renderer& r) {
         for (auto& w : wrecks)
             if (w.age < w.life) r.draw_model_part(w.mesh, w.part, w.pos, w.orient.matrix(), *w.lod_ranges);
+        for (auto& m : msn_solars)
+            if (m.mesh) r.draw_model(m.mesh, m.pos, m.orient.matrix(), m.arch->lod_ranges);
         for (auto& n : npcs)
-            if (n.body.alive() && n.mesh)
+            if (n.body.alive() && n.mesh && !n.cloaked)
                 r.draw_model(n.mesh, n.ship.pos, n.ship.orient.matrix() * Mat4::rotate_z(n.ship.bank), n.arch->lod_ranges);
         for (auto& p : world.projectiles()) {
             if (draw_beam(r, p)) continue;
@@ -1513,13 +1687,20 @@ struct FlightSession {
             c.radius = 200;
             contacts.push_back(std::move(c));
         }
+        for (auto& m : msn_solars) {
+            game::HudContact c;
+            c.name = m.name;
+            c.pos = m.pos;
+            c.radius = m.arch ? std::max(50.f, m.arch->solar_radius) : 100.f;
+            contacts.push_back(std::move(c));
+        }
         for (auto& n : npcs) {
-            if (!n.body.alive()) continue;
+            if (!n.body.alive() || n.cloaked) continue;
             game::HudContact c;
             c.name = n.name;
             c.pos = n.ship.pos;
             c.radius = 12;
-            c.hostile = true;
+            c.hostile = n.hostile;
             c.hull = n.body.hull / std::max(1.f, n.body.max_hull);
             c.shield = n.body.max_shield > 0 ? n.body.shield / n.body.max_shield : 0;
             contacts.push_back(std::move(c));
@@ -1609,6 +1790,7 @@ void refit(FlightSession& fs, const ShipDatabase& db, const Vfs& vfs, Renderer& 
     fs.npcs.clear();
     fs.next_body_id = 1;
     fs.wrecks.clear();
+    fs.msn_solars.clear();
     Args a = args;
     if (!spawn_npcs) a.npcs = 0;
     fs.setup_combat(db, vfs, &lo, r, a);
