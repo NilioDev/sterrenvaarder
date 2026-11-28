@@ -300,7 +300,7 @@ void MissionRunner::update(float dt, const MissionWorld& w, const ActionFn& act)
         const auto& t = script_.triggers[i];
         const auto& s = states_[i];
         if (!s.active) continue;
-        if (!t.system.empty() && !iequals(t.system, sys)) continue;
+        if (!t.system.empty() && !iequals(t.system, sys) && !iequals(t.system, "ANY") && !iequals(t.system, "ALL")) continue;
         bool ok = !t.conditions.empty();
         for (auto& c : t.conditions) ok = ok && holds(t, c, s, w);
         if (ok) ready.push_back(i);
