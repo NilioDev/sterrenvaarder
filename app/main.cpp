@@ -115,7 +115,7 @@ struct Args {
     std::string dock;  // screenshot runs: autopilot to this object first
     bool ship_given = false;
     bool new_game = false;
-    std::string load, save_file, exe;
+    std::string load, save_file, exe, until_mission;
     std::vector<std::pair<std::string, float>> reps;  // testing: --rep group,value
     std::vector<std::pair<std::string, int>> buys;  // screenshot runs: trades once docked
     int tab = 0;                                      // screenshot runs: base screen tab (0-3)
@@ -155,6 +155,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--autoplay") a.autoplay = true;
         else if (k == "--load") a.load = next();
         else if (k == "--save-file") a.save_file = next();
+        else if (k == "--until-mission") a.until_mission = next();
         else if (k == "--exe") a.exe = next();
         else if (k == "--tab") {
             std::string v = next();
@@ -831,6 +832,7 @@ struct FlightSession {
         bool was_docked = false;
         std::string last_room, last_system, last_base;
         bool seen = false;
+        float launch_done = 0;  // seconds until LaunchComplete after an undock
         std::optional<std::pair<std::string, float>> jump_in;  // JumpInComplete due: system, seconds left
         int playing_rtc = -1;   // the cutscene playing now (index in rtcs)
         float next_in = -1;     // after success: seconds until the next story mission
@@ -1765,6 +1767,36 @@ struct FlightSession {
                 }
             }
         }
+        // The objective is a trade lane or jump gate the mission holds the player to (a leash
+        // on it fails the mission): that comes before any fight, as the escape it is.
+        if (mission && mission->runner && mission->waypoint && !mission->waypoint->object.empty() && nav == Nav::Free)
+            if (auto* o = object_named(sys, mission->waypoint->object); o && (o->is_tradelane() || o->is_jump())) {
+                bool held = false;
+                for (auto& t : mission->script.triggers) {
+                    if (held || !mission->runner->active(t.nickname)) continue;
+                    bool fails = false;
+                    for (auto& a : t.actions) fails = fails || (iequals(a.name, "ChangeState") && iequals(a.arg(0), "FAIL"));
+                    for (auto& c : t.conditions)
+                        held = held || (fails && iequals(c.name, "DistShip") && iequals(c.arg(0), "outside") &&
+                                        (iequals(c.arg(1), o->nickname) || iequals(c.arg(2), o->nickname)));
+                }
+                if (held) {
+                    DVec3 to = DVec3{o->pos.x, o->pos.y, o->pos.z} - ship.pos;
+                    if (to.length() < 1200) {
+                        contacts.push_back({o->nickname, {}, 0, true});
+                        target = static_cast<int>(contacts.size() - 1);
+                        dock_request(sys);
+                        autoplay_doing = "takes " + o->nickname;
+                        return;
+                    }
+                    Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
+                    input.steer = game::steer_towards(ship.orient, dir, 1.f);
+                    input.throttle = 1.f;
+                    input.cruise = false;
+                    autoplay_doing = "heads for " + o->nickname;
+                    return;
+                }
+            }
         // The mission waits for the player to dock somewhere close by: leave any formation and dock.
         if (mission && mission->runner && (nav == Nav::Free || nav == Nav::Formation))
             for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
@@ -1823,11 +1855,35 @@ struct FlightSession {
                         return;
                     }
         }
+        // Foes: those the mission waits to see destroyed first, then fighters, then big ships
+        // (a fighter's guns barely scratch a cruiser, and the fight is usually with its escort).
         const NpcShip* foe = nullptr;
         double best = 3000;
-        for (auto& n : npcs)
-            if (n.body.alive() && n.hostile)
-                if (double d = (n.body.pos - ship.pos).length(); d < best) best = d, foe = &n;
+        {
+            decltype(mission->runner->waiting_on("")) waited;
+            if (mission && mission->runner) waited = mission->runner->waiting_on("Destroyed");
+            // Ships of the mission on the player's side (an escort, a convoy) that are under attack.
+            std::vector<int> friends;
+            for (auto& n : npcs)
+                if (n.body.alive() && !n.hostile && !n.mission_name.empty()) friends.push_back(n.body.id);
+            auto rank = [&](const NpcShip& n) {
+                for (auto& c : waited)
+                    for (auto& nm : n.names)
+                        if (iequals(nm, c.arg(0))) return 0;
+                if (!is_big_ship(n))
+                    if (auto f = npc_foe(n); f && f->id != body.id && std::find(friends.begin(), friends.end(), f->id) != friends.end())
+                        return 1;  // it goes for those we fly with: stop it first
+                return is_big_ship(n) ? 3 : 2;
+            };
+            int best_rank = 4;
+            for (auto& n : npcs)
+                if (n.body.alive() && n.hostile)
+                    if (double d = (n.body.pos - ship.pos).length(); d < 10000) {
+                        int r = rank(n);
+                        if (r > 0 && d >= 3000) continue;  // only ships the mission waits on are worth a chase
+                        if (r < best_rank || (r == best_rank && d < best)) best_rank = r, best = d, foe = &n;
+                    }
+        }
         // Solars: those the mission wants destroyed (by nickname or label), else any hostile one.
         auto wanted = [&](const MissionSolar& ms) {
             if (!mission || !mission->runner) return false;
@@ -1857,8 +1913,8 @@ struct FlightSession {
             DVec3 to = foe->body.pos - ship.pos;
             Vec3 dir = render::normalize(Vec3{static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)});
             input.steer = game::steer_towards(ship.orient, dir, 1.f);
-            input.cruise = false;
             input.throttle = best > 600 ? 1.f : 0.5f;
+            input.cruise = best > 3000 && game::dot(ship.orient.forward(), dir) > 0.95f;
             aim_dir = dir;
             firing = game::dot(ship.orient.forward(), dir) > 0.97f && best < 1200;
             autoplay_doing = "fights " + foe->name;
@@ -2009,7 +2065,12 @@ struct FlightSession {
                         // The base's docking point (a planet's ring, a station's fixture) when it
                         // has one, else the object that is the base.
                         const SystemObject* best = nullptr;
-                        for (auto& o : sys.objects) {
+                        std::vector<const SystemObject*> cands;
+                        for (auto& o : sys.objects) cands.push_back(&o);
+                        for (auto& ms : msn_solars)  // and mission stations
+                            if (solar_here(ms) && ms.alive() && !ms.obj.base.empty()) cands.push_back(&ms.obj);
+                        for (const SystemObject* op : cands) {
+                            const SystemObject& o = *op;
                             const std::string& b = !o.dock_with.empty() ? o.dock_with : o.base;
                             if (b.empty() || !(iequals(b, c.arg(0)) || iequals(b, c.arg(1)))) continue;
                             if ((DVec3{o.pos.x, o.pos.y, o.pos.z} - ship.pos).length() > 6000) continue;
@@ -2220,9 +2281,9 @@ struct FlightSession {
     }
     // Who a ship fights now: the player if it is hostile to them, or a nearer enemy ship.
     struct Foe { game::AiBody body; int id = 0; double dist = 0; };
-    std::optional<Foe> npc_foe(const NpcShip& n) const {
+    std::optional<Foe> npc_foe(const NpcShip& n, bool player_too = true) const {
         std::optional<Foe> best;
-        if (n.hostile && body.alive())
+        if (player_too && n.hostile && body.alive())
             best = Foe{{ship.pos, ship.vel, ship.orient}, body.id, (ship.pos - n.ship.pos).length()};
         for (auto& o : npcs) {
             if (&o == &n || !o.body.alive() || o.docked_away || o.cloaked) continue;
@@ -2269,9 +2330,49 @@ struct FlightSession {
         if (n.guns.empty() || n.burst <= 0) return;
         float speed = n.guns[0].arch ? n.guns[0].arch->muzzle_velocity : 600.f;
         float range = speed * (n.guns[0].munition ? n.guns[0].munition->lifetime : 1.f);
+        auto aim_at = [&](const Foe& f) {
+            DVec3 lead = f.body.pos + f.body.vel * (f.dist / speed) - n.ship.pos;
+            return render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)});
+        };
+        // A warship's turrets don't all follow one fighter: with a big enemy (a station, a
+        // capital ship) in range as well, half of them keep firing at that one.
+        std::optional<Foe> big = is_warship(n) ? npc_big_foe(n, foe.id, range * 0.9) : std::nullopt;
+        if (big && n.guns.size() > 1) {
+            for (int half = 0; half < 2; ++half) {
+                const Foe& f = half == 0 ? foe : *big;
+                if (f.dist > range * 0.9) continue;
+                std::vector<float> keep(n.guns.size());
+                for (std::size_t i = 0; i < n.guns.size(); ++i) {
+                    keep[i] = n.guns[i].cooldown;
+                    if (static_cast<int>(i % 2) != half) n.guns[i].cooldown = 1e9f;  // the other half's turn
+                }
+                fire_guns(n.guns, n.body.id, n.ship, aim_at(f));
+                for (std::size_t i = 0; i < n.guns.size(); ++i)
+                    if (static_cast<int>(i % 2) != half) n.guns[i].cooldown = keep[i];
+            }
+            return;
+        }
         if (foe.dist > range * 0.9) return;
-        DVec3 lead = foe.body.pos + foe.body.vel * (foe.dist / speed) - n.ship.pos;
-        fire_guns(n.guns, n.body.id, n.ship, render::normalize(Vec3{static_cast<float>(lead.x), static_cast<float>(lead.y), static_cast<float>(lead.z)}));
+        fire_guns(n.guns, n.body.id, n.ship, aim_at(foe));
+    }
+    // The nearest big enemy (a hostile destructible solar or big ship) within reach, other
+    // than the one it is already fighting.
+    std::optional<Foe> npc_big_foe(const NpcShip& n, int except, double reach) const {
+        std::optional<Foe> best;
+        for (auto& o : npcs) {
+            if (&o == &n || o.body.id == except || !o.body.alive() || o.docked_away || o.cloaked || !is_big_ship(o)) continue;
+            double d = (o.ship.pos - n.ship.pos).length();
+            if (d > reach || (best && d >= best->dist) || !npc_enemies(n, o)) continue;
+            best = Foe{{o.ship.pos, o.ship.vel, o.ship.orient}, o.body.id, d};
+        }
+        for (auto& ms : msn_solars) {
+            if (!ms.destructible || !ms.body.alive() || !solar_here(ms) || ms.body.id == except) continue;
+            double d = (ms.pos - n.ship.pos).length() - ms.body.radius;
+            if (d > reach || (best && d >= best->dist)) continue;
+            if (auto v = vibes.between(n.names, ms.names); v && attitude_of(*v) == Attitude::Hostile)
+                best = Foe{{ms.pos, {}, ms.orient}, ms.body.id, std::max(0.0, d)};
+        }
+        return best;
     }
 
     // Original-data AI: the pilot's blocks decide how it flies and shoots.
@@ -2482,9 +2583,7 @@ struct FlightSession {
                     npc_left(n);
                 }
             }
-            n.burst = n.burst > 0 ? n.burst - dt : n.burst + dt;
-            if (n.burst <= 0 && n.burst > -dt) n.burst = -1.5f;  // just ended: pause
-            else if (n.burst < 0 && n.burst + dt >= 0) n.burst = 1.0f;
+            game::step_burst(n.burst, dt);
         }
         world.update_guns(guns, dt);
         if (firing && body.alive()) fire_guns(guns, body.id, ship, aim_dir);
@@ -2497,8 +2596,13 @@ struct FlightSession {
                 n.body.update(dt);
                 continue;
             }
-            if (n.held_off) hold_off(n);
-            else if (!n.orders.empty() && npc_follow_orders(n, dt)) {
+            if (n.held_off) {
+                // Kept off the player by the enemy clamp, a fighter waits at a distance; a
+                // warship's turrets still fire at a big enemy (a station, a capital ship).
+                std::optional<Foe> big = is_warship(n) ? npc_big_foe(n, body.id, 1e9) : std::nullopt;
+                if (big) npc_think_big(n, *big, !n.orders.empty() && npc_follow_orders(n, dt));
+                else hold_off(n);
+            } else if (!n.orders.empty() && npc_follow_orders(n, dt)) {
                 if (is_warship(n))
                     if (auto foe = npc_foe(n)) npc_think_big(n, *foe, true);
             }
@@ -2520,9 +2624,7 @@ struct FlightSession {
             if (!ms.destructible || !ms.body.alive() || !solar_here(ms)) continue;
             targets.push_back(&ms.body);
             world.update_guns(ms.guns, dt);
-            ms.burst = ms.burst > 0 ? ms.burst - dt : ms.burst + dt;
-            if (ms.burst <= 0 && ms.burst > -dt) ms.burst = -1.5f;
-            else if (ms.burst < 0 && ms.burst + dt >= 0) ms.burst = 1.0f;
+            game::step_burst(ms.burst, dt);
             if (ms.guns.empty() || ms.burst <= 0 || !body.alive() || !solar_hostile(ms)) continue;
             float speed = ms.guns[0].arch ? ms.guns[0].arch->muzzle_velocity : 600.f;
             float range = speed * (ms.guns[0].munition ? ms.guns[0].munition->lifetime : 1.f);
@@ -2549,6 +2651,7 @@ struct FlightSession {
                 };
                 std::string hit = name_of(t.id), by = name_of(p.owner);
                 if (!hit.empty()) mission->runner->event({game::MissionEvent::Type::ProjHit, hit, by, ""});
+                if (SDL_getenv("SV_TRACE_HITS")) SDL_Log("HIT %s by %s", hit.c_str(), by.c_str());
             }
             // Shots landing on the player or on an enemy mean a fight is on (battle music).
             if (t.id == 0) music.since_combat = 0;
@@ -3541,8 +3644,13 @@ struct FlightSession {
     // Works the ship's current order. Returns false when there is nothing to do, or a
     // hostile ship is close enough to the player to fight instead.
     bool npc_follow_orders(NpcShip& n, float dt) {
-        // A fight close by comes first; warships fight with their turrets on the way.
-        if (auto foe = npc_foe(n); foe && foe->dist < 1500 && !is_warship(n)) return false;
+        // A fight close by comes first; warships fight with their turrets on the way. A list
+        // with SetPriority = ALWAYS_EXECUTE is flown whatever happens around the ship.
+        bool always = false;
+        for (std::size_t i = 0; i < n.orders.size() && i <= n.order_step; ++i)
+            if (iequals(n.orders[i].name, "SetPriority")) always = iequals(n.orders[i].arg(0), "ALWAYS_EXECUTE");
+        if (!always)
+            if (auto foe = npc_foe(n); foe && foe->dist < 1500 && !is_warship(n)) return false;
         while (n.order_step < n.orders.size()) {
             const MsnCommand& o = n.orders[n.order_step];
             n.order_time += dt;
@@ -3775,7 +3883,7 @@ struct FlightSession {
                     m.checkpoint_base = m.last_base;
                     m.runner->event({T::BaseExit, m.last_base, "", ""});
                     m.runner->event({T::PlayerLaunch, "", "", ""});
-                    m.runner->event({T::LaunchComplete, "Player", "", ""});
+                    m.launch_done = 2.f;  // LaunchComplete once clear of the dock (our estimate)
                 }
                 if (!iequals(room, m.last_room)) {
                     if (!m.last_room.empty()) m.runner->event({T::LocExit, m.last_room, m.last_base, ""});
@@ -3788,6 +3896,7 @@ struct FlightSession {
             } else if (!room.empty()) {
                 m.runner->event({T::LocEnter, room, player.base, ""});  // starting in a room
             }
+            if (m.launch_done > 0 && (m.launch_done -= dt) <= 0 && !docked()) m.runner->event({T::LaunchComplete, "Player", "", ""});
             if (m.jump_in && (m.jump_in->second -= dt) <= 0) {
                 if (iequals(m.jump_in->first, sys)) m.runner->event({T::JumpInComplete, sys, "", ""});
                 m.jump_in.reset();
@@ -3810,7 +3919,9 @@ struct FlightSession {
             if (docked()) m.last_base = player.base;
         }
         MissionView view(*this, rend ? rend->system().nickname : std::string());
-        m.runner->update(dt, view, [&](const MsnCommand& a, const MsnTrigger&) {
+        static const bool trace = SDL_getenv("SV_TRACE_TRIGGERS") != nullptr;  // debugging: log each trigger action
+        m.runner->update(dt, view, [&](const MsnCommand& a, const MsnTrigger& trg) {
+            if (trace) SDL_Log("TRG %.0f %s: %s %s", sim_time, trg.nickname.c_str(), a.name.c_str(), a.arg(0).c_str());
             if (iequals(a.name, "SpawnShip")) {
                 mission_spawn(a.arg(0));
                 // SpawnShip = ship, objective list it starts with
@@ -4461,6 +4572,9 @@ void handle_jump(FlightSession& fs, Renderer& renderer, Camera& cam) {
     for (auto& n : fs.npcs)
         if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && follows_player(n) && (n.ship.pos - fs.ship.pos).length() < 10000)
             escort.push_back(std::move(n));
+        else if (n.body.alive() && !n.mission_name.empty() && !n.docked_away && SDL_getenv("SV_TRACE_TRIGGERS"))
+            SDL_Log("stays behind: %s (%s, %.0f m)", n.mission_name.c_str(), n.order_step < n.orders.size() ? n.orders[n.order_step].name.c_str() : "no orders",
+                    (n.ship.pos - fs.ship.pos).length());
     fs.npcs.clear();
     if (escort.empty()) fs.next_body_id = 1;
     fs.wrecks.clear();
@@ -4923,6 +5037,10 @@ int run(const Args& args) {
                     handle_story(*fs, renderer, cam);
                     apply_pending_ship(*fs, *ships, vfs, renderer, args);
                     fs->pending_save.clear();  // runs without a window keep the player's saves as they are
+                    if (!args.until_mission.empty() && fs->mission && iequals(fs->mission->name, args.until_mission)) {
+                        SDL_Log("--until-mission: %s runs at %.0f s", fs->mission->name.c_str(), t);
+                        break;
+                    }
                     if (args.win >= 0 && t < args.win && t + 1.0 / 60 >= args.win && fs->mission) {
                         SDL_Log("--win: %s succeeds", fs->mission->name.c_str());
                         fs->mission->next_in = 0.01f;
@@ -4935,6 +5053,10 @@ int run(const Args& args) {
                     bool was_alive = fs->body.alive();
                     fs->update_combat(1.0 / 60);
                     if (was_alive && !fs->body.alive()) SDL_Log("the player is destroyed at %.0f s", t);
+                    if (!audio) {  // no device pulls the mixer: drain it, or finished sounds pile up
+                        static std::vector<std::int16_t> sink(735 * 2);
+                        mixer.mix(sink.data(), 735);
+                    }
                     if (!args.answer.empty() && fs->offer_open()) fs->answer_offer(iequals(args.answer, "accept"));
                     if (!args.answer.empty() && fs->docked() && !fs->room.scene && !fs->talk_partners().empty()) fs->talk();
                     if (!args.answer.empty() && fs->popup_open() && !(fs->docked() && fs->room.scene)) fs->close_popup();
@@ -4976,6 +5098,11 @@ int run(const Args& args) {
                         renderer.system().nickname.c_str(), fs->ship.pos.x, fs->ship.pos.y, fs->ship.pos.z);
                 SDL_Log("  scene %s, popup %s, autoplay: %s", fs->space_scene ? "on" : "off", fs->popup_open() ? "open" : "none", fs->autoplay_doing.c_str());
                 SDL_Log("  room scene %d, pending %s, offer %d, talk %zu, room %s", fs->room.scene ? 1 : 0, fs->room.pending_scene.c_str(), fs->offer_open() ? 1 : 0, fs->talk_partners().size(), fs->mission_room().c_str());
+                if (fs->mission && !fs->mission->maneuver_off.empty()) {
+                    std::string off;
+                    for (auto& k : fs->mission->maneuver_off) off += " " + k;
+                    SDL_Log("  maneuvers off:%s", off.c_str());
+                }
                 if (fs->mission) SDL_Log("  %zu radio calls queued%s%s", fs->mission->comms.size(), fs->mission->comms.empty() ? "" : ", first ", fs->mission->comms.empty() ? "" : fs->mission->comms.front().line.c_str());
                 if (fs->mission) {
                     auto& m = *fs->mission;
@@ -5011,6 +5138,15 @@ int run(const Args& args) {
                             !n.body.alive() ? "destroyed" : n.ai ? std::string(game::FighterAi::name(n.ai->state())).c_str() : "test AI",
                             n.body.hull, n.body.max_hull, (n.ship.pos - fs->ship.pos).length(), n.faction.c_str(), n.order_step,
                             n.orders.size(), n.order_step < n.orders.size() ? (" " + n.orders[n.order_step].name).c_str() : "");
+                for (auto& ms : fs->msn_solars)
+                    if (ms.destructible && fs->solar_here(ms)) {
+                        int aimed = 0;
+                        for (auto& n : fs->npcs)
+                            if (n.body.alive() && fs->is_warship(n))
+                                if (auto b = fs->npc_big_foe(n, -1, 1e9); b && b->id == ms.body.id) ++aimed;
+                        SDL_Log("  solar %s: hull %.0f / %.0f, %.0f m away, %d warships against it", ms.nickname.c_str(), ms.body.hull,
+                                ms.body.max_hull, (ms.pos - fs->ship.pos).length(), aimed);
+                    }
                 for (auto& n : fs->npcs)
                     if (n.body.alive())
                         if (auto f = fs->npc_foe(n))
