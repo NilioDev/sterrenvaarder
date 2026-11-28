@@ -74,6 +74,11 @@ public:
 
     const std::vector<std::string>& system_names() const { return system_order_; }
     std::optional<StarSystem> load_system(std::string_view nickname) const;
+    // The system's file path in the data, or empty.
+    std::string system_file(std::string_view nickname) const {
+        auto it = system_files_.find(to_lower(nickname));
+        return it == system_files_.end() ? std::string() : it->second;
+    }
 
     const SolarArchetype* solar(std::string_view nickname) const;
     const StarArchetype* star(std::string_view nickname) const;

@@ -28,6 +28,7 @@ static int failures = 0;
 #include "game/navigation.hpp"
 #include "game/particles.hpp"
 #include "game/mission.hpp"
+#include "game/population.hpp"
 #include "game/trade.hpp"
 #include "sterrenvaarder/economy.hpp"
 #include "sterrenvaarder/factions.hpp"
@@ -35,6 +36,7 @@ static int failures = 0;
 #include "sterrenvaarder/effects.hpp"
 #include "sterrenvaarder/hash.hpp"
 #include "sterrenvaarder/lua32.hpp"
+#include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/thn.hpp"
@@ -704,6 +706,63 @@ static void test_pilots_and_ai() {
     CHECK(!hurt.update(me, tgt, 0.1f, true, w, 0.1f).fire);
 }
 
+static void test_population() {
+    // A self-written system file with one populated zone and one without traffic.
+    auto zones = parse_pop_zones(parse_text_ini(
+        "[Zone]\nnickname = z_busy\npos = 1000, 0, 0\nrotate = 0, 90, 0\nshape = ELLIPSOID\nsize = 4000, 500, 1000\n"
+        "toughness = 2\ndensity = 5\nrepop_time = 20\ndensity_restriction = 2, raiders\n"
+        "encounter = enc_a, 2, 0.4\nfaction = grp_a, 0.75\nfaction = grp_b, 0.25\nencounter = enc_b, 1, 0.1\nfaction = grp_c, 1\n"
+        "[Zone]\nnickname = z_empty\npos = 0, 0, 0\nshape = SPHERE\nsize = 100\n"));
+    CHECK(zones.size() == 2 && zones[0].populated() && !zones[1].populated());
+    CHECK(zones[0].encounters.size() == 2 && zones[0].encounters[0].factions.size() == 2 && zones[0].encounters[1].factions[0].first == "grp_c");
+    CHECK(zones[0].density_restrictions.size() == 1 && zones[0].density_restrictions[0].ship_class == "raiders");
+    // Turned 90 degrees about y, the long x axis now lies along z.
+    CHECK(zones[0].contains(1000, 0, 3500) && !zones[0].contains(4500, 0, 0));
+    CHECK(zones[1].contains(50, 50, 0) && !zones[1].contains(90, 90, 0));
+
+    auto enc = parse_encounter(parse_text_ini(
+        "[EncounterFormation]\nship_by_class = 1, 2, cls_big\npilot_job = job_a\nship_by_class = 0, 3, cls_small, -1\n"
+        "pilot_job = job_b\nformation_by_class = shape_a\nbehavior = wander\narrival = all, -tradelane\n"
+        "[Creation]\npermutation = 0, 3\n"));
+    CHECK(enc.formations.size() == 1 && enc.formations[0].slots.size() == 2 && enc.formations[0].slots[1].level_offset == -1);
+    CHECK(enc.formations[0].slots[1].pilot_job == "job_b" && enc.formations[0].arrival.size() == 2 && enc.permutations[0].second == 3.f);
+
+    auto classes = parse_ship_classes(parse_text_ini("[ShipClass]\nnickname = cls_small\nmember = tag_small\n"));
+    auto factions = parse_faction_ships(parse_text_ini("[FactionProps]\naffiliation = grp_a\nnpc_ship = s1\nnpc_ship = s2\nnpc_ship = s3\n"));
+    auto archs = parse_npc_ship_archs(parse_text_ini(
+        "[NPCShipArch]\nnickname = s1\nnpc_class = side_a, tag_small, d1, d2\n"
+        "[NPCShipArch]\nnickname = s2\nnpc_class = side_a, tag_big, d2\n"
+        "[NPCShipArch]\nnickname = s3\nnpc_class = side_a, tag_small, d3\n"));
+    auto picks = ships_for(archs, factions, classes, "GRP_A", "cls_small", 2);
+    CHECK(picks.size() == 1 && picks[0]->nickname == "s1");
+    CHECK(ships_for(archs, factions, classes, "grp_a", "cls_small", 3).size() == 1);
+    CHECK(ships_for(archs, factions, classes, "grp_x", "cls_small", 2).empty());
+
+    // The planner: a zone near the player sends encounters until it holds its density.
+    std::vector<PopZone> pz = parse_pop_zones(parse_text_ini(
+        "[Zone]\nnickname = z\npos = 0, 0, 0\nshape = SPHERE\nsize = 10000\ndensity = 3\nrepop_time = 10\n"
+        "density_restriction = 1, cls_small\nencounter = enc_a, 2, 1\nfaction = grp_a, 1\n"));
+    EncounterDef one = parse_encounter(parse_text_ini("[EncounterFormation]\nship_by_class = 1, 1, cls_small\nbehavior = wander\n"));
+    game::Population pop(pz, archs, factions, classes, [&](std::string_view n) { return n == "enc_a" ? &one : nullptr; }, 7);
+    game::DVec3 player{0, 0, 0};
+    auto first = pop.update(0.1f, player);
+    CHECK(first.size() == 1 && first[0].ships.size() == 1 && first[0].ships[0]->nickname == "s1" && first[0].behavior == "wander");
+    if (!first.empty()) {
+        double d = first[0].pos.length();
+        CHECK(d >= pop.spawn_min && d <= pop.spawn_max);
+    }
+    for (int i = 0; i < 300; ++i) CHECK(pop.update(0.1f, player).empty());  // the class limit of 1 holds
+    pop.ship_gone(0, first.empty() ? nullptr : first[0].ships[0]);
+    CHECK(pop.alive(0) == 0);
+    pop.set_enabled(false);
+    for (int i = 0; i < 300; ++i) CHECK(pop.update(0.1f, player).empty());  // RandomPop off
+    pop.set_enabled(true);
+    bool again = false;
+    for (int i = 0; i < 300 && !again; ++i) again = !pop.update(0.1f, player).empty();
+    CHECK(again);
+    CHECK(game::Population(pz, archs, factions, classes, [&](std::string_view) { return &one; }).update(0.1f, game::DVec3{90000, 0, 0}).empty());
+}
+
 static void test_mission() {
     using namespace sterrenvaarder;
     using namespace sterrenvaarder::game;
@@ -738,7 +797,7 @@ static void test_mission() {
 
     struct World : MissionWorld {
         std::string sys = "Sys1";
-        DVec3 player{0, 0, 0};
+        game::DVec3 player{0, 0, 0};
         std::string system() const override { return sys; }
         bool in_space() const override { return true; }
         std::string base() const override { return {}; }
@@ -855,6 +914,7 @@ static void test_postfx() {
 
 int main() {
     test_mission();
+    test_population();
     test_fonts();
     test_postfx();
     test_thn();

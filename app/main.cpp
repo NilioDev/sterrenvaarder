@@ -37,6 +37,7 @@
 #include "game/flight.hpp"
 #include "game/hud.hpp"
 #include "game/mission.hpp"
+#include "game/population.hpp"
 #include "game/navigation.hpp"
 #include "game/particles.hpp"
 #include "game/trade.hpp"
@@ -47,6 +48,7 @@
 #include "sterrenvaarder/factions.hpp"
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
+#include "sterrenvaarder/population.hpp"
 #include "sterrenvaarder/resources.hpp"
 #include "sterrenvaarder/ships.hpp"
 #include "sterrenvaarder/png.hpp"
@@ -85,6 +87,7 @@ struct Args {
     std::string mission;    // --mission M01a: run that story mission's script
     std::string answer;     // screenshot runs: answer a mission offer (accept / reject)
     double launch = -1;     // screenshot runs: launch from the base at this sim time (s)
+    bool no_traffic = false;  // no random traffic
     std::string npc_pilot;  // empty: the pilot npcships.ini gives this ship, else a default
     bool fire = false;
     std::string dock;  // screenshot runs: autopilot to this object first
@@ -154,6 +157,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--mission") a.mission = next();
         else if (k == "--answer") a.answer = next();
         else if (k == "--launch") a.launch = std::stod(next());
+        else if (k == "--no-traffic") a.no_traffic = true;
         else if (k == "--npc-die") a.npc_die = std::stod(next());
         else if (k == "--fire") a.fire = true;
         else if (k == "--dock") a.dock = next();
@@ -304,6 +308,11 @@ struct NpcShip {
     std::size_t order_step = 0;
     float order_time = 0;  // seconds in the current step
     bool docked_away = false;
+    // Random traffic: the zone it belongs to (-1 = not traffic), its ship entry and job.
+    int pop_zone = -1;
+    const NpcShipArch* pop_arch = nullptr;
+    std::string pop_behavior;
+    bool pop_leader = false;
 };
 
 struct Explosion {
@@ -475,6 +484,7 @@ struct FlightSession {
     std::vector<NpcShip> npcs;
     game::CombatWorld world;
     int next_body_id = 1;  // combatant ids: 0 is the player
+    std::mt19937 traffic_rng{99};
 
     // Story mission: its script, the runner, and what the HUD shows from it.
     struct Mission {
@@ -494,6 +504,8 @@ struct FlightSession {
         struct Rtc { std::string path; MsnRtc def; bool repeatable = false, played = false; };
         std::vector<Rtc> rtcs;               // queued room cutscenes (AddRTC), played in rooms
         bool random_pop = true;              // RandomPop: random traffic on or off
+        struct PopBlock { DVec3 c; double r; };
+        std::vector<PopBlock> pop_blocks;    // RandomPopSphere ..., off: no new traffic there
         std::string name;                    // e.g. "M02"
         std::vector<MsnCommand> state_log;   // state actions so far, replayed when loading
         std::string checkpoint;              // the [Mission] save section at the last launch
@@ -504,6 +516,19 @@ struct FlightSession {
         bool seen = false;
     };
     std::unique_ptr<Mission> mission;
+    // Random traffic from the system's population zones.
+    struct Traffic {
+        bool loaded = false;
+        std::vector<NpcShipArch> archs;
+        FactionShips factions;
+        ShipClasses classes;
+        std::unordered_map<std::string, std::optional<EncounterDef>> encounters;  // lower-case name
+        std::optional<game::Population> pop;
+        std::string system;
+        int serial = 0;
+    };
+    Traffic traffic;
+    bool traffic_on = true;  // --no-traffic turns it off
     // Objects a mission puts into space ([MsnSolar] via SpawnSolar).
     struct MissionSolar {
         std::string nickname, name;
@@ -1330,6 +1355,160 @@ struct FlightSession {
         std::erase_if(flashes, [](const Flash& f) { return f.age > 0.15f; });
         update_effects(dt_d);
         update_mission(dt);
+        update_traffic(dt);
+    }
+
+    // ---- random traffic
+    void load_traffic_data() {
+        auto& t = traffic;
+        t.loaded = true;
+        auto read = [&](const char* p) { return vfs->exists(p) ? parse_ini(vfs->read(p)) : IniFile{}; };
+        try {
+            t.archs = parse_npc_ship_archs(read("missions/npcships.ini"));
+            t.factions = parse_faction_ships(read("missions/faction_prop.ini"));
+            t.classes = parse_ship_classes(read("missions/shipclasses.ini"));
+        } catch (const std::exception& e) {
+            SDL_Log("traffic data: %s", e.what());
+        }
+    }
+    const EncounterDef* encounter_def(std::string_view name) {
+        auto key = to_lower(name);
+        auto it = traffic.encounters.find(key);
+        if (it == traffic.encounters.end()) {
+            std::optional<EncounterDef> d;
+            std::string file = "missions/encounters/" + key + ".ini";
+            try {
+                if (vfs->exists(file)) d = parse_encounter(parse_ini(vfs->read(file)));
+            } catch (const std::exception& e) {
+                SDL_Log("encounter %s: %s", file.c_str(), e.what());
+            }
+            it = traffic.encounters.emplace(key, std::move(d)).first;
+        }
+        return it->second ? &*it->second : nullptr;
+    }
+    // A random point inside a zone (its centre when none is found).
+    DVec3 point_in_zone(const PopZone& z) {
+        std::uniform_real_distribution<double> u(-1, 1);
+        double ext = std::max({z.size[0], z.size[1], z.size[2]});
+        for (int i = 0; i < 30; ++i) {
+            DVec3 p{z.pos[0] + u(traffic_rng) * ext, z.pos[1] + u(traffic_rng) * ext, z.pos[2] + u(traffic_rng) * ext};
+            if (z.contains(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z))) return p;
+        }
+        return {z.pos[0], z.pos[1], z.pos[2]};
+    }
+    static MsnCommand order(std::string name, std::vector<std::string> args) {
+        MsnCommand c;
+        c.name = std::move(name);
+        for (auto& a : args) {
+            IniValue v;
+            v.s = a;
+            c.args.push_back(v);
+        }
+        return c;
+    }
+    // The next leg for a traffic leader: wander to another point of its zone, or for
+    // traders, to a base to dock at (and leave).
+    void give_traffic_orders(NpcShip& n) {
+        auto& zones = traffic.pop->zones();
+        if (n.pop_zone < 0 || n.pop_zone >= static_cast<int>(zones.size())) return;
+        auto& z = zones[n.pop_zone];
+        n.orders.clear();
+        n.order_step = 0;
+        n.order_time = 0;
+        if (iequals(n.pop_behavior, "trade") && rend) {
+            // The nearest dockable base.
+            const SystemObject* best = nullptr;
+            double bd = 0;
+            for (auto& o : rend->system().objects) {
+                if (o.base.empty()) continue;
+                double d = (DVec3{o.pos.x, o.pos.y, o.pos.z} - n.ship.pos).length();
+                if (!best || d < bd) { best = &o; bd = d; }
+            }
+            if (best && bd < 30000) {
+                n.orders.push_back(order("Dock", {best->nickname}));
+                return;
+            }
+        }
+        DVec3 p = point_in_zone(z);
+        char buf[3][32];
+        std::snprintf(buf[0], sizeof buf[0], "%.0f", p.x);
+        std::snprintf(buf[1], sizeof buf[1], "%.0f", p.y);
+        std::snprintf(buf[2], sizeof buf[2], "%.0f", p.z);
+        n.orders.push_back(order("GotoVec", {"goto_cruise", buf[0], buf[1], buf[2], "300"}));
+    }
+    void update_traffic(float dt) {
+        if (!vfs || !universe || !rend || !db) return;
+        auto& t = traffic;
+        const std::string& sys = rend->system().nickname;
+        if (t.system != sys) {
+            if (!t.loaded) load_traffic_data();
+            t.system = sys;
+            t.pop.reset();
+            std::string file = universe->system_file(sys);
+            try {
+                if (!file.empty())
+                    t.pop.emplace(parse_pop_zones(parse_ini(vfs->read(file))), t.archs, t.factions, t.classes,
+                                  [this](std::string_view n) { return encounter_def(n); }, 1234u + static_cast<std::uint32_t>(sys.size()));
+            } catch (const std::exception& e) {
+                SDL_Log("traffic zones of %s: %s", sys.c_str(), e.what());
+            }
+        }
+        if (!t.pop) return;
+        auto& pop = *t.pop;
+        // Gone: destroyed, docked, or left far behind.
+        for (auto& n : npcs) {
+            if (n.pop_zone < 0) continue;
+            bool far = (n.ship.pos - ship.pos).length() > 14000;
+            if (!n.body.alive() || far) {
+                pop.ship_gone(static_cast<std::size_t>(n.pop_zone), n.pop_arch);
+                n.pop_zone = -1;
+                if (far) {
+                    n.mesh = {};
+                    n.body.hull = 0;
+                    n.docked_away = true;  // just out of the scene, no explosion
+                }
+            } else if (n.pop_leader && n.order_step >= n.orders.size()) {
+                give_traffic_orders(n);
+            }
+        }
+        // Traffic that is gone leaves the list (its explosion and wreckage live on their own).
+        std::erase_if(npcs, [](const NpcShip& n) {
+            return n.pop_zone < 0 && !n.body.alive() && !n.mesh && n.mission_name.rfind("~traffic", 0) == 0;
+        });
+        pop.set_enabled(traffic_on && (!mission || mission->random_pop));
+        if (mission)
+            for (auto& b : mission->pop_blocks) pop.block_sphere(b.c, b.r, true);
+        if (docked()) return;
+        for (auto& s : pop.update(dt, ship.pos)) {
+            std::string leader;
+            std::uniform_real_distribution<float> yaw(0, 6.2831853f);
+            Quat q = Quat::axis_angle({0, 1, 0}, yaw(traffic_rng));
+            for (std::size_t i = 0; i < s.ships.size(); ++i) {
+                const NpcShipArch* a = s.ships[i];
+                const ShipArchetype* sa = db->ship(a->ship_archetype);
+                if (!sa) continue;
+                const Loadout* lo = db->loadout(a->loadout);
+                const Pilot* pilot = pilots && !a->pilot.empty() ? pilots->pilot(a->pilot) : nullptr;
+                bool hostile = factions && attitude_of(player.rep_with(s.faction)) == Attitude::Hostile;
+                std::string name = a->nickname;
+                if (factions && strings)
+                    if (auto* f = factions->faction(s.faction)) name = strings->name(f->ids_short_name ? f->ids_short_name : f->ids_name, name);
+                Vec3 off{-60.f * static_cast<float>(i), 0, 60.f * static_cast<float>(i)};
+                DVec3 pos = s.pos + game::to_d(q.rotate(off));
+                auto& n = spawn_npc(*db, *vfs, *rend, *sa, lo, pilot, name, pos, q, hostile);
+                n.pop_zone = static_cast<int>(s.zone);
+                n.pop_arch = a;
+                n.pop_behavior = s.behavior;
+                n.mission_name = "~traffic" + std::to_string(++t.serial);
+                if (leader.empty()) {
+                    leader = n.mission_name;
+                    n.pop_leader = true;
+                    give_traffic_orders(n);
+                } else {
+                    n.orders = {order("Follow", {leader, "0", std::to_string(off.x), "0", std::to_string(off.z)})};
+                }
+            }
+        }
     }
 
     // ---- story missions
@@ -1461,6 +1640,12 @@ struct FlightSession {
             m.rtcs.push_back(std::move(rtc));
         } else if (iequals(a.name, "RemoveRTC")) {
             std::erase_if(m.rtcs, [&](const Mission::Rtc& r) { return iequals(r.path, a.arg(0)); });
+        } else if (iequals(a.name, "RandomPopSphere")) {
+            // x, y, z, radius, on | off
+            DVec3 c{a.num(0), a.num(1), a.num(2)};
+            double r = a.num(3);
+            std::erase_if(m.pop_blocks, [&](const Mission::PopBlock& b) { return (b.c - c).length() < 1 && std::abs(b.r - r) < 1; });
+            if (iequals(a.arg(4), "off")) m.pop_blocks.push_back({c, r});
         } else if (iequals(a.name, "RandomPop")) {
             m.random_pop = !iequals(a.arg(0), "false");
         } else {
@@ -2329,6 +2514,7 @@ int run(const Args& args) {
             fs->petal = &petal;
             fs->shipdb = ships.get();
             fs->pilots = &pilots;
+            fs->traffic_on = !args.no_traffic;
             auto fx_files = files.effects;
             fx_files.insert(fx_files.end(), files.explosions.begin(), files.explosions.end());
             fx_db = std::make_unique<EffectDb>(vfs, fx_files);
@@ -2522,6 +2708,17 @@ int run(const Args& args) {
                                     t.conditions.empty() ? "-" : t.conditions[0].name.c_str(), t.system.c_str());
                     SDL_Log("mission: %d of %zu triggers fired, %zu ships, objective '%s', not handled yet: %s", fired,
                             m.script.triggers.size(), fs->npcs.size(), m.objective.c_str(), un.c_str());
+                }
+                {
+                    int live = 0, gone = 0;
+                    std::map<std::string, int> names;
+                    for (auto& n : fs->npcs)
+                        if (n.mission_name.rfind("~traffic", 0) == 0) {
+                            if (n.body.alive()) { ++live; ++names[n.name]; } else ++gone;
+                        }
+                    std::string list;
+                    for (auto& [k, v] : names) list += k + " x" + std::to_string(v) + ", ";
+                    if (live || gone) SDL_Log("traffic: %d ships around, %d gone: %s", live, gone, list.c_str());
                 }
                 if (!fs->npcs.empty()) SDL_Log("player hull %.0f / %.0f, shield %.0f; %d shield hits, %zu wreck parts", fs->body.hull, fs->body.max_hull, fs->body.shield, fs->shield_hits, fs->wrecks.size());
                 for (auto& n : fs->npcs)

@@ -33,6 +33,7 @@ add_library(sterrenvaarder_data
   src/sterrenvaarder/postfx.cpp
   src/sterrenvaarder/fonts.cpp
   src/sterrenvaarder/mission.cpp
+  src/sterrenvaarder/population.cpp
   src/sterrenvaarder/lua32.cpp
   src/sterrenvaarder/thn.cpp
 )
@@ -40,7 +41,7 @@ target_include_directories(sterrenvaarder_data PUBLIC src)
 target_include_directories(sterrenvaarder_data PRIVATE third_party)
 
 # Game logic without graphics (flight model); unit-tested headless.
-add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp src/game/trade.cpp src/game/ai.cpp src/game/particles.cpp src/game/mission.cpp)
+add_library(sterrenvaarder_game src/game/flight.cpp src/game/combat.cpp src/game/navigation.cpp src/game/trade.cpp src/game/ai.cpp src/game/particles.cpp src/game/mission.cpp src/game/population.cpp)
 target_include_directories(sterrenvaarder_game PUBLIC src)
 target_link_libraries(sterrenvaarder_game PUBLIC sterrenvaarder_data)
 
