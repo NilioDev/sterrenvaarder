@@ -9,9 +9,11 @@ const SystemObject* find_object(const StarSystem& sys, std::string_view n) {
     return nullptr;
 }
 
-std::optional<LaneTrip> LaneTrip::start(const StarSystem& sys, const SystemObject& entry, float speed) {
+std::optional<LaneTrip> LaneTrip::start(const StarSystem& sys, const SystemObject& entry, float speed, std::string_view toward) {
     if (!entry.is_tradelane()) return std::nullopt;
     bool forward = !entry.next_ring.empty();
+    if (!toward.empty() && iequals(entry.prev_ring, toward)) forward = false;
+    else if (!toward.empty() && iequals(entry.next_ring, toward)) forward = true;
     LaneTrip t;
     t.speed_ = speed;
     const SystemObject* cur = &entry;

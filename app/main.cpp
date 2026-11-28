@@ -357,6 +357,7 @@ struct NpcShip {
     std::size_t order_step = 0;
     float order_time = 0;  // seconds in the current step
     bool docked_away = false;
+    std::optional<game::LaneTrip> lane;  // riding a trade lane (Dock order on a ring)
     float lifetime = -1;  // mission SetLifeTime: seconds left before it leaves the scene (< 0: no limit)
     // Random traffic: the zone it belongs to (-1 = not traffic), its ship entry and job.
     int pop_zone = -1;
@@ -908,6 +909,7 @@ struct FlightSession {
     // Navigation: autopilot approach, trade lanes, docking and jumps.
     enum class Nav { Free, Approach, Lane, Docked, Formation };
     int formation_leader = -1;  // Nav::Formation: body id of the ship the player flies beside
+    int lane_rejoin = -1;       // riding a lane with the formation: the leader to fly beside again after it
     Nav nav = Nav::Free;
     std::string nav_target;            // object nickname
     std::optional<game::LaneTrip> lane;
@@ -1590,7 +1592,20 @@ struct FlightSession {
         input.steer = {};
         firing = false;
         autoplay_doing.clear();
-        if (docked() || space_scene || nav != Nav::Free) return;
+        if (docked() || space_scene) return;
+        // The mission waits for the player to dock somewhere close by: leave any formation and dock.
+        if (mission && mission->runner && (nav == Nav::Free || nav == Nav::Formation))
+            for (auto& c : mission->runner->waiting_on("PlayerManeuver"))
+                if (iequals(c.arg(0), "Dock") && !mission->maneuver_off.count("dock"))
+                    if (auto* o = object_named(sys, c.arg(1)); o && (DVec3{o->pos.x, o->pos.y, o->pos.z} - ship.pos).length() < 3000) {
+                        if (nav == Nav::Formation) formation_request();
+                        contacts.push_back({o->nickname, {}, 0, true});
+                        target = static_cast<int>(contacts.size() - 1);
+                        dock_request(sys);
+                        autoplay_doing = "docks at " + o->nickname;
+                        return;
+                    }
+        if (nav != Nav::Free) return;
         const NpcShip* foe = nullptr;
         double best = 3000;
         for (auto& n : npcs)
@@ -1699,6 +1714,11 @@ struct FlightSession {
                 ship.vel = game::to_d(ship.orient.forward()) * 80.0;
                 lane.reset();
                 nav = Nav::Free;
+                if (lane_rejoin >= 0) {
+                    nav = Nav::Formation;
+                    formation_leader = lane_rejoin;
+                    lane_rejoin = -1;
+                }
                 input.throttle = 1.f;
                 return false;
             }
@@ -1985,6 +2005,46 @@ struct FlightSession {
         else { n.input = {}; n.input.throttle = 0.f; }
     }
 
+    // A ship takes a trade lane; the ships flying in formation with it, and the player when
+    // in its formation, ride along. Reported as TLEntered = ship, ring, next ring.
+    void npc_enter_lane(NpcShip& n, const SystemObject& ring, const std::string& toward) {
+        auto trip = game::LaneTrip::start(rend->system(), ring, 2000.f, toward);
+        if (!trip) return;
+        auto enter = [&](NpcShip& s) {
+            s.lane = trip;
+            if (mission && mission->runner && !s.mission_name.empty())
+                mission->runner->event({game::MissionEvent::Type::TLEntered, s.mission_name, trip->ring_names()[0], trip->ring_names()[1]});
+        };
+        enter(n);
+        for (auto& f : npcs) {
+            if (&f == &n || !f.body.alive() || f.lane || f.order_step >= f.orders.size()) continue;
+            auto& step = f.orders[f.order_step];
+            if (iequals(step.name, "Follow") && iequals(step.arg(0), n.mission_name) && (f.ship.pos - n.ship.pos).length() < 2000) enter(f);
+        }
+        if (nav == Nav::Formation && formation_leader == n.body.id) {
+            lane = trip;
+            nav = Nav::Lane;
+            if (mission && mission->runner)
+                mission->runner->event({game::MissionEvent::Type::TLEntered, "Player", trip->ring_names()[0], trip->ring_names()[1]});
+            lane_rejoin = n.body.id;
+        }
+    }
+    // Moves a ship along its lane; false once it has left it (TLExited = ship, last ring).
+    bool npc_ride_lane(NpcShip& n, double dt) {
+        if (!n.lane) return false;
+        if (!n.lane->update(dt)) {
+            if (mission && mission->runner && !n.mission_name.empty())
+                mission->runner->event({game::MissionEvent::Type::TLExited, n.mission_name, n.lane->ring_names().back(), ""});
+            n.ship.vel = game::to_d(n.lane->direction()) * 80.0;
+            n.lane.reset();
+            return false;
+        }
+        n.ship.pos = n.lane->position();
+        n.ship.orient = Quat::look(n.lane->direction());
+        n.ship.vel = game::to_d(n.lane->direction()) * n.lane->speed();
+        return true;
+    }
+
     // A mission ship that leaves the scene (docks, its time runs out) no longer counts for
     // "every ship of the label destroyed".
     void npc_left(const NpcShip& n) {
@@ -2040,6 +2100,11 @@ struct FlightSession {
         for (auto& n : npcs) {
             if (!n.body.alive()) continue;
             world.update_guns(n.guns, dt);
+            if (n.lane && npc_ride_lane(n, dt_d)) {
+                n.body.pos = n.ship.pos;
+                n.body.update(dt);
+                continue;
+            }
             if (n.held_off) hold_off(n);
             else if (!n.orders.empty() && npc_follow_orders(n, dt)) {}
             else if (auto foe = npc_foe(n)) {
@@ -2999,6 +3064,15 @@ struct FlightSession {
                 return true;
             }
             if (iequals(k, "Dock")) {
+                // Dock = ring, next ring: take the trade lane that way, with its formation.
+                if (rend)
+                    if (auto* ring = game::find_object(rend->system(), o.arg(0)); ring && ring->is_tradelane()) {
+                        DVec3 rp{ring->pos.x, ring->pos.y, ring->pos.z};
+                        if (!steer_to(n, rp, 250, 1.f, true)) return true;
+                        next();
+                        npc_enter_lane(n, *ring, o.arg(1));
+                        return true;
+                    }
                 // Fly to the dock target and leave the scene there.
                 auto p = where(o.arg(0));
                 if (!p || steer_to(n, *p, 300, 1.f, true)) {
