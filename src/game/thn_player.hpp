@@ -26,6 +26,14 @@ public:
     float duration() const { return duration_; }
     bool done(float time) const { return time >= duration_; }
 
+    // The view through the active camera: false before the first cut or for an unknown camera.
+    struct View {
+        Vec3 pos, forward, up;
+        float fov_y = 0;      // radians, from the camera's horizontal view and aspect
+        float near_plane = 0.2f;
+    };
+    bool view(View& out) const;
+
 private:
     const ThnScript& script_;
     std::unordered_map<std::string, State> start_, now_;  // lower-case entity name

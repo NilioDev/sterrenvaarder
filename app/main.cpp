@@ -49,6 +49,7 @@
 #include "sterrenvaarder/pilots.hpp"
 #include "sterrenvaarder/thn.hpp"
 #include "game/skin.hpp"
+#include "game/thn_player.hpp"
 #include "sterrenvaarder/anm.hpp"
 #include "sterrenvaarder/characters.hpp"
 #include "sterrenvaarder/dfm.hpp"
@@ -413,7 +414,50 @@ struct RoomView {
     std::vector<Figure> figures;
     CharacterData* chars = nullptr;
     int figure_serial = 0;
-    double last_time = -1;  // instance names for the renderer
+    double last_time = -1;
+    // A cutscene playing in this room: it takes over the camera until it ends.
+    std::string pending_scene;
+    std::unique_ptr<ThnScript> scene;
+    std::unique_ptr<game::ThnPlayer> scene_player;
+    float scene_time = 0;
+    Camera room_cam;  // the room's own camera, back when the scene ends
+    int scenes_played = 0;
+
+    void start_scene(const Vfs& vfs) {
+        std::string path = pending_scene;
+        pending_scene.clear();
+        if (path.empty() || !vfs.exists(path)) return;
+        try {
+            scene = std::make_unique<ThnScript>(ThnScript::parse(vfs.read(path)));
+            scene_player = std::make_unique<game::ThnPlayer>(*scene);
+            scene_time = 0;
+            room_cam = cam;
+            SDL_Log("room scene: %zu entities, %zu moves, %zu cuts, %.1f s", scene->entities.size(), scene->moves.size(),
+                    scene->cuts.size(), scene_player->duration());
+        } catch (const std::exception& e) {
+            SDL_Log("room scene %s: %s", path.c_str(), e.what());
+        }
+    }
+
+    void update_scene(float dt) {
+        if (!scene_player) return;
+        scene_time += dt;
+        if (scene_player->done(scene_time)) {
+            scene_player.reset();
+            scene.reset();
+            cam = room_cam;
+            ++scenes_played;
+            SDL_Log("room scene ended");
+            return;
+        }
+        scene_player->seek(scene_time);
+        game::ThnPlayer::View v;
+        if (!scene_player->view(v)) return;
+        cam.pos = {v.pos.x, v.pos.y, v.pos.z};
+        cam.set_basis(v.forward, v.up);
+        cam.fov_y = v.fov_y;
+        cam.near_plane = v.near_plane;
+    }  // instance names for the renderer
     bool active() const { return !models.empty(); }
 
     void clear() {
@@ -2131,11 +2175,11 @@ struct FlightSession {
             m.was_docked = docked();
             m.last_room = room;
             m.last_system = sys;
-            // Cutscenes queued for this room play on entry (the scene itself comes later;
-            // for now the entry is logged and the scene counts as played).
+            // Cutscenes queued for this room play on entry: the room's view plays the scene.
             for (auto& r : m.rtcs)
                 if (!r.played && docked() && iequals(r.def.base, player.base) && iequals(r.def.room, room) && !r.def.is_offer()) {
-                    SDL_Log("mission: cutscene %s in %s", r.def.action.c_str(), room.c_str());
+                    SDL_Log("mission: cutscene in %s", room.c_str());
+                    this->room.pending_scene = r.def.action;
                     r.played = true;
                 }
             if (docked()) m.last_base = player.base;
@@ -2626,6 +2670,8 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
         fs->room.last_time = time;
         fs->room.update_figures(renderer, dt);
+        if (!fs->room.pending_scene.empty() && fs->room.active()) fs->room.start_scene(*fs->vfs);
+        fs->room.update_scene(dt);
     }
     bool in_room = fs && fs->docked() && fs->room.active();
     if (in_room) {

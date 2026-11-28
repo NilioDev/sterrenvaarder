@@ -876,6 +876,13 @@ static void test_thn_player() {
     p.seek(2.5f);
     CHECK(std::abs(p.state("box")->pos.x - 10) < 1e-4f && std::abs(p.state("box")->orient[2] - 1) < 1e-3f);
     CHECK(std::abs(p.state("CamB")->fovh - 30) < 1e-3f && !p.done(2.5f) && p.done(3));
+    // The view through camera B: it looks down its -z, with a vertical view from its
+    // 30 degree horizontal view at the default 4:3.
+    game::ThnPlayer::View v;
+    CHECK(p.view(v) && std::abs(v.forward.z + 1) < 1e-4f && std::abs(v.up.y - 1) < 1e-4f);
+    CHECK(std::abs(v.fov_y - 2 * std::atan(std::tan(15 * 3.14159265f / 180) * 0.75f)) < 1e-4f);
+    p.seek(0.5f);
+    CHECK(!p.view(v));  // camera A is not in the scene
 }
 
 static void test_population() {

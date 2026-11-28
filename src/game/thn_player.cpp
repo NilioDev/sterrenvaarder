@@ -103,6 +103,21 @@ void ThnPlayer::seek(float t) {
         }
 }
 
+bool ThnPlayer::view(View& out) const {
+    if (camera_.empty()) return false;
+    const ThnEntity* e = script_.entity(camera_);
+    const State* st = state(camera_);
+    if (!e || !st) return false;
+    out.pos = st->pos;
+    out.forward = {-st->orient[6], -st->orient[7], -st->orient[8]};  // entities look down -z
+    out.up = {st->orient[3], st->orient[4], st->orient[5]};
+    float aspect = e->hvaspect > 0 ? e->hvaspect : 4.f / 3.f;
+    float fovh = st->fovh > 0 ? st->fovh : 60.f;
+    out.fov_y = 2.f * std::atan(std::tan(fovh * 3.14159265f / 360.f) / aspect);
+    if (e->near_plane > 0) out.near_plane = e->near_plane;
+    return true;
+}
+
 const ThnPlayer::State* ThnPlayer::state(std::string_view entity) const {
     auto it = now_.find(to_lower(entity));
     return it == now_.end() ? nullptr : &it->second;
