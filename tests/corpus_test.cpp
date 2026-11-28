@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
     };
     std::size_t msn_triggers = 0, msn_dangling = 0;
     std::size_t dfm_tris = 0, dfm_bones = 0, dfm_bad_bones = 0, anm_scripts = 0;
+    std::vector<std::string> scene_costumes, scene_anims;  // what scene characters wear and play
     std::size_t thn_views = 0, thn_moves = 0, thn_cuts = 0, thn_bad_cuts = 0, thn_bad_moves = 0;
     std::size_t dfm_posed = 0, dfm_pose_off = 0;  // bones the joints reach, and those that land elsewhere than stored
     float dfm_pose_worst = 0;
@@ -96,6 +97,9 @@ int main(int argc, char** argv) {
                     thn_views += player.view(v) && std::isfinite(v.fov_y) && v.fov_y > 0;
                 }
                 for (auto& m : scene.moves) thn_bad_moves += !scene.entity(m.target);
+                for (auto& e : scene.entities)
+                    if (e.type == "DEFORMABLE") scene_costumes.push_back(e.template_name);
+                for (auto& m : scene.motions) scene_anims.push_back(m.animation);
             } else if (path.ends_with(".ale")) {
                 kind = "ale";
                 auto lib = AleLibrary::parse(data);
@@ -259,6 +263,13 @@ int main(int argc, char** argv) {
                         root_sum += a->root_height;
                         gap_worst = std::max(gap_worst, std::abs(double(lo) + a->root_height));
                     }
+            // Scene characters: their costume should give a body, their motions an animation.
+            std::size_t dressed = 0, played = 0;
+            for (auto& c : scene_costumes)
+                if (auto* cos = cp.costume(c)) dressed += cp.part(cos->body) != nullptr;
+            for (auto& a : scene_anims) played += anims.script(a) != nullptr;
+            std::printf("scene characters: %zu of %zu dressed, %zu of %zu motions find their animation\n", dressed,
+                        scene_costumes.size(), played, scene_anims.size());
             if (posed)
                 std::printf("fixed characters idle: %zu posed, %zu without idle; feet %.2f below root on average, root height %.2f, worst gap %.2f\n",
                             posed, no_idle, -feet_sum / posed, root_sum / posed, gap_worst);

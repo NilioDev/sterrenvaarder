@@ -419,9 +419,11 @@ struct RoomView {
     std::string pending_scene;
     std::unique_ptr<ThnScript> scene;
     std::unique_ptr<game::ThnPlayer> scene_player;
+    std::vector<std::pair<std::string, Figure>> scene_figures;  // scene entity -> its character
     float scene_time = 0;
     Camera room_cam;  // the room's own camera, back when the scene ends
     int scenes_played = 0;
+    Renderer* renderer_for_scene = nullptr;
 
     void start_scene(const Vfs& vfs) {
         std::string path = pending_scene;
@@ -432,8 +434,19 @@ struct RoomView {
             scene_player = std::make_unique<game::ThnPlayer>(*scene);
             scene_time = 0;
             room_cam = cam;
-            SDL_Log("room scene: %zu entities, %zu moves, %zu cuts, %.1f s", scene->entities.size(), scene->moves.size(),
-                    scene->cuts.size(), scene_player->duration());
+            scene_figures.clear();
+            if (chars && renderer_for_scene) {
+                chars->load(vfs);
+                for (auto& e : scene->entities) {
+                    if (e.type != "DEFORMABLE") continue;
+                    const Costume* c = chars->parts.costume(e.template_name);
+                    Figure f;
+                    if (c && dress(vfs, *renderer_for_scene, f, c->body, c->head, c->left_hand, c->right_hand))
+                        scene_figures.emplace_back(e.name, std::move(f));
+                }
+            }
+            SDL_Log("room scene: %zu entities, %zu moves, %zu cuts, %zu characters, %.1f s", scene->entities.size(),
+                    scene->moves.size(), scene->cuts.size(), scene_figures.size(), scene_player->duration());
         } catch (const std::exception& e) {
             SDL_Log("room scene %s: %s", path.c_str(), e.what());
         }
@@ -445,12 +458,30 @@ struct RoomView {
         if (scene_player->done(scene_time)) {
             scene_player.reset();
             scene.reset();
+            scene_figures.clear();
             cam = room_cam;
             ++scenes_played;
             SDL_Log("room scene ended");
             return;
         }
         scene_player->seek(scene_time);
+        // Characters: where the scene has them, playing the motion they last started.
+        for (auto& [name, f] : scene_figures) {
+            if (auto* st = scene_player->state(name)) {
+                f.spot.r = st->orient;
+                f.spot.t = st->pos;
+            }
+            const ThnMotion* now = nullptr;
+            for (auto& m : scene->motions)
+                if (iequals(m.target, name) && m.time <= scene_time && (!now || m.time >= now->time)) now = &m;
+            f.anim = now ? chars->anims.script(now->animation) : nullptr;
+            if (f.anim) {
+                float t = now->start_time + (scene_time - now->time) * (now->time_scale > 0 ? now->time_scale : 1);
+                float len = std::max(f.anim->length(), 1e-3f);
+                f.time = now->loop ? std::fmod(t, len) : std::min(t, len);
+            }
+            if (renderer_for_scene) renderer_for_scene->pose_character(f.body.mesh, f.anim, f.time);
+        }
         game::ThnPlayer::View v;
         if (!scene_player->view(v)) return;
         cam.pos = {v.pos.x, v.pos.y, v.pos.z};
@@ -567,6 +598,29 @@ struct RoomView {
         if (chars && have_cam) place_fixtures(vfs, r, markers);
     }
 
+    // Gives a figure its body, head and hands (body part nicknames); false without a body.
+    bool dress(const Vfs& vfs, Renderer& r, Figure& f, const std::string& body, const std::string& head,
+               const std::string& left, const std::string& right) {
+        auto part = [&](const std::string& nick, const char* hardpoint) {
+            Figure::Part p;
+            std::string path;
+            p.model = nick.empty() ? nullptr : chars->mesh(vfs, nick, &path);
+            if (!p.model) return p;
+            try {
+                p.mesh = r.load_character(path, {}, "fig" + std::to_string(++figure_serial));
+            } catch (const std::exception& e) {
+                SDL_Log("character %s: %s", path.c_str(), e.what());
+            }
+            p.hardpoint = hardpoint;
+            return p;
+        };
+        f.body = part(body, "");
+        if (!f.body.mesh) return false;
+        for (auto [nick, hp] : {std::pair{&head, "hp_neck"}, std::pair{&left, "hp_left b"}, std::pair{&right, "hp_right b"}})
+            if (auto p = part(*nick, hp); p.mesh) f.parts.push_back(std::move(p));
+        return true;
+    }
+
     // The fixed characters of this room, each on its marker with its idle animation.
     void place_fixtures(const Vfs& vfs, Renderer& r, const std::vector<Pad>& markers) {
         chars->load(vfs);
@@ -582,24 +636,7 @@ struct RoomView {
             Figure f;
             f.spot.r = spot->orient;
             f.spot.t = spot->pos;
-            auto part = [&](const std::string& nick, const char* hardpoint) {
-                Figure::Part p;
-                std::string path;
-                p.model = nick.empty() ? nullptr : chars->mesh(vfs, nick, &path);
-                if (!p.model) return p;
-                try {
-                    p.mesh = r.load_character(path, {}, "fig" + std::to_string(++figure_serial));
-                } catch (const std::exception& e) {
-                    SDL_Log("character %s: %s", path.c_str(), e.what());
-                }
-                p.hardpoint = hardpoint;
-                return p;
-            };
-            f.body = part(npc->body, "");
-            if (!f.body.mesh) continue;
-            for (auto [nick, hp] : {std::pair{&npc->head, "hp_neck"}, std::pair{&npc->left_hand, "hp_left b"},
-                                    std::pair{&npc->right_hand, "hp_right b"}})
-                if (auto p = part(*nick, hp); p.mesh) f.parts.push_back(std::move(p));
+            if (!dress(vfs, r, f, npc->body, npc->head, npc->left_hand, npc->right_hand)) continue;
             // The idle script's looping motion, else its first.
             if (!fx.fidget.empty() && vfs.exists(fx.fidget)) {
                 try {
@@ -662,7 +699,11 @@ struct RoomView {
         auto put = [&](Renderer::ModelHandle h, const game::Xform& x) {
             r.draw_model(h, {x.t.x, x.t.y, x.t.z}, Mat4::from_rows3(x.r), {});
         };
-        for (auto& f : figures) {
+        std::vector<const Figure*> all;
+        for (auto& f : figures) all.push_back(&f);
+        for (auto& [n, f] : scene_figures) all.push_back(&f);
+        for (const Figure* fp : all) {
+            const Figure& f = *fp;
             // The idle animation says how high the root rides above the spot on the floor.
             game::Xform lift;
             lift.t = {0, f.anim ? f.anim->root_height : 0.f, 0};
@@ -2670,6 +2711,7 @@ void render_frame(Gpu& gpu, Renderer& renderer, SDL_GPUCommandBuffer* cmd, SDL_G
         float dt = fs->room.last_time >= 0 ? static_cast<float>(std::clamp(time - fs->room.last_time, 0.0, 0.25)) : 0.f;
         fs->room.last_time = time;
         fs->room.update_figures(renderer, dt);
+        fs->room.renderer_for_scene = &renderer;
         if (!fs->room.pending_scene.empty() && fs->room.active()) fs->room.start_scene(*fs->vfs);
         fs->room.update_scene(dt);
     }
